@@ -1,0 +1,18 @@
+{
+  "name": "user-attribute-change-processor",
+  "version": "1.0.0",
+  "description": "Lambda function to process user attribute changes and update group memberships",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.400.0",
+    "@aws-sdk/lib-dynamodb": "^3.400.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.119",
+    "@types/node": "^20.5.0",
+    "typescript": "^5.1.6"
+  }
+}

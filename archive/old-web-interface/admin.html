@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard - Media Workstation Management</title>
+    <script src="https://unpkg.com/amazon-cognito-identity-js@6.3.1/dist/amazon-cognito-identity.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+        }
+
+        .btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background 0.3s;
+        }
+
+        .btn:hover {
+            background: #5a67d8;
+        }
+
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 14px;
+        }
+
+        .btn-danger {
+            background: #e53e3e;
+        }
+
+        .btn-danger:hover {
+            background: #c53030;
+        }
+
+        .btn-success {
+            background: #48bb78;
+        }
+
+        .btn-success:hover {
+            background: #38a169;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            font-size: 16px;
+            color: #666;
+            transition: all 0.3s;
+        }
+
+        .tab.active {
+            color: #667eea;
+            border-bottom: 2px solid #667eea;
+            margin-bottom: -2px;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        th {
+            background: #f7fafc;
+            font-weight: 600;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+
+        .status-active, .status-confirmed {
+            background: #48bb78;
+            color: white;
+        }
+
+        .status-suspended, .status-force_change_password {
+            background: #ed8936;
+            color: white;
+        }
+
+        .status-admin {
+            background: #667eea;
+            color: white;
+        }
+
+        .status-running {
+            background: #48bb78;
+            color: white;
+        }
+
+        .status-stopped {
+            background: #ed8936;
+            color: white;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.show {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            width: 90%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e2e8f0;
+            border-radius: 8px;
+            font-size: 16px;
+        }
+
+        .form-group input:focus, .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(102,126,234,.3);
+            border-radius: 50%;
+            border-top-color: #667eea;
+            animation: spin 1s ease-in-out infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        .error {
+            color: #e53e3e;
+            background: #fed7d7;
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+
+        .success {
+            color: #38a169;
+            background: #c6f6d5;
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 12px;
+            padding: 25px;
+            text-align: center;
+        }
+
+        .stat-number {
+            font-size: 32px;
+            font-weight: bold;
+            display: block;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            opacity: 0.9;
+            margin-top: 5px;
+        }
+
+        .checkbox-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <div class="logo">👑 Admin Dashboard</div>
+            <div class="user-info">
+                <span id="adminName"></span>
+                <button class="btn" onclick="window.location.href='/'">← Back to Main</button>
+                <button class="btn btn-danger" onclick="logout()">Logout</button>
+            </div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <span class="stat-number" id="totalUsers">0</span>
+                <div class="stat-label">Total Users</div>
+            </div>
+            <div class="stat-card">
+                <span class="stat-number" id="activeUsers">0</span>
+                <div class="stat-label">Active Users</div>
+            </div>
+            <div class="stat-card">
+                <span class="stat-number" id="adminUsers">0</span>
+                <div class="stat-label">Admin Users</div>
+            </div>
+            <div class="stat-card">
+                <span class="stat-number" id="totalWorkstations">0</span>
+                <div class="stat-label">Total Workstations</div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="card">
+            <div class="tabs">
+                <button class="tab active" onclick="switchTab('users')">Users</button>
+                <button class="tab" onclick="switchTab('groups')">Groups</button>
+                <button class="tab" onclick="switchTab('workstations')">All Workstations</button>
+            </div>
+
+            <!-- Users Tab -->
+            <div id="users-tab" class="tab-content active">
+                <div style="margin-bottom: 20px;">
+                    <button class="btn" onclick="showAddUserModal()">+ Add User</button>
+                    <button class="btn" style="margin-left: 10px;" onclick="loadUsers()">🔄 Refresh</button>
+                </div>
+                <div id="usersTable">
+                    <div style="text-align: center; padding: 20px;"><div class="loading"></div></div>
+                </div>
+            </div>
+
+            <!-- Groups Tab -->
+            <div id="groups-tab" class="tab-content">
+                <div style="margin-bottom: 20px;">
+                    <button class="btn" onclick="loadGroups()">🔄 Refresh</button>
+                </div>
+                <div id="groupsTable">
+                    <div style="text-align: center; padding: 20px;"><div class="loading"></div></div>
+                </div>
+            </div>
+
+            <!-- All Workstations Tab -->
+            <div id="workstations-tab" class="tab-content">
+                <div style="margin-bottom: 20px;">
+                    <button class="btn" onclick="loadAllWorkstations()">🔄 Refresh</button>
+                </div>
+                <div id="allWorkstationsTable">
+                    <div style="text-align: center; padding: 20px;"><div class="loading"></div></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add User Modal -->
+    <div id="addUserModal" class="modal">
+        <div class="modal-content">
+            <h3 style="margin-bottom: 20px;">Add New User</h3>
+            <form id="addUserForm" onsubmit="return handleAddUser(event)">
+                <div class="form-group">
+                    <label>Email *</label>
+                    <input type="email" id="newUserEmail" required>
+                </div>
+                <div class="form-group">
+                    <label>Temporary Password *</label>
+                    <input type="password" id="newUserPassword" required placeholder="Min 8 chars, uppercase, lowercase, number">
+                </div>
+                <div class="form-group">
+                    <label>First Name</label>
+                    <input type="text" id="newUserFirstName">
+                </div>
+                <div class="form-group">
+                    <label>Last Name</label>
+                    <input type="text" id="newUserLastName">
+                </div>
+                <div class="form-group">
+                    <label>Groups</label>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="addToAdminGroup" value="workstation-admin">
+                        <label for="addToAdminGroup" style="margin: 0;">Admin</label>
+                        <input type="checkbox" id="addToUserGroup" value="workstation-user" checked>
+                        <label for="addToUserGroup" style="margin: 0;">User</label>
+                    </div>
+                </div>
+                <div style="text-align: right; margin-top: 20px;">
+                    <button type="button" class="btn" onclick="closeAddUserModal()" style="background: #666; margin-right: 10px;">Cancel</button>
+                    <button type="submit" class="btn">Create User</button>
+                </div>
+                <div id="addUserError" class="error hidden"></div>
+                <div id="addUserSuccess" class="success hidden"></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Manage User Groups Modal -->
+    <div id="manageGroupsModal" class="modal">
+        <div class="modal-content">
+            <h3 style="margin-bottom: 20px;">Manage Groups for <span id="manageGroupsUsername"></span></h3>
+            <div id="groupCheckboxes"></div>
+            <div style="text-align: right; margin-top: 20px;">
+                <button type="button" class="btn" onclick="closeManageGroupsModal()" style="background: #666; margin-right: 10px;">Cancel</button>
+                <button type="button" class="btn" onclick="saveUserGroups()">Save Changes</button>
+            </div>
+            <div id="manageGroupsError" class="error hidden"></div>
+            <div id="manageGroupsSuccess" class="success hidden"></div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const API_BASE_URL = 'https://39u8v8hgo8.execute-api.us-west-2.amazonaws.com/api';
+        const AWS_REGION = 'us-west-2';
+        const USER_POOL_ID = 'us-west-2_9cSucj3GX';
+        const CLIENT_ID = '3e46qh33pbdpduk442ilo9fvra';
+
+        // AWS Cognito setup
+        const poolData = {
+            UserPoolId: USER_POOL_ID,
+            ClientId: CLIENT_ID
+        };
+        const userPool = new AmazonCognitoIdentity.CognitoUserPool(poolData);
+        let currentUser = null;
+        let authToken = null;
+        let isAdmin = false;
+        let allUsers = [];
+        let allGroups = [];
+        let currentManagingUser = null;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            checkAuthAndLoadData();
+        });
+
+        async function checkAuthAndLoadData() {
+            currentUser = userPool.getCurrentUser();
+            if (!currentUser) {
+                window.location.href = '/';
+                return;
+            }
+
+            currentUser.getSession(async (err, session) => {
+                if (err || !session.isValid()) {
+                    window.location.href = '/';
+                    return;
+                }
+
+                authToken = session.getIdToken().getJwtToken();
+                
+                // Check if user is admin
+                const payload = session.getIdToken().decodePayload();
+                const groups = payload['cognito:groups'] || [];
+                isAdmin = groups.includes('workstation-admin');
+
+                if (!isAdmin) {
+                    alert('Access denied. Admin privileges required.');
+                    window.location.href = '/';
+                    return;
+                }
+
+                // Set user name
+                currentUser.getUserAttributes((err, attributes) => {
+                    if (!err && attributes) {
+                        const email = attributes.find(attr => attr.Name === 'email');
+                        if (email) {
+                            document.getElementById('adminName').textContent = email.Value;
+                        }
+                    }
+                });
+
+                // Load initial data
+                loadDashboardData();
+            });
+        }
+
+        async function apiCall(endpoint, method = 'GET', body = null) {
+            const url = `${API_BASE_URL}${endpoint}`;
+            const headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${authToken}`
+            };
+
+            const options = {
+                method,
+                headers,
+                mode: 'cors',
+            };
+
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
+
+            try {
+                const response = await fetch(url, options);
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({}));
+                    throw new Error(errorData.message || `HTTP ${response.status}`);
+                }
+                return await response.json();
+            } catch (error) {
+                console.error('API call failed:', error);
+                throw error;
+            }
+        }
+
+        async function loadDashboardData() {
+            try {
+                await Promise.all([
+                    loadUsers(),
+                    loadGroups(),
+                    loadStats()
+                ]);
+            } catch (error) {
+                console.error('Failed to load dashboard data:', error);
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const response = await apiCall('/workstations');
+                const workstations = response.workstations || response || [];
+                document.getElementById('totalWorkstations').textContent = workstations.length;
+            } catch (error) {
+                console.error('Failed to load workstation stats:', error);
+            }
+        }
+
+        async function loadUsers() {
+            const container = document.getElementById('usersTable');
+            container.innerHTML = '<div style="text-align: center; padding: 20px;"><div class="loading"></div></div>';
+
+            try {
+                const data = await apiCall('/admin/cognito-users');
+                allUsers = data.users || [];
+
+                displayUsers(allUsers);
+                updateUserStats(allUsers);
+            } catch (error) {
+                console.error('Error loading users:', error);
+                container.innerHTML = `<div class="error">Failed to load users: ${error.message}</div>`;
+            }
+        }
+
+        function displayUsers(users) {
+            const container = document.getElementById('usersTable');
+            
+            if (!users || users.length === 0) {
+                container.innerHTML = '<p>No users found.</p>';
+                return;
+            }
+
+            const html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Email</th>
+                            <th>Status</th>
+                            <th>Groups</th>
+                            <th>Created</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${users.map(user => {
+                            const email = user.Attributes?.find(attr => attr.Name === 'email')?.Value || user.Username;
+                            const status = user.UserStatus || 'UNKNOWN';
+                            const groups = user.Groups || [];
+                            const isAdminUser = groups.some(g => g.GroupName === 'workstation-admin');
+                            
+                            return `
+                                <tr>
+                                    <td>${email}</td>
+                                    <td><span class="status-badge status-${status.toLowerCase()}">${status}</span></td>
+                                    <td>
+                                        ${groups.map(g => `<span class="status-badge ${g.GroupName === 'workstation-admin' ? 'status-admin' : ''}">${g.GroupName}</span>`).join(' ')}
+                                        ${groups.length === 0 ? '<em>No groups</em>' : ''}
+                                    </td>
+                                    <td>${new Date(user.UserCreateDate).toLocaleDateString()}</td>
+                                    <td>
+                                        <button class="btn btn-sm" onclick='manageUserGroups(${JSON.stringify(user.Username)})'>Manage Groups</button>
+                                        ${!isAdminUser ? `<button class="btn btn-danger btn-sm" onclick='deleteUser("${user.Username}")' style="margin-left: 5px;">Delete</button>` : ''}
+                                    </td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            `;
+            container.innerHTML = html;
+        }
+
+        function updateUserStats(users) {
+            document.getElementById('totalUsers').textContent = users.length;
+            document.getElementById('activeUsers').textContent = users.filter(u => u.UserStatus === 'CONFIRMED').length;
+            document.getElementById('adminUsers').textContent = users.filter(u => 
+                (u.Groups || []).some(g => g.GroupName === 'workstation-admin')
+            ).length;
+        }
+
+        async function loadGroups() {
+            const container = document.getElementById('groupsTable');
+            container.innerHTML = '<div style="text-align: center; padding: 20px;"><div class="loading"></div></div>';
+
+            try {
+                const data = await apiCall('/admin/cognito-groups');
+                allGroups = data.groups || [];
+
+                displayGroups(allGroups);
+            } catch (error) {
+                console.error('Error loading groups:', error);
+                container.innerHTML = `<div class="error">Failed to load groups: ${error.message}</div>`;
+            }
+        }
+
+        function displayGroups(groups) {
+            const container = document.getElementById('groupsTable');
+            
+            if (!groups || groups.length === 0) {
+                container.innerHTML = '<p>No groups found.</p>';
+                return;
+            }
+
+            const html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Group Name</th>
+                            <th>Description</th>
+                            <th>Precedence</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${groups.map(group => `
+                            <tr>
+                                <td><span class="status-badge ${group.GroupName === 'workstation-admin' ? 'status-admin' : ''}">${group.GroupName}</span></td>
+                                <td>${group.Description || 'No description'}</td>
+                                <td>${group.Precedence || 'N/A'}</td>
+                                <td>${new Date(group.CreationDate).toLocaleDateString()}</td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            `;
+            container.innerHTML = html;
+        }
+
+        async function loadAllWorkstations() {
+            const container = document.getElementById('allWorkstationsTable');
+            container.innerHTML = '<div style="text-align: center; padding: 20px;"><div class="loading"></div></div>';
+
+            try {
+                const response = await apiCall('/workstations');
+                const workstations = response.workstations || response;
+
+                if (!Array.isArray(workstations) || workstations.length === 0) {
+                    container.innerHTML = '<p>No workstations found.</p>';
+                    return;
+                }
+
+                const html = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Workstation ID</th>
+                                <th>Owner</th>
+                                <th>Instance Type</th>
+                                <th>Region</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${workstations.map(ws => `
+                                <tr>
+                                    <td>${ws.workstationId || ws.PK?.replace('WORKSTATION#', '') || 'N/A'}</td>
+                                    <td>${ws.userId || 'N/A'}</td>
+                                    <td>${ws.instanceType || 'N/A'}</td>
+                                    <td>${ws.region || 'N/A'}</td>
+                                    <td><span class="status-badge status-${(ws.status || 'unknown').toLowerCase()}">${ws.status || 'unknown'}</span></td>
+                                    <td>${ws.createdAt ? new Date(ws.createdAt).toLocaleDateString() : 'N/A'}</td>
+                                    <td>
+                                        ${ws.status === 'running' ? `<button class="btn btn-danger btn-sm" onclick="adminTerminateWorkstation('${ws.workstationId || ws.PK}')">Terminate</button>` : ''}
+                                    </td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+                container.innerHTML = html;
+            } catch (error) {
+                container.innerHTML = `<div class="error">Failed to load workstations: ${error.message}</div>`;
+            }
+        }
+
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(tab => tab.classList.remove('active'));
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+            event.target.classList.add('active');
+
+            if (tabName === 'users') loadUsers();
+            else if (tabName === 'groups') loadGroups();
+            else if (tabName === 'workstations') loadAllWorkstations();
+        }
+
+        // User Management Functions
+        function showAddUserModal() {
+            document.getElementById('addUserModal').classList.add('show');
+            document.getElementById('addUserForm').reset();
+            document.getElementById('addUserError').classList.add('hidden');
+            document.getElementById('addUserSuccess').classList.add('hidden');
+        }
+
+        function closeAddUserModal() {
+            document.getElementById('addUserModal').classList.remove('show');
+        }
+
+        async function handleAddUser(event) {
+            event.preventDefault();
+            
+            const email = document.getElementById('newUserEmail').value;
+            const password = document.getElementById('newUserPassword').value;
+            const firstName = document.getElementById('newUserFirstName').value;
+            const lastName = document.getElementById('newUserLastName').value;
+            const isAdmin = document.getElementById('addToAdminGroup').checked;
+            const isUser = document.getElementById('addToUserGroup').checked;
+
+            const groups = [];
+            if (isAdmin) groups.push('workstation-admin');
+            if (isUser) groups.push('workstation-user');
+
+            const errorDiv = document.getElementById('addUserError');
+            const successDiv = document.getElementById('addUserSuccess');
+            errorDiv.classList.add('hidden');
+            successDiv.classList.add('hidden');
+
+            try {
+                await apiCall('/admin/cognito-users', 'POST', {
+                    email,
+                    password,
+                    firstName,
+                    lastName,
+                    groups
+                });
+
+                successDiv.textContent = `User ${email} created successfully!`;
+                successDiv.classList.remove('hidden');
+                
+                setTimeout(() => {
+                    closeAddUserModal();
+                    loadUsers();
+                }, 2000);
+            } catch (error) {
+                errorDiv.textContent = error.message;
+                errorDiv.classList.remove('hidden');
+            }
+        }
+
+        async function deleteUser(username) {
+            if (!confirm(`Are you sure you want to delete user ${username}?`)) {
+                return;
+            }
+
+            try {
+                await apiCall(`/admin/cognito-users/${username}`, 'DELETE');
+                alert('User deleted successfully');
+                loadUsers();
+            } catch (error) {
+                alert('Failed to delete user: ' + error.message);
+            }
+        }
+
+        function manageUserGroups(username) {
+            currentManagingUser = allUsers.find(u => u.Username === username);
+            if (!currentManagingUser) return;
+
+            const email = currentManagingUser.Attributes?.find(attr => attr.Name === 'email')?.Value || username;
+            document.getElementById('manageGroupsUsername').textContent = email;
+
+            const userGroups = (currentManagingUser.Groups || []).map(g => g.GroupName);
+            
+            const checkboxesHtml = allGroups.map(group => `
+                <div class="form-group">
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="group_${group.GroupName}" value="${group.GroupName}" 
+                            ${userGroups.includes(group.GroupName) ? 'checked' : ''}>
+                        <label for="group_${group.GroupName}" style="margin: 0;">${group.GroupName}</label>
+                    </div>
+                    <small style="color: #666; margin-left: 30px;">${group.Description || ''}</small>
+                </div>
+            `).join('');
+
+            document.getElementById('groupCheckboxes').innerHTML = checkboxesHtml;
+            document.getElementById('manageGroupsError').classList.add('hidden');
+            document.getElementById('manageGroupsSuccess').classList.add('hidden');
+            document.getElementById('manageGroupsModal').classList.add('show');
+        }
+
+        function closeManageGroupsModal() {
+            document.getElementById('manageGroupsModal').classList.remove('show');
+        }
+
+        async function saveUserGroups() {
+            if (!currentManagingUser) return;
+
+            const errorDiv = document.getElementById('manageGroupsError');
+            const successDiv = document.getElementById('manageGroupsSuccess');
+            errorDiv.classList.add('hidden');
+            successDiv.classList.add('hidden');
+
+            try {
+                const currentGroups = (currentManagingUser.Groups || []).map(g => g.GroupName);
+                const selectedGroups = allGroups
+                    .filter(g => document.getElementById(`group_${g.GroupName}`).checked)
+                    .map(g => g.GroupName);
+
+                // Add to new groups
+                for (const group of selectedGroups) {
+                    if (!currentGroups.includes(group)) {
+                        await apiCall(`/admin/cognito-users/${currentManagingUser.Username}/groups`, 'POST', {
+                            groupName: group
+                        });
+                    }
+                }
+
+                // Remove from deselected groups
+                for (const group of currentGroups) {
+                    if (!selectedGroups.includes(group)) {
+                        await apiCall(`/admin/cognito-users/${currentManagingUser.Username}/groups/${group}`, 'DELETE');
+                    }
+                }
+
+                successDiv.textContent = 'Groups updated successfully!';
+                successDiv.classList.remove('hidden');
+
+                setTimeout(() => {
+                    closeManageGroupsModal();
+                    loadUsers();
+                }, 1500);
+            } catch (error) {
+                errorDiv.textContent = error.message;
+                errorDiv.classList.remove('hidden');
+            }
+        }
+
+        async function adminTerminateWorkstation(workstationId) {
+            if (!confirm(`Are you sure you want to terminate workstation ${workstationId}?`)) {
+                return;
+            }
+
+            try {
+                await apiCall(`/workstations/${workstationId}`, 'DELETE');
+                alert('Workstation terminated successfully');
+                loadAllWorkstations();
+            } catch (error) {
+                alert('Failed to terminate workstation: ' + error.message);
+            }
+        }
+
+        function logout() {
+            if (currentUser) {
+                currentUser.signOut();
+            }
+            window.location.href = '/';
+        }
+    </script>
+</body>
+</html>

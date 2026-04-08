@@ -1,0 +1,22 @@
+{
+  "name": "storage-service",
+  "version": "1.0.0",
+  "description": "Lambda service for storage management (S3 and EFS)",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.450.0",
+    "@aws-sdk/client-ssm": "^3.450.0",
+    "@aws-sdk/client-efs": "^3.450.0",
+    "@aws-sdk/client-fsx": "^3.450.0",
+    "@aws-sdk/s3-request-presigner": "^3.450.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.125",
+    "@types/node": "^20.9.0",
+    "typescript": "^5.2.2"
+  }
+}
