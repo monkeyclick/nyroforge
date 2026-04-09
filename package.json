@@ -46,6 +46,7 @@
     "@aws-sdk/lib-dynamodb": "^3.478.0",
     "@aws-sdk/util-dynamodb": "^3.478.0",
     "aws-cdk-lib": "^2.117.0",
+    "aws-jwt-verify": "^5.1.1",
     "constructs": "^10.3.0",
     "uuid": "^9.0.0"
   },
