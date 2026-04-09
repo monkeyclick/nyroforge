@@ -79,7 +79,7 @@ The easiest way to deploy is using our automated script:
 
 ```bash
 # 1. Clone repository
-git clone <repository-url>
+git clone https://github.com/monkeyclick/nyroforge.git
 cd nyroforge
 
 # 2. Configure AWS credentials
@@ -110,7 +110,7 @@ After deployment completes, check `deployment-info.txt` for:
 
 ```bash
 # 1. Clone repository
-git clone <repository-url>
+git clone https://github.com/monkeyclick/nyroforge.git
 cd nyroforge
 npm install
 
