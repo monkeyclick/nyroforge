@@ -80,13 +80,13 @@ The easiest way to deploy is using our automated script:
 ```bash
 # 1. Clone repository
 git clone <repository-url>
-cd ec2mgr4me
+cd nyroforge
 
 # 2. Configure AWS credentials
 aws configure
 
 # 3. Run one-click deployment
-./deploy-one-click.sh
+./scripts/deploy-one-click.sh
 ```
 
 The script will:
@@ -111,7 +111,7 @@ After deployment completes, check `deployment-info.txt` for:
 ```bash
 # 1. Clone repository
 git clone <repository-url>
-cd ec2mgr4me
+cd nyroforge
 npm install
 
 # 2. Configure AWS
@@ -486,4 +486,4 @@ For technical support:
 
 **Built with ❤️ for Media & Entertainment workflows**
 
-**Owner:** Matt Herson | [nyroforge.com](https://nyroforge.com)
+**Owner:** NyroForge | [nyroforge.com](https://nyroforge.com)
