@@ -35,6 +35,9 @@ jobs:
       - name: Build Lambda functions
         run: npm run build:lambdas
 
+      - name: Create frontend build placeholder for CDK synth
+        run: mkdir -p frontend/out && touch frontend/out/.gitkeep
+
       - name: Validate CDK stack (synth)
         run: npx cdk synth --app "npx ts-node bin/app.ts"
         env:
