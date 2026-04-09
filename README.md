@@ -2,6 +2,8 @@
 
 **[nyroforge.com](https://nyroforge.com)** · [Deployment Guide](DEPLOYMENT_GUIDE.md) · [Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/monkeydooz)
+
 A serverless AWS application for managing virtual GPU editing workstations, built for Media & Entertainment workflows. React/Next.js frontend with full support for domain-joined and standalone Windows Server instances, comprehensive monitoring, cost tracking, and security group management.
 
 ## 📸 Screenshots
@@ -488,8 +490,3 @@ For technical support:
 
 **Owner:** NyroForge | [nyroforge.com](https://nyroforge.com)
 
----
-
-If this project saved you time or money, a beer is always appreciated!
-
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/monkeydooz)
