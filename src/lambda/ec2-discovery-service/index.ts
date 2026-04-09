@@ -472,7 +472,7 @@ async function discoverInstances(request: DiscoverRequest, userId: string): Prom
     });
 
     const ec2Result = await ec2Client.send(describeCommand);
-    let instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
+    const instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
 
     console.log(`Found ${instances.length} EC2 instances matching filters`);
 
@@ -573,7 +573,7 @@ async function getInstanceScopeStatus(request: ScopeStatusRequest, userId: strin
     });
 
     const ec2Result = await ec2Client.send(describeCommand);
-    let instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
+    const instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
 
     console.log(`Found ${instances.length} EC2 instances`);
 

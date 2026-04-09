@@ -2312,7 +2312,7 @@ async function setUserPassword(userId: string, event: APIGatewayProxyEvent, curr
 
     // Send notifications
     let userNotified = false;
-    let adminNotified = false;
+    const adminNotified = false;
 
     if (notifications.notifyUser && user.email) {
       try {
@@ -2441,7 +2441,7 @@ async function generateUserPassword(userId: string, event: APIGatewayProxyEvent,
 
     // Send notifications
     let userNotified = false;
-    let adminNotified = false;
+    const adminNotified = false;
 
     if (notifications.notifyUser && user.email) {
       try {

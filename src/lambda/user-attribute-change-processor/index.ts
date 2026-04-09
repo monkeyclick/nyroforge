@@ -33,7 +33,7 @@ let groupsCache: CachedGroups | null = null;
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
 // Cache statistics for monitoring
-let cacheStats = {
+const cacheStats = {
   hits: 0,
   misses: 0,
   evictions: 0,

@@ -86,7 +86,7 @@ async function getCostAnalytics(period: string, userId?: string, isAdmin: boolea
   try {
     const now = new Date();
     let startDate: Date;
-    let endDate: Date = now;
+    const endDate: Date = now;
 
     // Determine date range based on period
     switch (period) {

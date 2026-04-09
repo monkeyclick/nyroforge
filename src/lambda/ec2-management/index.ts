@@ -1346,7 +1346,7 @@ async function listWorkstations(queryParams: any, userId: string): Promise<APIGa
     }
 
     const result = await dynamoClient.send(queryCommand);
-    let workstations = (result.Items || []).map(item => {
+    const workstations = (result.Items || []).map(item => {
       const ws = unmarshall(item);
       // Extract workstationId from PK if not already present
       if (!ws.workstationId && ws.PK && ws.PK.startsWith('WORKSTATION#')) {
@@ -2123,7 +2123,7 @@ async function getNetworkConfiguration(excludeSubnetIds: string[] = []): Promise
     }));
 
     // Filter out excluded subnets
-    let availableSubnets = subnetsResult.Subnets?.filter(subnet =>
+    const availableSubnets = subnetsResult.Subnets?.filter(subnet =>
       subnet.SubnetId && !excludeSubnetIds.includes(subnet.SubnetId)
     ) || [];
 
