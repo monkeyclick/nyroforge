@@ -5,8 +5,6 @@ node_modules/
 cdk.out/
 .cdk.staging/
 
-# CDK context (contains account-specific information)
-cdk.context.json
 
 # Environment variables
 .env
