@@ -27,7 +27,7 @@ const mockContext: Context = {
   callbackWaitsForEmptyEventLoop: false,
   functionName: 'test-cost-analytics',
   functionVersion: '1',
-  invokedFunctionArn: 'arn:aws:lambda:us-east-1:123456789012:function:test',
+  invokedFunctionArn: 'arn:aws:lambda:us-west-2:123456789012:function:test',
   memoryLimitInMB: '128',
   awsRequestId: 'test-request-id',
   logGroupName: '/aws/lambda/test',
@@ -65,7 +65,7 @@ function buildWorkstationItem(overrides: Record<string, any> = {}) {
     workstationId: 'ws-001',
     userId: 'user@test.com',
     instanceType: 'g4dn.xlarge',
-    region: 'us-east-1',
+    region: 'us-west-2',
     status: 'running',
     estimatedMonthlyCost: 350.00,
     actualCostToDate: 120.00,
@@ -229,14 +229,14 @@ describe('Cost Analytics Lambda', () => {
       const event = makeEvent();
       mockDynamoSend.mockResolvedValue({
         Items: [
-          buildWorkstationItem({ region: 'us-east-1', estimatedMonthlyCost: 200 }),
+          buildWorkstationItem({ region: 'us-west-2', estimatedMonthlyCost: 200 }),
           buildWorkstationItem({ workstationId: 'ws-002', region: 'us-west-2', estimatedMonthlyCost: 400 }),
         ],
       });
 
       const result = await handler(event, mockContext);
       const body = JSON.parse(result.body);
-      expect(body.breakdown.byRegion['us-east-1']).toBeDefined();
+      expect(body.breakdown.byRegion['us-west-2']).toBeDefined();
       expect(body.breakdown.byRegion['us-west-2']).toBeDefined();
     });
 

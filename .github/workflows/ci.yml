@@ -44,7 +44,7 @@ jobs:
           # CDK requires an account/region context at synth time; use dummy values
           # so the synth step validates the stack without real AWS credentials.
           CDK_DEFAULT_ACCOUNT: '123456789012'
-          CDK_DEFAULT_REGION: 'us-east-1'
+          CDK_DEFAULT_REGION: 'us-west-2'
 
   frontend-build:
     name: Frontend Lint & Build

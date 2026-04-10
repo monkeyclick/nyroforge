@@ -27,7 +27,7 @@ const mockContext: Context = {
   callbackWaitsForEmptyEventLoop: false,
   functionName: 'test-security-group-service',
   functionVersion: '1',
-  invokedFunctionArn: 'arn:aws:lambda:us-east-1:123456789012:function:test',
+  invokedFunctionArn: 'arn:aws:lambda:us-west-2:123456789012:function:test',
   memoryLimitInMB: '128',
   awsRequestId: 'test-request-id',
   logGroupName: '/aws/lambda/test',

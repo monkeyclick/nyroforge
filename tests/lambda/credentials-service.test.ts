@@ -34,7 +34,7 @@ const mockContext: Context = {
   callbackWaitsForEmptyEventLoop: false,
   functionName: 'test-credentials-service',
   functionVersion: '1',
-  invokedFunctionArn: 'arn:aws:lambda:us-east-1:123456789012:function:test',
+  invokedFunctionArn: 'arn:aws:lambda:us-west-2:123456789012:function:test',
   memoryLimitInMB: '128',
   awsRequestId: 'test-request-id',
   logGroupName: '/aws/lambda/test',
@@ -56,7 +56,7 @@ function buildWorkstationItem(overrides: Record<string, any> = {}) {
     status: 'running',
     authMethod: 'local',
     localAdminUser: 'Administrator',
-    credentialsSecretArn: 'arn:aws:secretsmanager:us-east-1:123:secret:ws-001',
+    credentialsSecretArn: 'arn:aws:secretsmanager:us-west-2:123:secret:ws-001',
     publicIp: '54.0.0.1',
     ...overrides,
   };
