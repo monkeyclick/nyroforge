@@ -19,7 +19,7 @@ Only the most recent minor release is actively maintained. Upgrade to the latest
 
 Instead, report vulnerabilities by email:
 
-**security@nyroforge.com**
+**matt@hersongo.com**
 
 Include as much of the following information as possible to help us triage and reproduce the issue quickly:
 
@@ -51,7 +51,7 @@ We will keep you informed of progress at each milestone. If you do not receive a
 
 We follow a coordinated disclosure model:
 
-1. You report the issue privately to security@nyroforge.com.
+1. You report the issue privately to matt@hersongo.com.
 2. We acknowledge receipt and begin investigation.
 3. We develop and test a fix, keeping you informed of progress.
 4. We release the fix and publish a security advisory.
