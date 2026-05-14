@@ -1,3 +1,6 @@
+# Local planning docs
+roadmap/
+
 # Dependencies
 node_modules/
 
@@ -12,13 +15,19 @@ cdk.out/
 .env.*.local
 *.pem
 
-# IDE
+# IDE and AI tooling
 .vscode/
 .idea/
 .roo/
+.claude/
+.cursor/
+.aider*
 *.swp
 *.swo
 *~
+
+# Local memory / session state
+memory/
 
 # OS
 .DS_Store
