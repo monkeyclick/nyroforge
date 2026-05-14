@@ -4,17 +4,27 @@ import toast from 'react-hot-toast'
 import { apiClient } from '@/services/api'
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
 import RdpCredentialsModal from './RdpCredentialsModal'
+import DcvConnectionModal from './DcvConnectionModal'
 
 interface WorkstationCardProps {
   workstation: Workstation
 }
 
+function isLinuxWorkstation(w: Workstation): boolean {
+  return w.platform === 'linux' ||
+    w.osVersion?.startsWith('ubuntu') ||
+    w.osVersion === 'al2023' ||
+    w.osVersion?.startsWith('rocky')
+}
+
 export default function WorkstationCard({ workstation }: WorkstationCardProps) {
   const [showCredentials, setShowCredentials] = useState(false)
+  const [showDcvModal, setShowDcvModal] = useState(false)
   const [showSecurityDetails, setShowSecurityDetails] = useState(false)
   const [credentials, setCredentials] = useState<any>(null)
   const [loadingCredentials, setLoadingCredentials] = useState(false)
   const queryClient = useQueryClient()
+  const isLinux = isLinuxWorkstation(workstation)
 
   // Fetch security group details for this workstation
   const { data: securityGroupData } = useQuery({
@@ -23,8 +33,10 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
     enabled: !!workstation.securityGroupId,
   })
 
+  const wsId = workstation.workstationId || workstation.instanceId
+
   const terminateMutation = useMutation({
-    mutationFn: () => apiClient.terminateWorkstation(workstation.instanceId),
+    mutationFn: () => apiClient.terminateWorkstation(wsId),
     onSuccess: () => {
       toast.success('Workstation terminated successfully')
       queryClient.invalidateQueries({ queryKey: ['workstations'] })
@@ -37,7 +49,8 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
   const allowMyIpMutation = useMutation({
     mutationFn: () => apiClient.allowMyIp(workstation.instanceId),
     onSuccess: (data) => {
-      toast.success(`Your IP (${data.ipAddress}) has been whitelisted for RDP access`)
+      const proto = isLinux ? 'DCV/SSH' : 'RDP'
+      toast.success(`Your IP (${data.ipAddress}) has been whitelisted for ${proto} access`)
       queryClient.invalidateQueries({ queryKey: ['security-group-details', workstation.securityGroupId] })
     },
     onError: (error: any) => {
@@ -48,9 +61,13 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
   const handleGetCredentials = async () => {
     setLoadingCredentials(true)
     try {
-      const creds = await apiClient.getWorkstationCredentials(workstation.instanceId)
+      const creds = await apiClient.getWorkstationCredentials(wsId)
       setCredentials(creds)
-      setShowCredentials(true)
+      if (isLinux || creds.platform === 'linux' || creds.connectionInfo?.protocol === 'DCV') {
+        setShowDcvModal(true)
+      } else {
+        setShowCredentials(true)
+      }
     } catch (error: any) {
       toast.error(error.message || 'Failed to get credentials')
     } finally {
@@ -91,13 +108,19 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
         <div className="flex-1">
           <h3 className="text-lg font-semibold text-gray-900">{workstation.tags?.Name || workstation.instanceId}</h3>
           <p className="mt-1 text-sm text-gray-500">Instance ID: {workstation.instanceId}</p>
-          <div className="mt-2 flex items-center space-x-2">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${getStatusColor(workstation.status)}`}>
               {workstation.status}
+            </span>
+            <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${
+              isLinux ? 'bg-orange-100 text-orange-800' : 'bg-blue-100 text-blue-800'
+            }`}>
+              {isLinux ? 'Linux' : 'Windows'}
             </span>
             <span className="text-sm text-gray-500">{workstation.instanceType}</span>
             <span className="text-sm text-gray-500">{workstation.region}</span>
           </div>
+          <p className="mt-1 text-xs text-gray-400">{workstation.osVersion}</p>
         </div>
       </div>
 
@@ -199,7 +222,7 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
               onClick={handleAllowMyIp}
               disabled={allowMyIpMutation.isPending}
               className="rounded-md bg-green-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500 disabled:opacity-50"
-              title="Add your current IP address to the security group for RDP access"
+              title={`Add your current IP address to the security group for ${isLinux ? 'DCV/SSH' : 'RDP'} access`}
             >
               {allowMyIpMutation.isPending ? 'Adding IP...' : 'Allow My IP'}
             </button>
@@ -214,8 +237,8 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
         )}
       </div>
 
-      {/* RDP Credentials Modal */}
-      {credentials && (
+      {/* Windows RDP Credentials Modal */}
+      {credentials && !isLinux && (
         <RdpCredentialsModal
           isOpen={showCredentials}
           onClose={() => setShowCredentials(false)}
@@ -224,6 +247,21 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
             username: credentials.username,
             password: credentials.password,
             rdpFile: credentials.rdpFile
+          }}
+          workstationName={workstation.tags?.Name || workstation.instanceId}
+        />
+      )}
+
+      {/* Linux DCV Connection Modal */}
+      {credentials && isLinux && (
+        <DcvConnectionModal
+          isOpen={showDcvModal}
+          onClose={() => setShowDcvModal(false)}
+          connection={{
+            url: credentials.connectionInfo?.dcvUrl || `https://${workstation.publicIp}:8443`,
+            quicEnabled: credentials.connectionInfo?.quicEnabled ?? true,
+            username: credentials.username,
+            password: credentials.password || '',
           }}
           workstationName={workstation.tags?.Name || workstation.instanceId}
         />

@@ -14,12 +14,16 @@ const WORKSTATIONS_TABLE = process.env.WORKSTATIONS_TABLE_NAME!;
 
 interface CredentialsResponse {
   type: 'local' | 'domain';
+  platform: 'windows' | 'linux';
   username: string;
   password?: string;
   domain?: string;
   connectionInfo: {
     publicIp: string;
-    rdpPort: number;
+    rdpPort?: number;
+    dcvPort?: number;
+    dcvUrl?: string;
+    quicEnabled?: boolean;
     protocol: string;
   };
   expiresAt: string;
@@ -163,10 +167,12 @@ async function getWorkstationCredentials(workstationId: string, userId: string, 
       };
     }
 
-    // Get credentials based on auth method
+    // Get credentials based on platform and auth method
     let credentialsResponse: CredentialsResponse;
 
-    if (workstation.authMethod === 'local') {
+    if (workstation.platform === 'linux') {
+      credentialsResponse = await getLinuxCredentials(workstation);
+    } else if (workstation.authMethod === 'local') {
       credentialsResponse = await getLocalAdminCredentials(workstation);
     } else if (workstation.authMethod === 'domain') {
       credentialsResponse = await getDomainCredentials(workstation);
@@ -206,8 +212,6 @@ async function getWorkstationCredentials(workstationId: string, userId: string, 
 
 async function getLocalAdminCredentials(workstation: any): Promise<CredentialsResponse> {
   if (!workstation.credentialsSecretArn) {
-    // This workstation was likely reconciled from an existing EC2 instance
-    // and doesn't have managed credentials
     throw new Error(
       'No managed credentials available for this workstation. ' +
       'This instance may have been created outside the system or reconciled from an existing instance. ' +
@@ -216,13 +220,10 @@ async function getLocalAdminCredentials(workstation: any): Promise<CredentialsRe
     );
   }
 
-  // Get secret from Secrets Manager
-  const getSecretCommand = new GetSecretValueCommand({
+  const secretResult = await secretsClient.send(new GetSecretValueCommand({
     SecretId: workstation.credentialsSecretArn,
-  });
+  }));
 
-  const secretResult = await secretsClient.send(getSecretCommand);
-  
   if (!secretResult.SecretString) {
     throw new Error('Failed to retrieve credentials from Secrets Manager');
   }
@@ -231,6 +232,7 @@ async function getLocalAdminCredentials(workstation: any): Promise<CredentialsRe
 
   return {
     type: 'local',
+    platform: 'windows',
     username: credentials.username,
     password: credentials.password,
     connectionInfo: {
@@ -238,16 +240,14 @@ async function getLocalAdminCredentials(workstation: any): Promise<CredentialsRe
       rdpPort: 3389,
       protocol: 'RDP',
     },
-    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(), // 15 minutes
+    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
   };
 }
 
 async function getDomainCredentials(workstation: any): Promise<CredentialsResponse> {
-  // For domain-joined workstations, we don't store the domain password
-  // Instead, we provide connection info and indicate domain authentication
-  
   return {
     type: 'domain',
+    platform: 'windows',
     username: `${workstation.userId.split('@')[0]}@${workstation.domainName}`,
     domain: workstation.domainName,
     connectionInfo: {
@@ -255,7 +255,43 @@ async function getDomainCredentials(workstation: any): Promise<CredentialsRespon
       rdpPort: 3389,
       protocol: 'RDP',
     },
-    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour
+    expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+  };
+}
+
+async function getLinuxCredentials(workstation: any): Promise<CredentialsResponse> {
+  if (!workstation.credentialsSecretArn) {
+    throw new Error(
+      'No managed credentials available for this Linux workstation. ' +
+      `Connection info: https://${workstation.publicIp || 'No public IP'}:8443 (DCV)`
+    );
+  }
+
+  const secretResult = await secretsClient.send(new GetSecretValueCommand({
+    SecretId: workstation.credentialsSecretArn,
+  }));
+
+  if (!secretResult.SecretString) {
+    throw new Error('Failed to retrieve credentials from Secrets Manager');
+  }
+
+  const credentials = JSON.parse(secretResult.SecretString);
+  const publicIp = workstation.publicIp || '';
+  const dcvUrl = `https://${publicIp}:8443`;
+
+  return {
+    type: 'local',
+    platform: 'linux',
+    username: credentials.username || workstation.linuxAdminUser || 'ec2-user',
+    password: credentials.password,
+    connectionInfo: {
+      publicIp,
+      dcvPort: 8443,
+      dcvUrl,
+      quicEnabled: true,
+      protocol: 'DCV',
+    },
+    expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
   };
 }
 

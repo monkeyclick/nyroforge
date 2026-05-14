@@ -24,6 +24,7 @@ interface WorkstationAdminApiStackProps extends cdk.StackProps {
     groupAuditLogs: dynamodb.ITable;
     auditLogs: dynamodb.ITable;
     bootstrapPackages: dynamodb.ITable;
+    tagTemplates: dynamodb.ITable;
     analytics: dynamodb.ITable;
     feedback: dynamodb.ITable;
     packageQueue: dynamodb.ITable;
@@ -93,6 +94,8 @@ export class WorkstationAdminApiStack extends cdk.Stack {
         `${tables.auditLogs.tableArn}/index/*`,
         tables.bootstrapPackages.tableArn,
         `${tables.bootstrapPackages.tableArn}/index/*`,
+        tables.tagTemplates.tableArn,
+        `${tables.tagTemplates.tableArn}/index/*`,
         tables.analytics.tableArn,
         `${tables.analytics.tableArn}/index/*`,
         tables.groupPackageBindings.tableArn,
@@ -256,6 +259,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       AUDIT_LOGS_TABLE: tables.auditLogs.tableName,
       AUDIT_TABLE: tables.auditLogs.tableName,
       BOOTSTRAP_PACKAGES_TABLE: tables.bootstrapPackages.tableName,
+      TAG_TEMPLATES_TABLE: tables.tagTemplates.tableName,
       ANALYTICS_TABLE: tables.analytics.tableName,
       GROUP_PACKAGE_BINDINGS_TABLE: tables.groupPackageBindings.tableName,
       // New tables for user deletion and password management
@@ -377,6 +381,15 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       description: 'Manages allowed EC2 instance families for deployments',
     });
 
+    // Tag Template Service
+    const tagTemplateServiceFunction = new lambda.Function(this, 'TagTemplateService', {
+      ...lambdaDefaults,
+      functionName: 'workstation-tag-template-service',
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/tag-template-service')),
+      description: 'Manages custom tag templates and tag compliance reporting',
+    });
+
     // User Management Service (user deletion and password management)
     const userManagementServiceFunction = new lambda.Function(this, 'UserManagementService', {
       ...lambdaDefaults,
@@ -448,6 +461,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const storageIntegration = new apigateway.LambdaIntegration(storageServiceFunction);
     const ec2DiscoveryIntegration = new apigateway.LambdaIntegration(ec2DiscoveryServiceFunction);
     const instanceFamilyIntegration = new apigateway.LambdaIntegration(instanceFamilyServiceFunction);
+    const tagTemplateIntegration = new apigateway.LambdaIntegration(tagTemplateServiceFunction);
     const userManagementIntegration = new apigateway.LambdaIntegration(userManagementServiceFunction);
 
     // ============================================
@@ -700,6 +714,25 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const instanceFamiliesResource = adminResource.addResource('instance-families');
     instanceFamiliesResource.addMethod('GET', instanceFamilyIntegration, authorizedMethodOptions);
     instanceFamiliesResource.addMethod('POST', instanceFamilyIntegration, authorizedMethodOptions);
+
+    // /admin/tag-report - Tag compliance and cost reporting (admin only)
+    const tagReportResource = adminResource.addResource('tag-report');
+    tagReportResource.addMethod('GET', tagTemplateIntegration, authorizedMethodOptions);
+
+    // /tag-templates - Tag template CRUD (GET available to all authenticated users, mutations admin only)
+    const tagTemplatesResource = this.adminApi.root.addResource('tag-templates');
+    tagTemplatesResource.addMethod('GET', tagTemplateIntegration, authorizedMethodOptions);
+    tagTemplatesResource.addMethod('POST', tagTemplateIntegration, authorizedMethodOptions);
+
+    // /tag-templates/{templateId}
+    const tagTemplateResource = tagTemplatesResource.addResource('{templateId}');
+    tagTemplateResource.addMethod('GET', tagTemplateIntegration, authorizedMethodOptions);
+    tagTemplateResource.addMethod('PUT', tagTemplateIntegration, authorizedMethodOptions);
+    tagTemplateResource.addMethod('DELETE', tagTemplateIntegration, authorizedMethodOptions);
+
+    // /tag-templates/apply - Apply templates to workstations (bulk)
+    const tagTemplateApplyResource = tagTemplatesResource.addResource('apply');
+    tagTemplateApplyResource.addMethod('POST', tagTemplateIntegration, authorizedMethodOptions);
 
     // ============================================
     // Outputs

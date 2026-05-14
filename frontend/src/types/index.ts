@@ -9,6 +9,7 @@ export interface Workstation {
   availabilityZone: string;
   instanceType: string;
   osVersion: string;
+  platform: 'windows' | 'linux';
   amiId: string;
   vpcId: string;
   subnetId: string;
@@ -19,6 +20,7 @@ export interface Workstation {
   domainJoined?: boolean;
   domainName?: string;
   localAdminUser?: string;
+  linuxAdminUser?: string;
   credentialsSecretArn?: string;
   status: 'launching' | 'running' | 'stopping' | 'stopped' | 'terminated';
   launchTime: string;
@@ -94,6 +96,7 @@ export interface LaunchWorkstationRequest {
   region: string;
   instanceType: string;
   osVersion: string;
+  platform?: 'windows' | 'linux';
   authMethod: 'domain' | 'local';
   domainConfig?: {
     domainName: string;
@@ -101,6 +104,9 @@ export interface LaunchWorkstationRequest {
   };
   localAdminConfig?: {
     username: string;
+  };
+  linuxConfig?: {
+    adminUsername?: string;
   };
   autoTerminateHours?: number;
   tags?: Record<string, string>;
@@ -151,12 +157,16 @@ export interface DcvConnection {
 
 export interface WorkstationCredentials {
   type: 'local' | 'domain';
+  platform?: 'windows' | 'linux';
   username: string;
   password?: string;
   domain?: string;
   connectionInfo: {
     publicIp: string;
     rdpPort?: number;
+    dcvPort?: number;
+    dcvUrl?: string;
+    quicEnabled?: boolean;
     protocol?: string;
     rdp?: RdpConnection;
     dcv?: DcvConnection;
@@ -228,4 +238,100 @@ export interface UpdateGroupPackageRequest {
   autoInstall?: boolean;
   isMandatory?: boolean;
   installOrder?: number;
+}
+
+// ============================================
+// Tag Templates
+// ============================================
+
+export interface TagFieldValidation {
+  pattern?: string;
+  minLength?: number;
+  maxLength?: number;
+}
+
+export interface TagField {
+  key: string;
+  label: string;
+  description?: string;
+  required: boolean;
+  allowedValues?: string[];
+  defaultValue?: string;
+  validation?: TagFieldValidation;
+}
+
+export interface TagTemplate {
+  templateId: string;
+  name: string;
+  description?: string;
+  category: string;
+  isRequired: boolean;
+  isEnabled: boolean;
+  fields: TagField[];
+  appliedCount?: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TagTemplateListResponse {
+  templates: TagTemplate[];
+  summary: {
+    total: number;
+    required: number;
+    optional: number;
+    disabled: number;
+    categories: string[];
+  };
+}
+
+export interface ApplyTemplatesRequest {
+  templateIds: string[];
+  workstationIds: string[];
+  tagValues?: Record<string, string>;
+}
+
+export interface WorkstationTagCompliance {
+  workstationId: string;
+  instanceId?: string;
+  name: string;
+  userId: string;
+  osVersion?: string;
+  platform?: 'windows' | 'linux';
+  state?: string;
+  overallCompliant: boolean;
+  templateCompliance: {
+    templateId: string;
+    templateName: string;
+    compliant: boolean;
+    missingFields: string[];
+    presentFields: string[];
+  }[];
+  ec2Tags: Record<string, string>;
+  customTags: Record<string, string>;
+}
+
+export interface TagTemplateSummary {
+  templateId: string;
+  templateName: string;
+  category: string;
+  totalWorkstations: number;
+  compliantCount: number;
+  nonCompliantCount: number;
+  compliancePercent: number;
+}
+
+export interface TagReportResponse {
+  summary: {
+    totalWorkstations: number;
+    compliantCount: number;
+    nonCompliantCount: number;
+    compliancePercent: number;
+    requiredTemplates: number;
+    totalTemplates: number;
+    generatedAt: string;
+  };
+  templateSummary: TagTemplateSummary[];
+  workstations: WorkstationTagCompliance[];
+  costByDimension: Record<string, Record<string, number>>;
 }

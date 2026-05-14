@@ -45,6 +45,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
     groupAuditLogs: dynamodb.Table;
     auditLogs: dynamodb.Table;
     bootstrapPackages: dynamodb.Table;
+    tagTemplates: dynamodb.Table;
     analytics: dynamodb.Table;
     feedback: dynamodb.Table;
     packageQueue: dynamodb.Table;
@@ -659,6 +660,46 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
       },
     });
 
+    // Tag Templates table — stores corporate/project tag template definitions
+    const tagTemplatesTable = new dynamodb.Table(this, 'TagTemplatesTable', {
+      tableName: 'WorkstationTagTemplates',
+      partitionKey: {
+        name: 'templateId',
+        type: dynamodb.AttributeType.STRING,
+      },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: this.kmsKey,
+      pointInTimeRecoverySpecification: {
+        pointInTimeRecoveryEnabled: true,
+      },
+      removalPolicy: this.removalPolicy,
+    });
+
+    tagTemplatesTable.addGlobalSecondaryIndex({
+      indexName: 'CategoryIndex',
+      partitionKey: {
+        name: 'category',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'name',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
+    tagTemplatesTable.addGlobalSecondaryIndex({
+      indexName: 'RequiredIndex',
+      partitionKey: {
+        name: 'isRequired',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'name',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
     // Analytics events table
     const analyticsTable = new dynamodb.Table(this, 'AnalyticsTable', {
       tableName: 'UserAnalytics',
@@ -1012,6 +1053,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
       groupAuditLogs: groupAuditLogsTable,
       auditLogs: auditLogsTable,
       bootstrapPackages: bootstrapPackagesTable,
+      tagTemplates: tagTemplatesTable,
       analytics: analyticsTable,
       feedback: feedbackTable,
       packageQueue: packageQueueTable,

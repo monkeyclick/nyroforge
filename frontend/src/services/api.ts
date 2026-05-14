@@ -11,7 +11,11 @@ import {
   PackageInstallationStatusResponse,
   GroupPackageBinding,
   AddPackageToGroupRequest,
-  UpdateGroupPackageRequest
+  UpdateGroupPackageRequest,
+  TagTemplate,
+  TagTemplateListResponse,
+  ApplyTemplatesRequest,
+  TagReportResponse,
 } from '../types';
 import {
   EnhancedUser,
@@ -1153,6 +1157,51 @@ class ApiClient {
         allowedTypes: allowedTypes || {},
       }),
     }, true);
+  }
+
+  // ============================================
+  // Tag Template Methods
+  // ============================================
+
+  async getTagTemplates(params?: { category?: string; required?: boolean }): Promise<TagTemplateListResponse> {
+    const qs = new URLSearchParams();
+    if (params?.category) qs.set('category', params.category);
+    if (params?.required) qs.set('required', 'true');
+    const query = qs.toString();
+    return this.request(`/tag-templates${query ? `?${query}` : ''}`, { method: 'GET' }, true);
+  }
+
+  async getTagTemplate(templateId: string): Promise<TagTemplate> {
+    return this.request(`/tag-templates/${templateId}`, { method: 'GET' }, true);
+  }
+
+  async createTagTemplate(data: Omit<TagTemplate, 'templateId' | 'createdBy' | 'createdAt' | 'updatedAt'>): Promise<TagTemplate> {
+    return this.request('/tag-templates', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }, true);
+  }
+
+  async updateTagTemplate(templateId: string, data: Partial<TagTemplate>): Promise<TagTemplate> {
+    return this.request(`/tag-templates/${templateId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }, true);
+  }
+
+  async deleteTagTemplate(templateId: string): Promise<{ message: string }> {
+    return this.request(`/tag-templates/${templateId}`, { method: 'DELETE' }, true);
+  }
+
+  async applyTagTemplates(request: ApplyTemplatesRequest): Promise<{ message: string; results: any[] }> {
+    return this.request('/tag-templates/apply', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    }, true);
+  }
+
+  async getTagReport(): Promise<TagReportResponse> {
+    return this.request('/admin/tag-report', { method: 'GET' }, true);
   }
 }
 

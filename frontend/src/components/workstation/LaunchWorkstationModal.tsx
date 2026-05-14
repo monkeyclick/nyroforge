@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../../services/api';
-import { LaunchWorkstationRequest } from '../../types';
+import { LaunchWorkstationRequest, TagTemplate } from '../../types';
 import { BootstrapPackageSelector } from './BootstrapPackageSelector';
 
 interface LaunchWorkstationModalProps {
@@ -62,6 +62,50 @@ const SECURITY_GROUP_TEMPLATES: SecurityGroupTemplate[] = [
     ]
   }
 ];
+
+interface TemplateFieldInputsProps {
+  template: TagTemplate;
+  values: Record<string, string>;
+  onChange: (updated: Record<string, string>) => void;
+  locked: boolean;
+}
+
+const TemplateFieldInputs: React.FC<TemplateFieldInputsProps> = ({ template, values, onChange, locked }) => (
+  <div className={`p-3 rounded-lg border mb-2 ${locked ? 'border-red-200 bg-red-50' : 'border-gray-200 bg-gray-50'}`}>
+    <p className="text-xs font-medium text-gray-700 mb-2">{template.name}</p>
+    <div className="grid grid-cols-1 gap-2">
+      {template.fields.map(field => (
+        <div key={field.key}>
+          <label className="block text-xs text-gray-600 mb-0.5">
+            {field.label}
+            {field.required && <span className="text-red-500 ml-0.5">*</span>}
+            <span className="text-gray-400 ml-1 font-mono">({field.key})</span>
+          </label>
+          {field.allowedValues && field.allowedValues.length > 0 ? (
+            <select
+              value={values[field.key] ?? field.defaultValue ?? ''}
+              onChange={e => onChange({ ...values, [field.key]: e.target.value })}
+              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+            >
+              <option value="">— Select —</option>
+              {field.allowedValues.map(v => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              type="text"
+              value={values[field.key] ?? field.defaultValue ?? ''}
+              onChange={e => onChange({ ...values, [field.key]: e.target.value })}
+              placeholder={field.defaultValue || field.label}
+              className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+            />
+          )}
+        </div>
+      ))}
+    </div>
+  </div>
+);
 
 export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
   isOpen,
@@ -130,10 +174,15 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
   
   const [region, setRegion] = useState(getDefaultRegion());
   const [instanceType, setInstanceType] = useState(getDefaultInstanceType());
+  const [platform, setPlatform] = useState<'windows' | 'linux'>('windows');
   const [osVersion, setOsVersion] = useState(getDefaultOsVersion());
   const [authMethod, setAuthMethod] = useState('local');
   const [autoTerminateHours, setAutoTerminateHours] = useState(getDefaultAutoTerminate());
   const [bootstrapPackages, setBootstrapPackages] = useState<string[]>([]);
+  const [selectedTemplateIds, setSelectedTemplateIds] = useState<string[]>([]);
+  const [templateTagValues, setTemplateTagValues] = useState<Record<string, string>>({});
+  const [customTags, setCustomTags] = useState<Array<{ key: string; value: string }>>([]);
+  const [showTagSection, setShowTagSection] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   
@@ -189,6 +238,16 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
     enabled: isOpen,
   });
 
+  // Fetch tag templates
+  const { data: tagTemplatesData } = useQuery({
+    queryKey: ['tag-templates'],
+    queryFn: () => apiClient.getTagTemplates(),
+    enabled: isOpen,
+  });
+  const tagTemplates: TagTemplate[] = tagTemplatesData?.templates || [];
+  const requiredTemplates = tagTemplates.filter(t => t.isRequired && t.isEnabled);
+  const optionalTemplates = tagTemplates.filter(t => !t.isRequired && t.isEnabled);
+
   // Launch workstation mutation
   const launchMutation = useMutation({
     mutationFn: (data: LaunchWorkstationRequest) => apiClient.launchWorkstation(data),
@@ -206,6 +265,17 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
       setError(error.message || 'Failed to launch workstation');
     },
   });
+
+  const handlePlatformChange = (newPlatform: 'windows' | 'linux') => {
+    setPlatform(newPlatform);
+    if (newPlatform === 'windows') {
+      setOsVersion('windows-server-2025');
+      setAuthMethod('local');
+    } else {
+      setOsVersion('ubuntu-22-04');
+      setAuthMethod('local'); // Linux only supports local auth in this system
+    }
+  };
 
   const handleAddCustomPort = () => {
     setCustomPorts([...customPorts, { port: '', protocol: 'tcp', description: '' }]);
@@ -242,14 +312,28 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
       return;
     }
 
+    // Build merged tags from templates + custom pairs
+    const mergedTags: Record<string, string> = {};
+    const allSelectedTemplates = [...requiredTemplates, ...optionalTemplates.filter(t => selectedTemplateIds.includes(t.templateId))];
+    for (const tmpl of allSelectedTemplates) {
+      for (const field of tmpl.fields) {
+        const val = templateTagValues[field.key] ?? field.defaultValue;
+        if (val) mergedTags[field.key] = val;
+      }
+    }
+    for (const ct of customTags) {
+      if (ct.key.trim()) mergedTags[ct.key.trim()] = ct.value;
+    }
+
     const payload: any = {
       region,
       instanceType,
       osVersion,
-      authMethod: authMethod as 'local' | 'domain',
+      platform,
+      authMethod: platform === 'linux' ? 'local' : (authMethod as 'local' | 'domain'),
       autoTerminateHours,
       bootstrapPackages,
-      tags: {},
+      tags: mergedTags,
     };
 
     // Add security group configuration
@@ -442,7 +526,46 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
           </div>
 
           <div className="form-group">
-            <label htmlFor="osVersion">Windows Version</label>
+            <label>Platform</label>
+            <div className="flex gap-2 mt-1">
+              <button
+                type="button"
+                onClick={() => handlePlatformChange('windows')}
+                className={`flex-1 px-3 py-2 text-sm rounded border flex items-center justify-center gap-2 ${
+                  platform === 'windows'
+                    ? 'bg-blue-50 border-blue-500 text-blue-700 font-medium'
+                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-13.051-1.801"/>
+                </svg>
+                Windows
+              </button>
+              <button
+                type="button"
+                onClick={() => handlePlatformChange('linux')}
+                className={`flex-1 px-3 py-2 text-sm rounded border flex items-center justify-center gap-2 ${
+                  platform === 'linux'
+                    ? 'bg-orange-50 border-orange-500 text-orange-700 font-medium'
+                    : 'border-gray-300 text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                Linux
+              </button>
+            </div>
+            {platform === 'linux' && (
+              <p className="mt-1 text-xs text-orange-600">
+                Linux workstations use NICE DCV for remote desktop access.
+              </p>
+            )}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="osVersion">{platform === 'windows' ? 'Windows Version' : 'Linux Distribution'}</label>
             <select
               id="osVersion"
               value={osVersion}
@@ -450,10 +573,27 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
               required
               className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
             >
-              <option value="windows-server-2025">Windows Server 2025</option>
-              <option value="windows-server-2022">Windows Server 2022</option>
-              <option value="windows-server-2019">Windows Server 2019</option>
-              <option value="windows-server-2016">Windows Server 2016</option>
+              {platform === 'windows' ? (
+                <>
+                  <option value="windows-server-2025">Windows Server 2025</option>
+                  <option value="windows-server-2022">Windows Server 2022</option>
+                  <option value="windows-server-2019">Windows Server 2019</option>
+                  <option value="windows-server-2016">Windows Server 2016</option>
+                </>
+              ) : (
+                <>
+                  <optgroup label="Ubuntu">
+                    <option value="ubuntu-24-04">Ubuntu 24.04 LTS (Noble)</option>
+                    <option value="ubuntu-22-04">Ubuntu 22.04 LTS (Jammy)</option>
+                  </optgroup>
+                  <optgroup label="Amazon Linux">
+                    <option value="al2023">Amazon Linux 2023</option>
+                  </optgroup>
+                  <optgroup label="Rocky Linux">
+                    <option value="rocky-linux-9">Rocky Linux 9</option>
+                  </optgroup>
+                </>
+              )}
             </select>
           </div>
 
@@ -464,10 +604,16 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
               value={authMethod}
               onChange={(e) => setAuthMethod(e.target.value)}
               required
+              disabled={platform === 'linux'}
             >
               <option value="local">Local Admin</option>
-              <option value="domain">Domain Join</option>
+              {platform === 'windows' && <option value="domain">Domain Join</option>}
             </select>
+            {platform === 'linux' && (
+              <p className="mt-1 text-xs text-gray-500">
+                Linux workstations use local authentication only.
+              </p>
+            )}
           </div>
 
           <div className="form-group">
@@ -496,6 +642,167 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
               selectedPackages={bootstrapPackages}
               onSelectionChange={setBootstrapPackages}
             />
+          </div>
+
+          {/* Tag Configuration */}
+          <div className="form-group border-t pt-4 mt-4">
+            <div className="flex justify-between items-center mb-3">
+              <div>
+                <label className="font-medium">Tags</label>
+                {requiredTemplates.length > 0 && (
+                  <span className="ml-2 text-xs text-red-600 font-medium">
+                    {requiredTemplates.length} required template{requiredTemplates.length !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTagSection(!showTagSection)}
+                className="text-xs text-blue-600 hover:text-blue-800"
+              >
+                {showTagSection ? 'Hide' : 'Configure Tags'}
+              </button>
+            </div>
+
+            {showTagSection && (
+              <div className="space-y-4">
+                {/* Required templates — always shown, fields editable */}
+                {requiredTemplates.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-red-600 mb-2 uppercase tracking-wide">
+                      Required Templates (Enforced)
+                    </p>
+                    {requiredTemplates.map(tmpl => (
+                      <TemplateFieldInputs
+                        key={tmpl.templateId}
+                        template={tmpl}
+                        values={templateTagValues}
+                        onChange={setTemplateTagValues}
+                        locked
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* Optional templates */}
+                {optionalTemplates.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wide">
+                      Optional Templates
+                    </p>
+                    {optionalTemplates.map(tmpl => {
+                      const selected = selectedTemplateIds.includes(tmpl.templateId);
+                      return (
+                        <div key={tmpl.templateId} className="mb-3">
+                          <label className="flex items-center gap-2 cursor-pointer mb-1">
+                            <input
+                              type="checkbox"
+                              checked={selected}
+                              onChange={e => {
+                                setSelectedTemplateIds(prev =>
+                                  e.target.checked
+                                    ? [...prev, tmpl.templateId]
+                                    : prev.filter(id => id !== tmpl.templateId)
+                                );
+                              }}
+                              className="h-4 w-4 text-blue-600 rounded"
+                            />
+                            <span className="text-sm font-medium text-gray-700">{tmpl.name}</span>
+                            {tmpl.description && (
+                              <span className="text-xs text-gray-400">{tmpl.description}</span>
+                            )}
+                          </label>
+                          {selected && (
+                            <div className="ml-6">
+                              <TemplateFieldInputs
+                                template={tmpl}
+                                values={templateTagValues}
+                                onChange={setTemplateTagValues}
+                                locked={false}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Custom key/value tags */}
+                <div>
+                  <div className="flex justify-between items-center mb-2">
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Custom Tags</p>
+                    <button
+                      type="button"
+                      onClick={() => setCustomTags(prev => [...prev, { key: '', value: '' }])}
+                      className="text-xs text-blue-600 hover:text-blue-800"
+                    >
+                      + Add Tag
+                    </button>
+                  </div>
+                  {customTags.length === 0 ? (
+                    <p className="text-xs text-gray-400">No custom tags added</p>
+                  ) : (
+                    <div className="space-y-2">
+                      {customTags.map((ct, i) => (
+                        <div key={i} className="flex gap-2 items-center">
+                          <input
+                            type="text"
+                            value={ct.key}
+                            onChange={e => setCustomTags(prev => prev.map((t, idx) => idx === i ? { ...t, key: e.target.value } : t))}
+                            placeholder="Key"
+                            className="w-32 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+                          />
+                          <input
+                            type="text"
+                            value={ct.value}
+                            onChange={e => setCustomTags(prev => prev.map((t, idx) => idx === i ? { ...t, value: e.target.value } : t))}
+                            placeholder="Value"
+                            className="flex-1 px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setCustomTags(prev => prev.filter((_, idx) => idx !== i))}
+                            className="text-red-500 hover:text-red-700 text-xs px-1"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Preview of merged tags */}
+                {(() => {
+                  const preview: Record<string, string> = {};
+                  const allSel = [...requiredTemplates, ...optionalTemplates.filter(t => selectedTemplateIds.includes(t.templateId))];
+                  for (const tmpl of allSel) {
+                    for (const field of tmpl.fields) {
+                      const val = templateTagValues[field.key] ?? field.defaultValue;
+                      if (val) preview[field.key] = val;
+                    }
+                  }
+                  for (const ct of customTags) {
+                    if (ct.key.trim()) preview[ct.key.trim()] = ct.value;
+                  }
+                  const entries = Object.entries(preview);
+                  if (!entries.length) return null;
+                  return (
+                    <div className="mt-2 p-3 bg-gray-50 rounded-lg border border-gray-100">
+                      <p className="text-xs font-medium text-gray-600 mb-1.5">Tag Preview ({entries.length})</p>
+                      <div className="flex flex-wrap gap-1">
+                        {entries.map(([k, v]) => (
+                          <span key={k} className="px-2 py-0.5 bg-blue-100 text-blue-800 text-xs rounded-full font-mono">
+                            {k}={v}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
           </div>
 
           {/* Security Group Configuration */}

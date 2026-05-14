@@ -85,6 +85,7 @@ interface LaunchWorkstationRequest {
   region: string;
   instanceType: string;
   osVersion: string;
+  platform?: 'windows' | 'linux';
   authMethod: 'domain' | 'local';
   domainConfig?: {
     domainName: string;
@@ -92,6 +93,9 @@ interface LaunchWorkstationRequest {
   };
   localAdminConfig?: {
     username: string;
+  };
+  linuxConfig?: {
+    adminUsername?: string;
   };
   autoTerminateHours?: number;
   tags?: Record<string, string>;
@@ -199,10 +203,12 @@ interface WorkstationRecord {
   securityGroupId: string;
   publicIp?: string;
   privateIp?: string;
+  platform: 'windows' | 'linux';
   authMethod: 'domain' | 'local';
   domainJoined?: boolean;
   domainName?: string;
   localAdminUser?: string;
+  linuxAdminUser?: string;
   credentialsSecretArn?: string;
   status: 'launching' | 'running' | 'stopping' | 'stopped' | 'terminated';
   launchTime: string;
@@ -797,11 +803,18 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
       };
     }
 
-    // Get latest Windows AMI
-    console.log('Finding Windows AMI for:', request.osVersion);
-    const amiId = await getLatestWindowsAMI(request.osVersion);
+    // Determine platform from explicit field or osVersion prefix
+    const isLinux = request.platform === 'linux' || isLinuxOsVersion(request.osVersion);
+    const platform: 'windows' | 'linux' = isLinux ? 'linux' : 'windows';
+    console.log(`Platform detected: ${platform} (osVersion: ${request.osVersion})`);
+
+    // Get latest AMI for the requested OS
+    console.log('Finding AMI for:', request.osVersion);
+    const amiId = isLinux
+      ? await getLatestLinuxAMI(request.osVersion)
+      : await getLatestWindowsAMI(request.osVersion);
     if (!amiId) {
-      console.error('❌ Could not find Windows AMI for:', request.osVersion);
+      console.error('❌ Could not find AMI for:', request.osVersion);
       return {
         statusCode: 400,
         headers: {
@@ -810,7 +823,7 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
           'Access-Control-Allow-Headers': 'Content-Type,Authorization',
           'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
         },
-        body: JSON.stringify({ message: 'Could not find suitable Windows AMI' }),
+        body: JSON.stringify({ message: `Could not find suitable AMI for ${request.osVersion}` }),
       };
     }
     console.log('✅ Found AMI:', amiId);
@@ -874,26 +887,28 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
     console.log('UserData packages:', userDataPackages.map(p => p.name).join(', ') || 'none');
     console.log('Post-boot packages:', postBootPackages.map(p => p.name).join(', ') || 'none');
 
-    // Create credentials first if using local admin (need password for user data script)
+    // Create credentials first (need password for user data script)
     let credentialsSecretArn: string | undefined;
     let adminPassword: string | undefined;
-    if (request.authMethod === 'local') {
-      try {
-        console.log('Creating local admin credentials...');
-        const credentials = await createLocalAdminCredentials(workstationId, request.localAdminConfig?.username || 'Administrator');
-        credentialsSecretArn = credentials.arn;
-        adminPassword = credentials.password;
-        console.log('✅ Credentials created:', credentialsSecretArn);
-      } catch (credError) {
-        console.error('⚠️  Warning: Failed to create credentials:', credError);
-        // Generate a temporary password to allow instance to launch
-        adminPassword = generateSecurePassword();
-      }
+    const credUsername = isLinux
+      ? getLinuxDefaultUser(request.osVersion)
+      : (request.localAdminConfig?.username || 'Administrator');
+    try {
+      console.log('Creating admin credentials...');
+      const credentials = await createLocalAdminCredentials(workstationId, credUsername);
+      credentialsSecretArn = credentials.arn;
+      adminPassword = credentials.password;
+      console.log('✅ Credentials created:', credentialsSecretArn);
+    } catch (credError) {
+      console.error('⚠️  Warning: Failed to create credentials:', credError);
+      adminPassword = generateSecurePassword();
     }
 
-    // Generate user data script with ONLY critical packages (must be after password is created)
-    console.log('Generating user data script with critical packages only...');
-    const userData = generateUserDataScript(request, workstationId, userDataPackages, adminPassword);
+    // Generate user data script — Linux uses bash, Windows uses PowerShell
+    console.log('Generating user data script...');
+    const userData = isLinux
+      ? generateLinuxUserDataScript(request, workstationId, adminPassword)
+      : generateUserDataScript(request, workstationId, userDataPackages, adminPassword);
     console.log(`UserData script size: ${userData.length} bytes (limit: 16384 bytes)`);
 
     // Launch EC2 instance with retry logic for capacity issues
@@ -1018,9 +1033,10 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
 
     // Credentials were already created before EC2 launch
 
-    // Automatically add user's IP to security group for RDP access
+    // Automatically add user's IP to security group for remote access
     try {
-      console.log('Adding user IP to security group for RDP access...');
+      const accessProto = platform === 'linux' ? 'DCV/SSH' : 'RDP';
+      console.log(`Adding user IP to security group for ${accessProto} access...`);
       const userIp = await getUserIpAddress(event);
       if (userIp) {
         await addIpToSecurityGroup(securityGroupId, userIp, `Auto-added for ${userId} on launch`);
@@ -1030,7 +1046,6 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
       }
     } catch (ipError) {
       console.warn('⚠️  Failed to add user IP to security group:', ipError);
-      // Continue - workstation is still usable, user can manually add IP
     }
 
     // Calculate estimated costs
@@ -1040,6 +1055,8 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
 
     // Store workstation record in DynamoDB
     console.log('Storing workstation record in DynamoDB...');
+    const linuxAdminUser = isLinux ? getLinuxDefaultUser(request.osVersion) : undefined;
+
     const workstationRecord: WorkstationRecord = {
       PK: `WORKSTATION#${workstationId}`,
       SK: 'METADATA',
@@ -1050,13 +1067,15 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
       availabilityZone: runResult.Instances?.[0]?.Placement?.AvailabilityZone || '',
       instanceType: request.instanceType,
       osVersion: request.osVersion,
+      platform,
       amiId,
       vpcId: VPC_ID,
       subnetId,
       securityGroupId,
       authMethod: request.authMethod,
       domainName: request.domainConfig?.domainName,
-      localAdminUser: request.localAdminConfig?.username || 'Administrator',
+      localAdminUser: isLinux ? undefined : (request.localAdminConfig?.username || 'Administrator'),
+      linuxAdminUser,
       credentialsSecretArn,
       status: 'launching',
       launchTime: timestamp,
@@ -1815,7 +1834,8 @@ async function reconcileWorkstations(userId: string): Promise<APIGatewayProxyRes
           region: process.env.AWS_REGION || 'us-west-2',
           availabilityZone: instance.Placement?.AvailabilityZone || '',
           instanceType: instance.InstanceType || 'unknown',
-          osVersion: 'Windows Server 2022', // Default assumption
+          osVersion: 'windows-server-2022', // Default assumption for reconciled instances
+          platform: 'windows',
           amiId: instance.ImageId || '',
           vpcId: instance.VpcId || VPC_ID,
           subnetId: instance.SubnetId || '',
@@ -2290,6 +2310,287 @@ if(Test-Path "C:\\\\Program Files\\\\NICE\\\\DCV\\\\Server\\\\bin\\\\dcv.exe"){$
 </powershell>`;
 
   return script;
+}
+
+// Returns true when the osVersion string identifies a Linux distro
+function isLinuxOsVersion(osVersion: string): boolean {
+  return osVersion.startsWith('ubuntu') || osVersion === 'al2023' || osVersion.startsWith('rocky');
+}
+
+// Returns the default SSH/login username baked into each Linux AMI
+function getLinuxDefaultUser(osVersion: string): string {
+  if (osVersion.startsWith('ubuntu')) return 'ubuntu';
+  if (osVersion === 'al2023') return 'ec2-user';
+  if (osVersion.startsWith('rocky')) return 'rocky';
+  return 'ec2-user';
+}
+
+async function getLatestLinuxAMI(osVersion: string): Promise<string | null> {
+  const versionMap: Record<string, { name: string; owner: string }> = {
+    'ubuntu-22-04': {
+      name: 'ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*',
+      owner: '099720109477', // Canonical
+    },
+    'ubuntu-24-04': {
+      name: 'ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*',
+      owner: '099720109477', // Canonical
+    },
+    'al2023': {
+      name: 'al2023-ami-2023.*-x86_64',
+      owner: '137112412989', // Amazon
+    },
+    'rocky-linux-9': {
+      name: 'Rocky-9-EC2-Base-*.x86_64-*',
+      owner: '679593333241', // Rocky Enterprise Software Foundation
+    },
+  };
+
+  const config = versionMap[osVersion];
+  if (!config) {
+    console.error(`Unsupported Linux OS version: ${osVersion}`);
+    console.error(`Supported Linux versions: ${Object.keys(versionMap).join(', ')}`);
+    return null;
+  }
+
+  try {
+    const result = await ec2Client.send(new DescribeImagesCommand({
+      Filters: [
+        { Name: 'name', Values: [config.name] },
+        { Name: 'owner-id', Values: [config.owner] },
+        { Name: 'state', Values: ['available'] },
+        { Name: 'architecture', Values: ['x86_64'] },
+      ],
+    }));
+
+    const images = result.Images?.sort((a, b) =>
+      new Date(b.CreationDate || '').getTime() - new Date(a.CreationDate || '').getTime()
+    );
+
+    if (!images || images.length === 0) {
+      console.error(`No AMI found for Linux OS version: ${osVersion}`);
+      return null;
+    }
+
+    console.log(`Found Linux AMI: ${images[0].ImageId} (${images[0].Name})`);
+    return images[0].ImageId || null;
+  } catch (error) {
+    console.error('Error retrieving Linux AMI:', error);
+    return null;
+  }
+}
+
+function generateLinuxUserDataScript(
+  request: LaunchWorkstationRequest,
+  workstationId: string,
+  adminPassword?: string
+): string {
+  const osVersion = request.osVersion;
+  const adminUser = getLinuxDefaultUser(osVersion);
+  const password = adminPassword || '';
+
+  if (osVersion.startsWith('ubuntu')) {
+    const dcvPkg = osVersion === 'ubuntu-24-04' ? 'nice-dcv-ubuntu2404-x86_64.tgz' : 'nice-dcv-ubuntu2204-x86_64.tgz';
+    return generateUbuntuUserData(workstationId, adminUser, password, dcvPkg);
+  } else if (osVersion === 'al2023') {
+    return generateAL2023UserData(workstationId, adminUser, password);
+  } else if (osVersion.startsWith('rocky')) {
+    return generateRockyLinuxUserData(workstationId, adminUser, password);
+  }
+
+  // Fallback to AL2023-style script
+  return generateAL2023UserData(workstationId, adminUser, password);
+}
+
+function generateUbuntuUserData(workstationId: string, adminUser: string, password: string, dcvPackageTgz = 'nice-dcv-ubuntu2204-x86_64.tgz'): string {
+  // e.g. "ubuntu2204-x86_64" — used to glob-match the extracted directory name
+  const dcvOsSuffix = dcvPackageTgz.replace('nice-dcv-', '').replace('.tgz', '');
+  return `#!/bin/bash
+exec > >(tee /var/log/workstation-setup.log) 2>&1
+echo "[NyroForge] Ubuntu workstation setup started"
+
+# Set admin password and allow password auth
+echo '${adminUser}:${password}' | chpasswd
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+systemctl restart ssh
+
+# Update packages
+apt-get update -y
+
+# Install minimal GNOME desktop
+DEBIAN_FRONTEND=noninteractive apt-get install -y ubuntu-desktop-minimal xorg dbus-x11
+systemctl set-default graphical.target
+systemctl enable gdm3 2>/dev/null || systemctl enable gdm 2>/dev/null || true
+
+# Install CloudWatch agent
+curl -fsSO https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+dpkg -i amazon-cloudwatch-agent.deb 2>/dev/null || true
+
+# Install NICE DCV server
+cd /tmp
+wget -q https://d1uj6qtbmh3dt5.cloudfront.net/NICE-GPG-KEY && gpg --import NICE-GPG-KEY 2>/dev/null || true
+wget -q https://d1uj6qtbmh3dt5.cloudfront.net/${dcvPackageTgz}
+if [ -f ${dcvPackageTgz} ]; then
+  tar -xzf ${dcvPackageTgz}
+  DCVDIR=$(ls -d nice-dcv-*-${dcvOsSuffix} 2>/dev/null | head -1)
+  if [ -n "$DCVDIR" ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ./$DCVDIR/nice-dcv-server_*.deb ./$DCVDIR/nice-dcv-web-viewer_*.deb 2>/dev/null || true
+  fi
+fi
+
+# Configure NICE DCV for automatic GUI session
+mkdir -p /etc/dcv
+cat > /etc/dcv/dcv.conf << 'DCVCONF'
+[connectivity]
+enable-quic-frontend=true
+quic-port=8443
+web-port=8443
+
+[security]
+authentication=system
+
+[session-management]
+create-session=true
+
+[session-management/automatic-console-session]
+owner=${adminUser}
+DCVCONF
+
+# Open DCV ports in firewall
+ufw allow 8443/tcp 2>/dev/null || true
+ufw allow 8443/udp 2>/dev/null || true
+
+# Start NICE DCV
+systemctl enable dcvserver 2>/dev/null || true
+systemctl start dcvserver 2>/dev/null || true
+
+# Completion marker
+echo '{"WorkstationId":"${workstationId}","Status":"Ready","Platform":"linux","OsVersion":"ubuntu","Timestamp":"'$(date -Iseconds)'"}' > /var/log/workstation-setup-complete.json
+echo "[NyroForge] Setup complete"
+`;
+}
+
+function generateAL2023UserData(workstationId: string, adminUser: string, password: string): string {
+  return `#!/bin/bash
+exec > >(tee /var/log/workstation-setup.log) 2>&1
+echo "[NyroForge] AL2023 workstation setup started"
+
+# Set admin password and allow password auth
+echo '${adminUser}:${password}' | chpasswd
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+systemctl restart sshd
+
+# Install GNOME desktop
+dnf groupinstall -y "GNOME Desktop" 2>/dev/null || dnf install -y @gnome 2>/dev/null || true
+systemctl set-default graphical.target
+
+# Install CloudWatch agent
+rpm -Uvh https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm 2>/dev/null || true
+
+# Install NICE DCV server
+rpm --import https://d1uj6qtbmh3dt5.cloudfront.net/NICE-GPG-KEY 2>/dev/null || true
+cd /tmp
+wget -q https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-el9-x86_64.tgz
+if [ -f nice-dcv-el9-x86_64.tgz ]; then
+  tar -xzf nice-dcv-el9-x86_64.tgz
+  DCVDIR=$(ls -d nice-dcv-*-el9-x86_64 2>/dev/null | head -1)
+  if [ -n "$DCVDIR" ]; then
+    dnf install -y ./$DCVDIR/nice-dcv-server-*.rpm ./$DCVDIR/nice-dcv-web-viewer-*.rpm 2>/dev/null || true
+  fi
+fi
+
+# Configure NICE DCV
+mkdir -p /etc/dcv
+cat > /etc/dcv/dcv.conf << 'DCVCONF'
+[connectivity]
+enable-quic-frontend=true
+quic-port=8443
+web-port=8443
+
+[security]
+authentication=system
+
+[session-management]
+create-session=true
+
+[session-management/automatic-console-session]
+owner=${adminUser}
+DCVCONF
+
+# Open DCV ports
+firewall-cmd --permanent --add-port=8443/tcp 2>/dev/null || true
+firewall-cmd --permanent --add-port=8443/udp 2>/dev/null || true
+firewall-cmd --reload 2>/dev/null || true
+
+# Start NICE DCV
+systemctl enable dcvserver 2>/dev/null || true
+systemctl start dcvserver 2>/dev/null || true
+
+# Completion marker
+echo '{"WorkstationId":"${workstationId}","Status":"Ready","Platform":"linux","OsVersion":"al2023","Timestamp":"'$(date -Iseconds)'"}' > /var/log/workstation-setup-complete.json
+echo "[NyroForge] Setup complete"
+`;
+}
+
+function generateRockyLinuxUserData(workstationId: string, adminUser: string, password: string): string {
+  return `#!/bin/bash
+exec > >(tee /var/log/workstation-setup.log) 2>&1
+echo "[NyroForge] Rocky Linux 9 workstation setup started"
+
+# Set admin password and allow password auth
+echo '${adminUser}:${password}' | chpasswd
+sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+systemctl restart sshd
+
+# Install GNOME desktop
+dnf groupinstall -y "Server with GUI" 2>/dev/null || dnf install -y @gnome 2>/dev/null || true
+systemctl set-default graphical.target
+
+# Install CloudWatch agent
+rpm -Uvh https://s3.amazonaws.com/amazoncloudwatch-agent/redhat/amd64/latest/amazon-cloudwatch-agent.rpm 2>/dev/null || true
+
+# Install NICE DCV server
+rpm --import https://d1uj6qtbmh3dt5.cloudfront.net/NICE-GPG-KEY 2>/dev/null || true
+cd /tmp
+wget -q https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-el9-x86_64.tgz
+if [ -f nice-dcv-el9-x86_64.tgz ]; then
+  tar -xzf nice-dcv-el9-x86_64.tgz
+  DCVDIR=$(ls -d nice-dcv-*-el9-x86_64 2>/dev/null | head -1)
+  if [ -n "$DCVDIR" ]; then
+    dnf install -y ./$DCVDIR/nice-dcv-server-*.rpm ./$DCVDIR/nice-dcv-web-viewer-*.rpm 2>/dev/null || true
+  fi
+fi
+
+# Configure NICE DCV
+mkdir -p /etc/dcv
+cat > /etc/dcv/dcv.conf << 'DCVCONF'
+[connectivity]
+enable-quic-frontend=true
+quic-port=8443
+web-port=8443
+
+[security]
+authentication=system
+
+[session-management]
+create-session=true
+
+[session-management/automatic-console-session]
+owner=${adminUser}
+DCVCONF
+
+# Open DCV ports
+firewall-cmd --permanent --add-port=8443/tcp 2>/dev/null || true
+firewall-cmd --permanent --add-port=8443/udp 2>/dev/null || true
+firewall-cmd --reload 2>/dev/null || true
+
+# Start NICE DCV
+systemctl enable dcvserver 2>/dev/null || true
+systemctl start dcvserver 2>/dev/null || true
+
+# Completion marker
+echo '{"WorkstationId":"${workstationId}","Status":"Ready","Platform":"linux","OsVersion":"rocky-linux-9","Timestamp":"'$(date -Iseconds)'"}' > /var/log/workstation-setup-complete.json
+echo "[NyroForge] Setup complete"
+`;
 }
 
 async function createLocalAdminCredentials(workstationId: string, username: string): Promise<{ arn: string; password: string }> {

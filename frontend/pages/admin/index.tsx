@@ -7,6 +7,8 @@ import { useAuthStore } from '@/stores/authStore'
 import SecurityManagement from '@/components/admin/SecurityManagement'
 import CostAnalytics from '@/components/admin/CostAnalytics'
 import BootstrapPackageManagement from '@/components/admin/BootstrapPackageManagement'
+import { TagTemplateManagement } from '@/components/admin/TagTemplateManagement'
+import { TagReportingPanel } from '@/components/admin/TagReportingPanel'
 import AnalyticsDashboard from '@/components/admin/AnalyticsDashboard'
 import CognitoGroupsList from '@/components/admin/CognitoGroupsList'
 import EnhancedUserEditModal from '@/components/admin/EnhancedUserEditModal'
@@ -188,7 +190,7 @@ export default function AdminPage() {
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">ADMIN MENU</h2>
               <div className="space-y-1">
-                {['workstations', 'instance-scope', 'instance-families', 'costs', 'user-management', 'security', 'storage', 'analytics', 'settings', 'bootstrap'].map(tab => (
+                {['workstations', 'instance-scope', 'instance-families', 'costs', 'user-management', 'security', 'storage', 'analytics', 'settings', 'bootstrap', 'tags', 'tag-report'].map(tab => (
                   <button
                     key={tab}
                     onClick={() => setActiveTab(tab)}
@@ -201,9 +203,11 @@ export default function AdminPage() {
                     {tab === 'bootstrap' ? 'Bootstrap Packages' :
                      tab === 'analytics' ? 'Analytics' :
                      tab === 'user-management' ? 'User Management' :
-                     tab === 'storage' ? '💾 Storage' :
-                     tab === 'instance-scope' ? '🎯 Instance Scope' :
-                     tab === 'instance-families' ? '🖥️ Instance Families' :
+                     tab === 'storage' ? 'Storage' :
+                     tab === 'instance-scope' ? 'Instance Scope' :
+                     tab === 'instance-families' ? 'Instance Families' :
+                     tab === 'tags' ? 'Tag Templates' :
+                     tab === 'tag-report' ? 'Tag Compliance' :
                      tab.charAt(0).toUpperCase() + tab.slice(1)}
                   </button>
                 ))}
@@ -987,6 +991,14 @@ export default function AdminPage() {
 
             {activeTab === 'bootstrap' && (
               <BootstrapPackageManagement />
+            )}
+
+            {activeTab === 'tags' && (
+              <TagTemplateManagement />
+            )}
+
+            {activeTab === 'tag-report' && (
+              <TagReportingPanel />
             )}
           </div>
 
