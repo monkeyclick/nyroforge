@@ -108,4 +108,4 @@ frontendStack.addDependency(adminApiStack);
 // Add tags to all stacks
 cdk.Tags.of(app).add('Project', 'MediaWorkstationAutomation');
 cdk.Tags.of(app).add('Environment', environmentType);
-cdk.Tags.of(app).add('Owner', 'MediaTeam');
+cdk.Tags.of(app).add('owner', 'MediaTeam');
