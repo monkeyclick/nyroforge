@@ -45,7 +45,7 @@ const storageStack = new EnterpriseStorageStack(app, 'WorkstationStorage', {
   environment: environmentType,
   costCenter: process.env.COST_CENTER,
   // Enable EFS and S3 transfer by default, FSx optional
-  enableEfs: true,
+  enableEfs: process.env.ENABLE_EFS === 'true',
   enableS3Transfer: true,
   enableFsxWindows: process.env.ENABLE_FSX_WINDOWS === 'true',
   enableFsxLustre: process.env.ENABLE_FSX_LUSTRE === 'true',
