@@ -32,7 +32,7 @@ export interface WorkstationInfrastructureStackProps extends cdk.StackProps {
 }
 
 export class WorkstationInfrastructureStack extends cdk.Stack {
-  public readonly vpc: ec2.Vpc;
+  public readonly vpc: ec2.IVpc;
   public tables: {
     workstations: dynamodb.Table;
     costs: dynamodb.Table;
@@ -70,12 +70,6 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
     const isProd = process.env.ENVIRONMENT === 'production' || process.env.NODE_ENV === 'production';
     this.removalPolicy = isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY;
 
-    // Determine VPC removal policy based on props
-    // Default to RETAIN to prevent deletion failures when external resources use VPC
-    const vpcRemovalPolicy = (props?.retainVpcOnDelete ?? true)
-      ? cdk.RemovalPolicy.RETAIN
-      : cdk.RemovalPolicy.DESTROY;
-
     // Create KMS key for encryption
     this.kmsKey = new kms.Key(this, 'WorkstationKMSKey', {
       description: 'KMS key for Media Workstation Automation System',
@@ -85,43 +79,12 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     this.kmsKey.addAlias('alias/media-workstation-automation');
 
-    // Create VPC with public and private subnets
-    // NOTE: VPC and subnets are set to RETAIN by default to prevent deletion failures
-    // when external resources (EKS clusters, Lambda in VPC, EFS mount targets) are using them.
-    // This addresses the "subnet has dependencies and cannot be deleted" error.
-    this.vpc = new ec2.Vpc(this, 'WorkstationVPC', {
-      ipAddresses: ec2.IpAddresses.cidr('10.0.0.0/16'),
-      maxAzs: 3,
-      natGateways: 1,
-      subnetConfiguration: [
-        {
-          cidrMask: 24,
-          name: 'Public',
-          subnetType: ec2.SubnetType.PUBLIC,
-        },
-        {
-          cidrMask: 24,
-          name: 'Private',
-          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
-        },
-      ],
-      gatewayEndpoints: {
-        S3: {
-          service: ec2.GatewayVpcEndpointAwsService.S3,
-        },
-        DynamoDB: {
-          service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
-        },
-      },
+    // Use existing VPC instead of creating a new one.
+    // Set WORKSTATION_VPC_ID to your VPC; the placeholder default matches the
+    // cached lookup in cdk.context.json so `cdk synth` works without credentials.
+    this.vpc = ec2.Vpc.fromLookup(this, 'WorkstationVPC', {
+      vpcId: process.env.WORKSTATION_VPC_ID || 'vpc-0123456789abcdef0',
     });
-
-    // Apply removal policy to VPC and all its resources
-    // This prevents DELETE_FAILED errors when subnets have dependencies from:
-    // - EKS cluster network interfaces
-    // - Lambda ENIs in VPC
-    // - EFS mount targets
-    // - NAT Gateway ENIs
-    this.applyVpcRetentionPolicy(vpcRemovalPolicy);
 
     // Create VPC endpoints for AWS services
     this.createVpcEndpoints();
@@ -164,39 +127,61 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
   }
 
   private createVpcEndpoints(): void {
-    // EC2 VPC Endpoint
-    this.vpc.addInterfaceEndpoint('EC2Endpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.EC2,
-      privateDnsEnabled: true,
-    });
+    // scripts/check-vpc-endpoints.js runs before synthesis and writes the service
+    // short-names of endpoints that already exist in the VPC (but are NOT owned by
+    // this stack) into cdk.context.json under 'nyroforge:vpc-endpoints'.
+    //
+    // Example: ['s3', 'dynamodb'] when deploying into a VPC that already has
+    // those gateway endpoints — recreating them would fail with
+    // "route table already has a route".
+    //
+    // Endpoints this stack created on a previous deployment have the
+    // aws:cloudformation:stack-name tag, so the pre-check script excludes them
+    // and CDK continues to manage them normally.
+    const existingEndpoints: string[] = this.node.tryGetContext('nyroforge:vpc-endpoints') ?? [];
+    const skip = (name: string): boolean => {
+      if (existingEndpoints.includes(name)) {
+        process.stdout.write(`[vpc-endpoints] Skipping ${name} — already exists in VPC (not CDK-managed)\n`);
+        return true;
+      }
+      return false;
+    };
 
-    // Systems Manager VPC Endpoints
-    this.vpc.addInterfaceEndpoint('SSMEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.SSM,
-      privateDnsEnabled: true,
-    });
+    // Gateway endpoints — add routes to all VPC route tables.
+    // Skip if the VPC already has them; duplicates cause deployment errors.
+    if (!skip('s3')) {
+      new ec2.GatewayVpcEndpoint(this, 'S3GatewayEndpoint', {
+        service: ec2.GatewayVpcEndpointAwsService.S3,
+        vpc: this.vpc,
+      });
+    }
 
-    this.vpc.addInterfaceEndpoint('SSMMessagesEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES,
-      privateDnsEnabled: true,
-    });
+    if (!skip('dynamodb')) {
+      new ec2.GatewayVpcEndpoint(this, 'DynamoDBGatewayEndpoint', {
+        service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+        vpc: this.vpc,
+      });
+    }
 
-    this.vpc.addInterfaceEndpoint('EC2MessagesEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.EC2_MESSAGES,
-      privateDnsEnabled: true,
-    });
+    // Interface endpoints — private DNS within the VPC for each AWS service.
+    const interfaceEndpoints: Array<{ shortName: string; service: ec2.InterfaceVpcEndpointAwsService; id: string }> = [
+      { shortName: 'ec2',            service: ec2.InterfaceVpcEndpointAwsService.EC2,             id: 'EC2Endpoint' },
+      { shortName: 'ssm',            service: ec2.InterfaceVpcEndpointAwsService.SSM,             id: 'SSMEndpoint' },
+      { shortName: 'ssmmessages',    service: ec2.InterfaceVpcEndpointAwsService.SSM_MESSAGES,    id: 'SSMMessagesEndpoint' },
+      { shortName: 'ec2messages',    service: ec2.InterfaceVpcEndpointAwsService.EC2_MESSAGES,    id: 'EC2MessagesEndpoint' },
+      { shortName: 'secretsmanager', service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER, id: 'SecretsManagerEndpoint' },
+      { shortName: 'kms',            service: ec2.InterfaceVpcEndpointAwsService.KMS,             id: 'KMSEndpoint' },
+    ];
 
-    // Secrets Manager VPC Endpoint
-    this.vpc.addInterfaceEndpoint('SecretsManagerEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.SECRETS_MANAGER,
-      privateDnsEnabled: true,
-    });
-
-    // KMS VPC Endpoint
-    this.vpc.addInterfaceEndpoint('KMSEndpoint', {
-      service: ec2.InterfaceVpcEndpointAwsService.KMS,
-      privateDnsEnabled: true,
-    });
+    for (const ep of interfaceEndpoints) {
+      if (!skip(ep.shortName)) {
+        new ec2.InterfaceVpcEndpoint(this, ep.id, {
+          service: ep.service,
+          vpc: this.vpc,
+          privateDnsEnabled: true,
+        });
+      }
+    }
   }
 
   private createDynamoDBTables(): void {
@@ -1354,35 +1339,4 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
    *
    * @param removalPolicy - The removal policy to apply (RETAIN or DESTROY)
    */
-  private applyVpcRetentionPolicy(removalPolicy: cdk.RemovalPolicy): void {
-    // Apply to VPC construct
-    this.vpc.node.findAll().forEach((construct) => {
-      if (construct instanceof cdk.CfnResource) {
-        construct.applyRemovalPolicy(removalPolicy);
-      }
-    });
-
-    // Also apply UpdateReplacePolicy to prevent replacement issues
-    if (removalPolicy === cdk.RemovalPolicy.RETAIN) {
-      this.vpc.node.findAll().forEach((construct) => {
-        if (construct instanceof cdk.CfnResource) {
-          // Set UpdateReplacePolicy to Retain as well
-          // This ensures resources aren't deleted during updates that require replacement
-          const cfnResource = construct as cdk.CfnResource;
-          cfnResource.cfnOptions.updateReplacePolicy = cdk.CfnDeletionPolicy.RETAIN;
-        }
-      });
-    }
-
-    // Log which resources have retention policy applied (for debugging)
-    const retainedResources = this.vpc.node.findAll()
-      .filter((c) => c instanceof cdk.CfnResource)
-      .map((c) => (c as cdk.CfnResource).cfnResourceType);
-    
-    // Add metadata for visibility in CloudFormation
-    new cdk.CfnOutput(this, 'VpcRetentionPolicy', {
-      value: removalPolicy === cdk.RemovalPolicy.RETAIN ? 'RETAIN' : 'DESTROY',
-      description: 'VPC resources will be retained on stack deletion to prevent dependency conflicts',
-    });
-  }
 }
