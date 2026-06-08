@@ -13,7 +13,7 @@ import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
 
 export interface WorkstationApiStackProps extends cdk.StackProps {
-  vpc: ec2.Vpc;
+  vpc: ec2.IVpc;
   tables: {
     workstations: dynamodb.Table;
     costs: dynamodb.Table;
@@ -325,14 +325,11 @@ export class WorkstationApiStack extends cdk.Stack {
       ],
       resources: ['*'],
     }));
-    // EC2 mutating actions scoped to project-tagged resources
+    // EC2 creation/tagging actions — RequestTag is present when launching/tagging
     functions.ec2Management.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'ec2:RunInstances',
-        'ec2:TerminateInstances',
-        'ec2:StopInstances',
-        'ec2:StartInstances',
         'ec2:CreateTags',
         'ec2:ModifyInstanceAttribute',
         'ec2:AuthorizeSecurityGroupIngress',
@@ -340,7 +337,25 @@ export class WorkstationApiStack extends cdk.Stack {
       resources: ['*'],
       conditions: {
         'StringEquals': {
-          'aws:ResourceTag/Project': 'NyroForge',
+          'aws:RequestTag/Project': 'MediaWorkstationAutomation',
+        }
+      }
+    }));
+    // EC2 instance lifecycle actions (start/stop/reboot/terminate) scoped to
+    // project-tagged instances. These actions carry no RequestTag, so they must
+    // be scoped by the instance's existing resource tag instead.
+    functions.ec2Management.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'ec2:StartInstances',
+        'ec2:StopInstances',
+        'ec2:RebootInstances',
+        'ec2:TerminateInstances',
+      ],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:ResourceTag/Project': 'MediaWorkstationAutomation',
         }
       }
     }));
@@ -405,7 +420,7 @@ export class WorkstationApiStack extends cdk.Stack {
       resources: ['*'],
       conditions: {
         'StringEquals': {
-          'aws:ResourceTag/Project': 'NyroForge',
+          'aws:RequestTag/Project': 'MediaWorkstationAutomation',
         }
       }
     }));

@@ -297,7 +297,21 @@ aws secretsmanager create-secret \
 5. Click **Launch** and wait for the instance to reach the Running state (~3–5 minutes).
 6. Retrieve the RDP file or credentials from the workstation detail view.
 
-### 4.5 Create additional users
+### 4.5 Seed bootstrap packages
+
+The `WorkstationBootstrapPackages` DynamoDB table is empty after a fresh deployment. Without packages, the bootstrap package selector in the launch modal will show nothing. Seed default packages using `BatchWriteItem`:
+
+```bash
+TABLE=$(cat cdk-outputs.json | grep -o '"BootstrapPackagesTable"[^,]*' | cut -d'"' -f4 | head -1)
+# Or use the known table name: WorkstationBootstrapPackages
+aws dynamodb batch-write-item \
+  --request-items file://scripts/seed-bootstrap-packages.json \
+  --region "$CDK_DEFAULT_REGION"
+```
+
+> `isRequired` must be stored as a **String** (`"true"` / `"false"`), not a Boolean, because the `RequiredIndex` GSI uses `AttributeType.STRING`. Any seed script or manual write must use string values.
+
+### 4.6 Create additional users
 
 ```bash
 aws cognito-idp admin-create-user \
@@ -342,6 +356,31 @@ These variables are used during deployment. They are not required at runtime (th
 ---
 
 ## 6. Troubleshooting
+
+### Account-level constraints that affect deployment
+
+Some AWS accounts have constraints that require workarounds before `cdk deploy` will succeed:
+
+**VPC limit reached (default limit: 5 VPCs per region)**
+
+If `cdk deploy` fails because the VPC limit is exceeded, edit `lib/workstation-infrastructure-stack.ts` to reuse an existing VPC instead of creating one:
+
+```typescript
+// Replace new ec2.Vpc(...) with:
+const vpc = ec2.Vpc.fromLookup(this, 'WorkstationVPC', { vpcId: 'vpc-xxxxxxxxxxxxxxxxx' });
+```
+
+Change the `vpc` prop type in `lib/workstation-api-stack.ts` from `ec2.Vpc` to `ec2.IVpc`. Also replace `addInterfaceEndpoint()` calls with explicit `new ec2.InterfaceVpcEndpoint(...)` constructors. Check for existing S3/DynamoDB gateway endpoints before adding them — duplicate routes cause deployment failures.
+
+**Tag policy enforcement**
+
+Some AWS organizations enforce a tag policy requiring lowercase tag keys. If resource creation fails with a tag policy error, ensure all tag keys use lowercase (e.g., `owner`, not `Owner`). The CDK stack uses `owner` by default; check any Lambda functions for hardcoded `Owner` tag keys.
+
+**Subnets have `MapPublicIpOnLaunch=false`**
+
+If workstations launch without a public IP (DCV URL shows `https://undefined:8443`), add `AssociatePublicIpAddress: true` to the `NetworkInterfaces` block in `src/lambda/ec2-management/index.ts`.
+
+---
 
 ### Deployment fails with "CDK bootstrap required"
 
@@ -448,6 +487,25 @@ aws ec2 describe-vpc-endpoints \
   --output table \
   --region "$CDK_DEFAULT_REGION"
 ```
+
+### Admin panel shows no users / groups / roles
+
+1. Confirm `NEXT_PUBLIC_ADMIN_API_ENDPOINT` is set in the frontend build environment and points to the Admin API Gateway (`WorkstationAdminApi` stack output), not the main API.
+
+2. Confirm the Admin API routes reach the correct Lambda. The admin user and role endpoints are at `/users`, `/roles`, `/groups` on the Admin API — there is **no `/admin/` prefix** on the Admin API.
+
+3. Test the Lambda directly:
+   ```bash
+   aws lambda invoke \
+     --function-name workstation-cognito-admin-service \
+     --payload '{"httpMethod":"GET","path":"/users","pathParameters":null,"requestContext":{"authorizer":{"claims":{"cognito:groups":"workstation-admin","email":"you@example.com"}}}}' \
+     --cli-binary-format raw-in-base64-out \
+     /tmp/out.json && cat /tmp/out.json
+   ```
+
+4. If all users display as "No Name", the Lambda is returning raw Cognito records. Verify `mapCognitoUser()` is called inside `listUsers()`.
+
+5. If role create/update returns an error, check that `isSystem` is stored as the **string** `'false'` (not a boolean). The `SystemRoleIndex` GSI requires `AttributeType.STRING`.
 
 ### Frontend not loading or returns 403
 

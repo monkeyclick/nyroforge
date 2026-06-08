@@ -118,8 +118,8 @@ The foundational stack. All other stacks receive outputs from this one.
 
 | Resource | Details |
 |---|---|
-| **VPC** | CIDR `10.0.0.0/16`, 3 AZs, 1 NAT Gateway, public + private subnets |
-| **VPC Gateway Endpoints** | S3, DynamoDB (avoid NAT costs for high-volume traffic) |
+| **VPC** | CIDR `10.0.0.0/16`, 3 AZs, 1 NAT Gateway, public + private subnets. If the account is at the 5-VPC limit, replace `new ec2.Vpc(...)` with `ec2.Vpc.fromLookup(this, 'WorkstationVPC', { vpcId: '...' })` and change the stack prop type to `ec2.IVpc`. |
+| **VPC Gateway Endpoints** | S3, DynamoDB (avoid NAT costs for high-volume traffic). Skip creation when reusing an existing VPC — these endpoints often already exist and CDK will fail with "route table already has a route". |
 | **VPC Interface Endpoints** | EC2, SSM, SSM Messages, EC2 Messages, Secrets Manager, KMS |
 | **KMS Key** | Alias `alias/media-workstation-automation`, auto-rotation enabled |
 | **Workstation Security Group** | Ingress: RDP TCP/3389 from `10.0.0.0/8`; HTTPS TCP/443 from VPC CIDR for SSM |
@@ -169,7 +169,7 @@ Wraps `EnterpriseStorageConstruct`. All features are opt-in via environment flag
 
 | Resource | When enabled |
 |---|---|
-| **EFS File System** | Always (`enableEfs: true` default) |
+| **EFS File System** | `ENABLE_EFS=true` env var (opt-in; default **off** to avoid unexpected ~$30–500/month cost) |
 | **S3 Transfer Bucket** | Always (`enableS3Transfer: true` default) |
 | **FSx for Windows** | `ENABLE_FSX_WINDOWS=true` env var |
 | **FSx for Lustre** | `ENABLE_FSX_LUSTRE=true` env var |
@@ -222,7 +222,7 @@ All Lambda functions use Node.js 20.x and run inside the VPC private subnets. Co
 | `UserManagementServiceFunction` | `MediaWorkstation-UserManagementService` | User CRUD with Cognito sync; soft-delete/hard-delete; password management; SES email notifications | `GET/POST /admin/users`, `GET/PUT/DELETE /admin/users/{id}`, soft-delete, restore, password APIs | DynamoDB, Cognito IdP, SES |
 | `GroupManagementServiceFunction` | `MediaWorkstation-GroupManagementService` | Static and dynamic group management, hierarchical groups, rule evaluation | `GET/POST /admin/groups`, membership and rule APIs | DynamoDB |
 | `SecurityGroupServiceFunction` | `MediaWorkstation-SecurityGroupService` | EC2 security group CRUD, template rules (RDP, DCV, HP Anywhere), "allow my IP" | `GET/POST /admin/security-groups`, add/remove rule, attach-to-workstation | EC2 |
-| `CognitoAdminServiceFunction` | `MediaWorkstation-CognitoAdminService` | Cognito user and group administration for admin UI | `GET/POST/DELETE /admin/users`, roles, permissions, audit-logs | Cognito IdP, DynamoDB |
+| `CognitoAdminServiceFunction` | `workstation-cognito-admin-service` | Cognito user and group administration for admin UI — served by the **Admin API**, not the User API | `GET/POST/PUT/DELETE /users`, `GET/POST/PUT/DELETE /roles`, `GET /permissions`, `GET /audit-logs` (all paths are on the Admin API; no `/admin/` prefix) | Cognito IdP, DynamoDB |
 | `AmiValidationServiceFunction` | `MediaWorkstation-AmiValidationService` | Validates that a given AMI ID exists and is accessible in the target region | `GET/POST /admin/validate-ami` | EC2 (DescribeImages) |
 | `InstanceTypeServiceFunction` | `MediaWorkstation-InstanceTypeService` | Manages the allowed-instance-types allowlist; discovers GPU instances from EC2 API | `GET/PUT /admin/instance-types`, discover | EC2 (DescribeInstanceTypes), SSM |
 | `BootstrapConfigServiceFunction` | `MediaWorkstation-BootstrapConfigService` | CRUD for bootstrap packages (drivers, software) that are installed at workstation launch | `GET/POST/PUT/DELETE /admin/bootstrap-packages` | DynamoDB |
@@ -551,9 +551,11 @@ Browser                 CloudFront           API Gateway              Lambda    
 
 2. **Cognito Groups (coarse-grained):** Lambda reads `requestContext.authorizer.claims['cognito:groups']`. Membership in `workstation-admin` grants admin privileges.
 
-3. **DynamoDB RBAC (fine-grained):** Lambda resolves the caller's `EnhancedUser` record from DynamoDB, expands `roleIds` and `groupIds` to effective permissions, and enforces ownership checks (users can only operate on their own workstations unless they hold `workstations:manage-all`).
+3. **Cognito JWT claims (admin gate):** Admin operations in `user-management-service` and `cognito-admin-service` read `cognito:groups` from `event.requestContext.authorizer.claims` injected by the API Gateway authorizer. This is the primary admin check. Never rely solely on DynamoDB for admin permission checks — the `EnhancedUsers` table is only populated when users are explicitly synced and may be empty.
 
-4. **Frontend guard:** `useAuthStore.hasPermission()` / `isAdmin` hides or disables UI elements based on the Zustand permission set — but this is a UX layer only, not a security boundary.
+4. **DynamoDB RBAC (fine-grained):** Lambda resolves the caller's `EnhancedUser` record from DynamoDB, expands `roleIds` and `groupIds` to effective permissions, and enforces ownership checks (users can only operate on their own workstations unless they hold `workstations:manage-all`). Falls back to DynamoDB after the JWT claims check.
+
+5. **Frontend guard:** `useAuthStore.hasPermission()` / `isAdmin` hides or disables UI elements based on the Zustand permission set — but this is a UX layer only, not a security boundary.
 
 ---
 

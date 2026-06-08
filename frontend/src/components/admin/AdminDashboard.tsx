@@ -57,18 +57,62 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ className }) => 
     retry: 3,
   });
 
+  const invalidateWorkstations = () => {
+    queryClient.invalidateQueries({ queryKey: ['admin-workstations'] });
+    queryClient.invalidateQueries({ queryKey: ['admin-dashboard'] });
+  };
+
   // Terminate workstation mutation
   const terminateWorkstation = useMutation({
     mutationFn: (workstationId: string) => apiClient.terminateWorkstation(workstationId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin-workstations'] });
-      queryClient.invalidateQueries({ queryKey: ['admin-dashboard'] });
+      invalidateWorkstations();
       toast.success('Workstation terminated successfully');
     },
     onError: (error: any) => {
       toast.error(`Failed to terminate: ${error.message}`);
     },
   });
+
+  // Power action mutations (start / stop / reboot)
+  const startWorkstation = useMutation({
+    mutationFn: (workstationId: string) => apiClient.startWorkstation(workstationId),
+    onSuccess: () => {
+      invalidateWorkstations();
+      toast.success('Workstation is starting');
+    },
+    onError: (error: any) => {
+      toast.error(`Failed to start: ${error.message}`);
+    },
+  });
+
+  const stopWorkstation = useMutation({
+    mutationFn: (workstationId: string) => apiClient.stopWorkstation(workstationId),
+    onSuccess: () => {
+      invalidateWorkstations();
+      toast.success('Workstation is stopping');
+    },
+    onError: (error: any) => {
+      toast.error(`Failed to stop: ${error.message}`);
+    },
+  });
+
+  const rebootWorkstation = useMutation({
+    mutationFn: (workstationId: string) => apiClient.rebootWorkstation(workstationId),
+    onSuccess: () => {
+      invalidateWorkstations();
+      toast.success('Workstation is rebooting');
+    },
+    onError: (error: any) => {
+      toast.error(`Failed to reboot: ${error.message}`);
+    },
+  });
+
+  const anyPowerActionPending =
+    terminateWorkstation.isPending ||
+    startWorkstation.isPending ||
+    stopWorkstation.isPending ||
+    rebootWorkstation.isPending;
 
   if (!isAdmin) {
     return (
@@ -376,13 +420,48 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ className }) => 
                             {ws.publicIp || '-'}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                            <button
-                              onClick={() => terminateWorkstation.mutate(ws.instanceId)}
-                              disabled={terminateWorkstation.isPending}
-                              className="text-red-600 hover:text-red-900 disabled:opacity-50"
-                            >
-                              {terminateWorkstation.isPending ? 'Terminating...' : 'Terminate'}
-                            </button>
+                            <div className="flex items-center justify-end gap-3">
+                              {ws.status === 'stopped' && (
+                                <button
+                                  onClick={() => startWorkstation.mutate(ws.instanceId)}
+                                  disabled={anyPowerActionPending}
+                                  className="text-green-600 hover:text-green-900 disabled:opacity-50"
+                                >
+                                  Start
+                                </button>
+                              )}
+                              {ws.status === 'running' && (
+                                <>
+                                  <button
+                                    onClick={() => stopWorkstation.mutate(ws.instanceId)}
+                                    disabled={anyPowerActionPending}
+                                    className="text-yellow-600 hover:text-yellow-900 disabled:opacity-50"
+                                  >
+                                    Stop
+                                  </button>
+                                  <button
+                                    onClick={() => rebootWorkstation.mutate(ws.instanceId)}
+                                    disabled={anyPowerActionPending}
+                                    className="text-indigo-600 hover:text-indigo-900 disabled:opacity-50"
+                                  >
+                                    Reboot
+                                  </button>
+                                </>
+                              )}
+                              {(ws.status as string) !== 'terminated' && (ws.status as string) !== 'terminating' && (
+                                <button
+                                  onClick={() => {
+                                    if (confirm(`Terminate ${ws.instanceId}? This permanently destroys the instance.`)) {
+                                      terminateWorkstation.mutate(ws.instanceId);
+                                    }
+                                  }}
+                                  disabled={anyPowerActionPending}
+                                  className="text-red-600 hover:text-red-900 disabled:opacity-50"
+                                >
+                                  Terminate
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}

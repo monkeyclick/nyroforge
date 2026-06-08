@@ -10,6 +10,16 @@ interface CognitoGroup {
   CreationDate?: string;
 }
 
+// Map DynamoDB group (id/name) to CognitoGroup shape for display
+function toCognitoGroup(g: any): CognitoGroup {
+  return {
+    GroupName: g.GroupName || g.name || g.id,
+    Description: g.Description || g.description,
+    Precedence: g.Precedence,
+    CreationDate: g.CreationDate || g.createdAt,
+  };
+}
+
 const CognitoGroupsList: React.FC = () => {
   const [groups, setGroups] = useState<CognitoGroup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -26,11 +36,11 @@ const CognitoGroupsList: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
-      const response = await apiClient.get<{ groups: CognitoGroup[] }>('/admin/cognito-groups');
-      setGroups(response.groups);
+      const response = await apiClient.getGroups();
+      setGroups((response.groups || []).map(toCognitoGroup));
     } catch (err: any) {
-      setError(err.message || 'Failed to load Cognito groups');
-      console.error('Error loading Cognito groups:', err);
+      setError(err.message || 'Failed to load groups');
+      console.error('Error loading groups:', err);
     } finally {
       setLoading(false);
     }
@@ -39,7 +49,7 @@ const CognitoGroupsList: React.FC = () => {
   const handleCreateGroup = async (groupData: { groupName: string; description?: string; precedence?: number }) => {
     setCreating(true);
     try {
-      await apiClient.post('/admin/cognito-groups', groupData);
+      await apiClient.createGroup({ name: groupData.groupName, description: groupData.description || '', roleIds: [] });
       await loadGroups();
       setShowCreateModal(false);
     } catch (err: any) {
@@ -56,7 +66,7 @@ const CognitoGroupsList: React.FC = () => {
 
     setDeleting(groupName);
     try {
-      await apiClient.delete(`/admin/cognito-groups/${groupName}`);
+      await apiClient.deleteGroup(groupName);
       await loadGroups();
     } catch (err: any) {
       alert(`Failed to delete group: ${err.message}`);

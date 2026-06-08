@@ -137,6 +137,11 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   
+  // Tag state
+  const [tagPurpose, setTagPurpose] = useState('workstation');
+  const [tagDepartment, setTagDepartment] = useState('se');
+  const [tagLongRunning, setTagLongRunning] = useState(false);
+
   // Security group state
   const [securityGroupMode, setSecurityGroupMode] = useState<'existing' | 'new' | 'template'>('template');
   const [selectedSecurityGroup, setSelectedSecurityGroup] = useState('');
@@ -242,6 +247,16 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
       return;
     }
 
+    // Resolve owner from stored Cognito token
+    let ownerEmail = '';
+    try {
+      const tokenKey = Object.keys(localStorage).find(k => k.endsWith('.idToken'));
+      if (tokenKey) {
+        const payload64 = localStorage.getItem(tokenKey)?.split('.')[1] || '';
+        ownerEmail = JSON.parse(atob(payload64))?.email || '';
+      }
+    } catch (_) {}
+
     const payload: any = {
       region,
       instanceType,
@@ -249,7 +264,12 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
       authMethod: authMethod as 'local' | 'domain',
       autoTerminateHours,
       bootstrapPackages,
-      tags: {},
+      tags: {
+        purpose: tagPurpose,
+        department: tagDepartment,
+        owner: ownerEmail,
+        long_running: String(tagLongRunning),
+      },
     };
 
     // Add security group configuration
@@ -734,9 +754,48 @@ export const LaunchWorkstationModal: React.FC<LaunchWorkstationModalProps> = ({
             </div>
           </div>
 
+          {/* Tags */}
+          <div className="form-section mt-6">
+            <h4 className="text-sm font-semibold text-gray-700 mb-3">Tags</h4>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="form-group">
+                <label htmlFor="tagPurpose">Purpose</label>
+                <input
+                  id="tagPurpose"
+                  type="text"
+                  value={tagPurpose}
+                  onChange={(e) => setTagPurpose(e.target.value)}
+                  placeholder="e.g. workstation"
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="tagDepartment">Department</label>
+                <input
+                  id="tagDepartment"
+                  type="text"
+                  value={tagDepartment}
+                  onChange={(e) => setTagDepartment(e.target.value)}
+                  placeholder="e.g. se"
+                />
+              </div>
+            </div>
+            <div className="form-group mt-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={tagLongRunning}
+                  onChange={(e) => setTagLongRunning(e.target.checked)}
+                  className="w-4 h-4"
+                />
+                <span className="text-sm text-gray-700">Long-running instance</span>
+              </label>
+              <p className="text-xs text-gray-500 mt-1 ml-6">Marks this workstation with <code>long_running=true</code> for cost tracking</p>
+            </div>
+          </div>
+
           <div className="flex justify-end gap-3 mt-6">
-            <button 
-              type="button" 
+            <button
+              type="button"
               onClick={onClose}
               className="btn-primary"
               style={{ background: '#666' }}

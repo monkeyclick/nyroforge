@@ -8,6 +8,7 @@ import {
   AdminAddUserToGroupCommand,
   AdminRemoveUserFromGroupCommand,
   AdminListGroupsForUserCommand,
+  AdminUpdateUserAttributesCommand,
   ListGroupsCommand,
   CreateGroupCommand,
   DeleteGroupCommand,
@@ -15,7 +16,15 @@ import {
   AdminDisableUserCommand,
   AdminSetUserPasswordCommand
 } from '@aws-sdk/client-cognito-identity-provider';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient, ScanCommand, GetCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
+import { randomUUID } from 'crypto';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
+
+const ddbClient = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(ddbClient);
+const ROLES_TABLE = process.env.ROLES_TABLE || 'UserRoles';
+const AUDIT_TABLE = process.env.AUDIT_TABLE || 'AuditLogs';
 
 const cognitoClient = new CognitoIdentityProviderClient({});
 const USER_POOL_ID = process.env.USER_POOL_ID!;
@@ -40,43 +49,59 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // Route handlers
-    if (pathParts.includes('cognito-users')) {
-      // Handle group management routes first (more specific)
-      if (pathParts.includes('groups')) {
-        if (httpMethod === 'GET' && pathParts.length === 4) {
-          const username = pathParts[2];
+    // Support both /users and legacy /cognito-users path prefixes
+    if (pathParts.includes('users')) {
+      const usersIdx = pathParts.indexOf('users');
+      const username = pathParts[usersIdx + 1]; // undefined for /users (list/create)
+
+      // Handle group management sub-routes first (more specific)
+      if (pathParts.includes('groups') && username) {
+        if (httpMethod === 'GET') {
           return await getUserGroups(username);
-        } else if (httpMethod === 'POST' && pathParts.length === 4) {
-          const username = pathParts[2];
+        } else if (httpMethod === 'POST') {
           return await addToGroup(username, event);
-        } else if (httpMethod === 'DELETE' && pathParts.length === 5) {
-          const username = pathParts[2];
-          const groupName = pathParts[4];
+        } else if (httpMethod === 'DELETE') {
+          const groupName = pathParts[usersIdx + 3]; // /users/{user}/groups/{group}
           return await removeFromGroup(username, groupName);
         }
       }
       // Handle password reset route
-      else if (pathParts.includes('reset-password') && httpMethod === 'POST') {
-        const username = pathParts[2];
+      else if (pathParts.includes('reset-password') && httpMethod === 'POST' && username) {
         return await resetUserPassword(username, event);
       }
-      // Handle enable/disable routes
-      else if (pathParts.includes('enable') && httpMethod === 'POST') {
-        const username = pathParts[2];
+      // Handle activate (enable) / suspend (disable) routes
+      else if (pathParts.includes('activate') && httpMethod === 'POST' && username) {
         return await enableUser(username);
-      } else if (pathParts.includes('disable') && httpMethod === 'POST') {
-        const username = pathParts[2];
+      } else if (pathParts.includes('suspend') && httpMethod === 'POST' && username) {
         return await disableUser(username);
       }
       // Handle user CRUD routes
-      else if (httpMethod === 'GET' && pathParts.length === 2) {
+      else if (httpMethod === 'GET' && !username) {
         return await listUsers();
-      } else if (httpMethod === 'POST' && pathParts.length === 2) {
+      } else if (httpMethod === 'GET' && username) {
+        return await getUser(username);
+      } else if (httpMethod === 'POST' && !username) {
         return await createUser(event);
-      } else if (httpMethod === 'DELETE' && pathParts.length === 3) {
-        const username = pathParts[2];
+      } else if (httpMethod === 'PUT' && username) {
+        return await updateUser(username, event);
+      } else if (httpMethod === 'DELETE' && username) {
         return await deleteUser(username);
       }
+    } else if (pathParts.includes('roles')) {
+      if (httpMethod === 'GET' && pathParts.length === 1) {
+        return await listRoles();
+      } else if (httpMethod === 'POST' && pathParts.length === 1) {
+        return await createRole(event);
+      } else if (pathParts.length >= 2) {
+        const roleId = pathParts[pathParts.indexOf('roles') + 1];
+        if (httpMethod === 'GET') return await getRoleById(roleId);
+        if (httpMethod === 'PUT') return await updateRole(roleId, event);
+        if (httpMethod === 'DELETE') return await deleteRoleById(roleId);
+      }
+    } else if (pathParts.includes('permissions')) {
+      if (httpMethod === 'GET') return await listPermissions();
+    } else if (pathParts.includes('audit-logs')) {
+      if (httpMethod === 'GET') return await listAuditLogs(event);
     } else if (pathParts.includes('cognito-groups')) {
       if (httpMethod === 'GET' && pathParts.length === 2) {
         return await listGroups();
@@ -96,6 +121,34 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   }
 };
 
+function mapCognitoUser(user: any, groups: string[] = []): Record<string, any> {
+  const attrs: Record<string, string> = {};
+  for (const a of (user.Attributes || user.UserAttributes || [])) {
+    attrs[a.Name] = a.Value;
+  }
+  const givenName = attrs['given_name'] || '';
+  const familyName = attrs['family_name'] || '';
+  const name = [givenName, familyName].filter(Boolean).join(' ') || attrs['name'] || attrs['email']?.split('@')[0] || 'Unknown';
+  const status = !user.Enabled ? 'suspended' :
+    user.UserStatus === 'CONFIRMED' ? 'active' :
+    user.UserStatus === 'FORCE_CHANGE_PASSWORD' ? 'pending' : 'pending';
+  return {
+    id: attrs['sub'] || user.Username,
+    email: attrs['email'] || user.Username,
+    name,
+    status,
+    username: user.Username,
+    roleIds: groups.includes('workstation-admin') ? ['admin'] : [],
+    groupIds: groups,
+    directPermissions: groups.includes('workstation-admin') ? ['admin:full-access'] : [],
+    attributes: attrs,
+    preferences: {},
+    createdAt: user.UserCreateDate,
+    updatedAt: user.UserLastModifiedDate,
+    lastLoginAt: undefined,
+  };
+}
+
 async function listUsers(): Promise<APIGatewayProxyResult> {
   try {
     const command = new ListUsersCommand({
@@ -104,34 +157,27 @@ async function listUsers(): Promise<APIGatewayProxyResult> {
     });
 
     const response = await cognitoClient.send(command);
-    
-    // Get groups for each user
+
     const usersWithGroups = await Promise.all(
       (response.Users || []).map(async (user) => {
+        let groupNames: string[] = [];
         try {
-          const groupsCommand = new AdminListGroupsForUserCommand({
+          const groupsResponse = await cognitoClient.send(new AdminListGroupsForUserCommand({
             UserPoolId: USER_POOL_ID,
             Username: user.Username!
-          });
-          const groupsResponse = await cognitoClient.send(groupsCommand);
-          
-          return {
-            ...user,
-            Groups: groupsResponse.Groups || []
-          };
-        } catch (error) {
-          console.error(`Error fetching groups for user ${user.Username}:`, error);
-          return {
-            ...user,
-            Groups: []
-          };
+          }));
+          groupNames = (groupsResponse.Groups || []).map((g: any) => g.GroupName || '').filter(Boolean);
+        } catch (e) {
+          // ignore
         }
+        return mapCognitoUser(user, groupNames);
       })
     );
 
     return createSuccessResponse({
       users: usersWithGroups,
-      total: usersWithGroups.length
+      pagination: { total: usersWithGroups.length, page: 1, limit: 60, pages: 1 },
+      total: usersWithGroups.length,
     });
 
   } catch (error) {
@@ -154,11 +200,16 @@ async function createUser(event: APIGatewayProxyEvent): Promise<APIGatewayProxyR
       groupName
     } = body;
 
-    // Support both password formats
-    const userPassword = temporaryPassword || password;
-    
-    if (!email || !userPassword) {
-      return createErrorResponse(400, 'Email and password are required');
+    // Support both password formats; auto-generate a temp password if none provided
+    // (admin creates the account; user will be prompted to set their own password on first login)
+    const autoGenPassword = !temporaryPassword && !password
+      ? `Tmp-${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8).toUpperCase()}!1`
+      : null;
+    const userPassword = temporaryPassword || password || autoGenPassword;
+    const isAutoGenerated = !!autoGenPassword;
+
+    if (!email) {
+      return createErrorResponse(400, 'Email is required');
     }
 
     const userAttributes = [
@@ -222,7 +273,8 @@ async function createUser(event: APIGatewayProxyEvent): Promise<APIGatewayProxyR
 
     return createSuccessResponse({
       user: response.User,
-      message: 'User created successfully'
+      message: 'User created successfully',
+      ...(isAutoGenerated && { temporaryPassword: userPassword, note: 'A temporary password was auto-generated. Share it with the user and have them change it on first login.' }),
     });
 
   } catch (error) {
@@ -247,6 +299,167 @@ async function deleteUser(username: string): Promise<APIGatewayProxyResult> {
   } catch (error) {
     console.error('Error deleting user:', error);
     return createErrorResponse(500, 'Failed to delete user', error);
+  }
+}
+
+async function getUser(username: string): Promise<APIGatewayProxyResult> {
+  try {
+    const response = await cognitoClient.send(new AdminGetUserCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: username
+    }));
+
+    let groupNames: string[] = [];
+    try {
+      const groupsResponse = await cognitoClient.send(new AdminListGroupsForUserCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: username
+      }));
+      groupNames = (groupsResponse.Groups || []).map((g: any) => g.GroupName || '').filter(Boolean);
+    } catch (e) {
+      // ignore
+    }
+
+    return createSuccessResponse(mapCognitoUser(response, groupNames));
+  } catch (error: any) {
+    if (error.name === 'UserNotFoundException') {
+      return createErrorResponse(404, 'User not found');
+    }
+    console.error('Error getting user:', error);
+    return createErrorResponse(500, 'Failed to get user', error);
+  }
+}
+
+async function updateUser(username: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  try {
+    const body = JSON.parse(event.body || '{}');
+    const { name, firstName, lastName, email } = body;
+
+    const userAttributes: { Name: string; Value: string }[] = [];
+    if (email) userAttributes.push({ Name: 'email', Value: email });
+    if (name) {
+      const parts = name.split(' ');
+      userAttributes.push({ Name: 'given_name', Value: parts[0] });
+      if (parts.length > 1) userAttributes.push({ Name: 'family_name', Value: parts.slice(1).join(' ') });
+    } else {
+      if (firstName) userAttributes.push({ Name: 'given_name', Value: firstName });
+      if (lastName) userAttributes.push({ Name: 'family_name', Value: lastName });
+    }
+
+    if (userAttributes.length === 0) {
+      return createErrorResponse(400, 'No updatable attributes provided');
+    }
+
+    await cognitoClient.send(new AdminUpdateUserAttributesCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: username,
+      UserAttributes: userAttributes
+    }));
+
+    return createSuccessResponse({ message: `User ${username} updated successfully` });
+  } catch (error: any) {
+    if (error.name === 'UserNotFoundException') {
+      return createErrorResponse(404, 'User not found');
+    }
+    console.error('Error updating user:', error);
+    return createErrorResponse(500, 'Failed to update user', error);
+  }
+}
+
+// DynamoDB-backed role management (roles are stored in UserRoles table)
+async function listRoles(): Promise<APIGatewayProxyResult> {
+  try {
+    const result = await docClient.send(new ScanCommand({ TableName: ROLES_TABLE }));
+    return createSuccessResponse({ roles: result.Items || [] });
+  } catch (error) {
+    console.error('Error listing roles:', error);
+    return createErrorResponse(500, 'Failed to list roles', error);
+  }
+}
+
+async function getRoleById(roleId: string): Promise<APIGatewayProxyResult> {
+  try {
+    const result = await docClient.send(new GetCommand({ TableName: ROLES_TABLE, Key: { id: roleId } }));
+    if (!result.Item) return createErrorResponse(404, 'Role not found');
+    return createSuccessResponse(result.Item);
+  } catch (error) {
+    console.error('Error getting role:', error);
+    return createErrorResponse(500, 'Failed to get role', error);
+  }
+}
+
+async function createRole(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  try {
+    const body = JSON.parse(event.body || '{}');
+    const { name, description, permissions = [] } = body;
+    if (!name || !description) return createErrorResponse(400, 'Name and description are required');
+    const now = new Date().toISOString();
+    const role = { id: randomUUID(), name, description, permissions, isSystem: 'false', createdAt: now, updatedAt: now };
+    await docClient.send(new PutCommand({ TableName: ROLES_TABLE, Item: role }));
+    return createSuccessResponse(role);
+  } catch (error) {
+    console.error('Error creating role:', error);
+    return createErrorResponse(500, 'Failed to create role', error);
+  }
+}
+
+async function updateRole(roleId: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  try {
+    const body = JSON.parse(event.body || '{}');
+    const result = await docClient.send(new GetCommand({ TableName: ROLES_TABLE, Key: { id: roleId } }));
+    if (!result.Item) return createErrorResponse(404, 'Role not found');
+    if (result.Item.isSystem === true || result.Item.isSystem === 'true') return createErrorResponse(403, 'Cannot update system roles');
+    const role = { ...result.Item };
+    if (body.name !== undefined) role.name = body.name;
+    if (body.description !== undefined) role.description = body.description;
+    if (body.permissions !== undefined) role.permissions = body.permissions;
+    role.updatedAt = new Date().toISOString();
+    // GSI requires isSystem as string
+    if (typeof role.isSystem === 'boolean') role.isSystem = String(role.isSystem);
+    await docClient.send(new PutCommand({ TableName: ROLES_TABLE, Item: role }));
+    return createSuccessResponse(role);
+  } catch (error) {
+    console.error('Error updating role:', error);
+    return createErrorResponse(500, 'Failed to update role', error);
+  }
+}
+
+async function deleteRoleById(roleId: string): Promise<APIGatewayProxyResult> {
+  try {
+    const result = await docClient.send(new GetCommand({ TableName: ROLES_TABLE, Key: { id: roleId } }));
+    if (!result.Item) return createErrorResponse(404, 'Role not found');
+    if (result.Item.isSystem === true || result.Item.isSystem === 'true') return createErrorResponse(403, 'Cannot delete system roles');
+    await docClient.send(new DeleteCommand({ TableName: ROLES_TABLE, Key: { id: roleId } }));
+    return createSuccessResponse({ message: 'Role deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting role:', error);
+    return createErrorResponse(500, 'Failed to delete role', error);
+  }
+}
+
+async function listPermissions(): Promise<APIGatewayProxyResult> {
+  const permissions = [
+    'workstations:read', 'workstations:write', 'workstations:delete', 'workstations:manage-all',
+    'users:read', 'users:write', 'users:delete',
+    'groups:read', 'groups:write', 'groups:delete',
+    'roles:read', 'roles:write', 'roles:delete',
+    'analytics:read', 'settings:read', 'settings:write', 'admin:full-access',
+  ];
+  return createSuccessResponse(permissions);
+}
+
+async function listAuditLogs(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  try {
+    const params = event.queryStringParameters || {};
+    const limit = Math.min(parseInt(params.limit || '50'), 100);
+    const result = await docClient.send(new ScanCommand({ TableName: AUDIT_TABLE, Limit: limit }));
+    return createSuccessResponse({
+      logs: result.Items || [],
+      pagination: { total: result.Count || 0, limit },
+    });
+  } catch (error) {
+    console.error('Error listing audit logs:', error);
+    return createErrorResponse(500, 'Failed to list audit logs', error);
   }
 }
 

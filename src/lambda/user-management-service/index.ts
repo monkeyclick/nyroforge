@@ -227,8 +227,9 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
       return createErrorResponse(401, 'Unauthorized - Invalid token');
     }
 
-    // Check if user has admin permissions
-    const hasAdminPermission = await checkAdminPermission(currentUserId);
+    // Check if user has admin permissions via JWT claims first (API Gateway injects these),
+    // then fall back to DynamoDB lookup. This works even when EnhancedUsers table is empty.
+    const hasAdminPermission = checkAdminPermissionFromClaims(event) || await checkAdminPermission(currentUserId);
     if (!hasAdminPermission && !pathParts.includes('me')) {
       return createErrorResponse(403, 'Forbidden - Admin access required');
     }
@@ -955,6 +956,20 @@ async function logAuditEvent(
     }));
   } catch (error) {
     console.error('Error logging audit event:', error);
+  }
+}
+
+function checkAdminPermissionFromClaims(event: APIGatewayProxyEvent): boolean {
+  try {
+    const claims = event.requestContext?.authorizer?.claims;
+    if (!claims) return false;
+    const groups = claims['cognito:groups'];
+    if (!groups) return false;
+    return Array.isArray(groups)
+      ? groups.includes('workstation-admin')
+      : groups === 'workstation-admin' || groups.includes('workstation-admin');
+  } catch {
+    return false;
   }
 }
 

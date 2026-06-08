@@ -298,6 +298,29 @@ class ApiClient {
     });
   }
 
+  // Instance power actions (start / stop / reboot) — do not terminate the instance
+  async setWorkstationPower(
+    workstationId: string,
+    action: 'start' | 'stop' | 'reboot'
+  ): Promise<{ status: string; message: string }> {
+    return this.request<{ status: string; message: string }>(`/workstations/${workstationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ powerAction: action }),
+    });
+  }
+
+  async startWorkstation(workstationId: string): Promise<{ status: string; message: string }> {
+    return this.setWorkstationPower(workstationId, 'start');
+  }
+
+  async stopWorkstation(workstationId: string): Promise<{ status: string; message: string }> {
+    return this.setWorkstationPower(workstationId, 'stop');
+  }
+
+  async rebootWorkstation(workstationId: string): Promise<{ status: string; message: string }> {
+    return this.setWorkstationPower(workstationId, 'reboot');
+  }
+
   async getWorkstationCredentials(workstationId: string): Promise<WorkstationCredentials> {
     return this.request<WorkstationCredentials>(`/workstations/${workstationId}/credentials`);
   }
@@ -335,31 +358,31 @@ class ApiClient {
       }, {} as Record<string, string>)
     });
 
-    return this.request<UsersListResponse>(`/admin/users?${params.toString()}`);
+    return this.request<UsersListResponse>(`/users?${params.toString()}`, {}, true);
   }
 
   async getUserById(userId: string): Promise<EnhancedUser> {
-    return this.request<EnhancedUser>(`/admin/users/${userId}`);
+    return this.request<EnhancedUser>(`/users/${userId}`, {}, true);
   }
 
   async createUser(userData: CreateUserRequest): Promise<EnhancedUser> {
-    return this.request<EnhancedUser>('/admin/users', {
+    return this.request<EnhancedUser>('/users', {
       method: 'POST',
       body: JSON.stringify(userData),
-    });
+    }, true);
   }
 
   async updateUser(userId: string, userData: UpdateUserRequest): Promise<EnhancedUser> {
-    return this.request<EnhancedUser>(`/admin/users/${userId}`, {
+    return this.request<EnhancedUser>(`/users/${userId}`, {
       method: 'PUT',
       body: JSON.stringify(userData),
-    });
+    }, true);
   }
 
   async deleteUser(userId: string): Promise<void> {
-    await this.request(`/admin/users/${userId}`, {
+    await this.request(`/users/${userId}`, {
       method: 'DELETE',
-    });
+    }, true);
   }
 
   // Enhanced User Deletion Methods
@@ -387,7 +410,7 @@ class ApiClient {
       warnings: string[];
     };
   }> {
-    return this.request(`/admin/users/${userId}/deletion-preview`);
+    return this.request(`/users/${userId}/deletion-preview`, {}, true);
   }
 
   async softDeleteUser(userId: string, options: {
@@ -416,10 +439,10 @@ class ApiClient {
     };
     auditLogId: string;
   }> {
-    return this.request(`/admin/users/${userId}/soft-delete`, {
+    return this.request(`/users/${userId}/soft-delete`, {
       method: 'POST',
       body: JSON.stringify(options),
-    });
+    }, true);
   }
 
   async hardDeleteUser(userId: string, options: {
@@ -446,10 +469,10 @@ class ApiClient {
     };
     auditLogId: string;
   }> {
-    return this.request(`/admin/users/${userId}`, {
+    return this.request(`/users/${userId}`, {
       method: 'DELETE',
       body: JSON.stringify(options),
-    });
+    }, true);
   }
 
   async restoreUser(userId: string, options?: {
@@ -472,10 +495,10 @@ class ApiClient {
     };
     auditLogId: string;
   }> {
-    return this.request(`/admin/users/${userId}/restore`, {
+    return this.request(`/users/${userId}/restore`, {
       method: 'POST',
       body: JSON.stringify(options || {}),
-    });
+    }, true);
   }
 
   // Password Management Methods
@@ -509,10 +532,10 @@ class ApiClient {
     };
     auditLogId: string;
   }> {
-    return this.request(`/admin/users/${userId}/password`, {
+    return this.request(`/users/${userId}/password`, {
       method: 'POST',
       body: JSON.stringify(options),
-    });
+    }, true);
   }
 
   async generateUserPassword(userId: string, options?: {
@@ -545,10 +568,10 @@ class ApiClient {
     };
     auditLogId: string;
   }> {
-    return this.request(`/admin/users/${userId}/password/generate`, {
+    return this.request(`/users/${userId}/password/generate`, {
       method: 'POST',
       body: JSON.stringify(options || {}),
-    });
+    }, true);
   }
 
   async getPasswordPolicy(): Promise<{
@@ -565,26 +588,26 @@ class ApiClient {
     expiryDays?: number;
     historyCount?: number;
   }> {
-    return this.request('/admin/settings/password-policy');
+    return this.request('/password-policy', {}, true);
   }
 
   async suspendUser(userId: string): Promise<EnhancedUser> {
-    return this.request<EnhancedUser>(`/admin/users/${userId}/suspend`, {
+    return this.request<EnhancedUser>(`/users/${userId}/suspend`, {
       method: 'POST',
-    });
+    }, true);
   }
 
   async activateUser(userId: string): Promise<EnhancedUser> {
-    return this.request<EnhancedUser>(`/admin/users/${userId}/activate`, {
+    return this.request<EnhancedUser>(`/users/${userId}/activate`, {
       method: 'POST',
-    });
+    }, true);
   }
 
   async inviteUser(invitation: CreateUserRequest): Promise<UserInvitation> {
-    return this.request<UserInvitation>('/admin/users/invite', {
+    return this.request<UserInvitation>('/users/invite', {
       method: 'POST',
       body: JSON.stringify(invitation),
-    });
+    }, true);
   }
 
   async resendInvitation(invitationId: string): Promise<void> {
@@ -605,64 +628,64 @@ class ApiClient {
 
   // Role Management
   async getRoles(): Promise<RolesListResponse> {
-    return this.request<RolesListResponse>('/admin/roles');
+    return this.request<RolesListResponse>('/roles', {}, true);
   }
 
   async getRoleById(roleId: string): Promise<Role> {
-    return this.request<Role>(`/admin/roles/${roleId}`);
+    return this.request<Role>(`/roles/${roleId}`, {}, true);
   }
 
   async createRole(roleData: CreateRoleRequest): Promise<Role> {
-    return this.request<Role>('/admin/roles', {
+    return this.request<Role>('/roles', {
       method: 'POST',
       body: JSON.stringify(roleData),
-    });
+    }, true);
   }
 
   async updateRole(roleId: string, roleData: Partial<CreateRoleRequest>): Promise<Role> {
-    return this.request<Role>(`/admin/roles/${roleId}`, {
+    return this.request<Role>(`/roles/${roleId}`, {
       method: 'PUT',
       body: JSON.stringify(roleData),
-    });
+    }, true);
   }
 
   async deleteRole(roleId: string): Promise<void> {
-    await this.request(`/admin/roles/${roleId}`, {
+    await this.request(`/roles/${roleId}`, {
       method: 'DELETE',
-    });
+    }, true);
   }
 
   async getAvailablePermissions(): Promise<Permission[]> {
-    return this.request<Permission[]>('/admin/permissions');
+    return this.request<Permission[]>('/permissions', {}, true);
   }
 
   // Group Management
   async getGroups(): Promise<GroupsListResponse> {
-    return this.request<GroupsListResponse>('/admin/groups');
+    return this.request<GroupsListResponse>('/groups', {}, true);
   }
 
   async getGroupById(groupId: string): Promise<Group> {
-    return this.request<Group>(`/admin/groups/${groupId}`);
+    return this.request<Group>(`/groups/${groupId}`, {}, true);
   }
 
   async createGroup(groupData: CreateGroupRequest): Promise<Group> {
-    return this.request<Group>('/admin/groups', {
+    return this.request<Group>('/groups', {
       method: 'POST',
       body: JSON.stringify(groupData),
-    });
+    }, true);
   }
 
   async updateGroup(groupId: string, groupData: Partial<CreateGroupRequest>): Promise<Group> {
-    return this.request<Group>(`/admin/groups/${groupId}`, {
+    return this.request<Group>(`/groups/${groupId}`, {
       method: 'PUT',
       body: JSON.stringify(groupData),
-    });
+    }, true);
   }
 
   async deleteGroup(groupId: string): Promise<void> {
-    await this.request(`/admin/groups/${groupId}`, {
+    await this.request(`/groups/${groupId}`, {
       method: 'DELETE',
-    });
+    }, true);
   }
 
   async addUserToGroup(
@@ -672,16 +695,16 @@ class ApiClient {
     source?: string,
     expiresAt?: string
   ): Promise<void> {
-    await this.request(`/admin/groups/${groupId}/members`, {
+    await this.request(`/groups/${groupId}/members`, {
       method: 'POST',
       body: JSON.stringify({ userId, membershipType, source, expiresAt }),
-    });
+    }, true);
   }
 
   async removeUserFromGroup(groupId: string, userId: string): Promise<void> {
-    await this.request(`/admin/groups/${groupId}/members/${userId}`, {
+    await this.request(`/groups/${groupId}/members/${userId}`, {
       method: 'DELETE',
-    });
+    }, true);
   }
 
   async getGroupMembers(groupId: string): Promise<{
@@ -696,16 +719,16 @@ class ApiClient {
       expiresAt?: string;
     }>;
   }> {
-    return this.request(`/admin/groups/${groupId}/members`);
+    return this.request(`/groups/${groupId}/members`, {}, true);
   }
 
   async evaluateGroupRules(groupId: string): Promise<{
     matchedUsers: string[];
     count: number;
   }> {
-    return this.request(`/admin/groups/${groupId}/evaluate-rules`, {
+    return this.request(`/groups/${groupId}/evaluate-rules`, {
       method: 'POST',
-    });
+    }, true);
   }
 
   async getGroupAuditLogs(groupId?: string, limit: number = 100): Promise<{
@@ -723,7 +746,7 @@ class ApiClient {
     if (groupId) {
       params.append('groupId', groupId);
     }
-    return this.request(`/admin/group-audit-logs?${params.toString()}`);
+    return this.request(`/group-audit-logs?${params.toString()}`, {}, true);
   }
 
   // Audit and Monitoring
@@ -749,27 +772,27 @@ class ApiClient {
       }, {} as Record<string, string>)
     });
 
-    return this.request<{ logs: AuditLog[]; pagination: any }>(`/admin/audit-logs?${params.toString()}`);
+    return this.request<{ logs: AuditLog[]; pagination: any }>(`/audit-logs?${params.toString()}`, {}, true);
   }
 
   async getUserLoginHistory(userId: string): Promise<any[]> {
-    return this.request<any[]>(`/admin/users/${userId}/login-history`);
+    return this.request<any[]>(`/users/${userId}/login-history`, {}, true);
   }
 
   // Permission checking
   async checkUserPermissions(userId: string, permissions: Permission[]): Promise<Record<Permission, boolean>> {
-    return this.request<Record<Permission, boolean>>(`/admin/users/${userId}/permissions/check`, {
+    return this.request<Record<Permission, boolean>>(`/users/${userId}/permissions/check`, {
       method: 'POST',
       body: JSON.stringify({ permissions }),
-    });
+    }, true);
   }
 
   // Bulk operations
   async bulkUpdateUsers(updates: { userId: string; data: UpdateUserRequest }[]): Promise<void> {
-    await this.request('/admin/users/bulk-update', {
+    await this.request('/users/bulk-update', {
       method: 'POST',
       body: JSON.stringify({ updates }),
-    });
+    }, true);
   }
 
   async exportUsers(filters: UserFilters = {}): Promise<Blob> {
@@ -783,7 +806,7 @@ class ApiClient {
     );
 
     const authHeaders = await this.getAuthHeaders();
-    const response = await fetch(`${this.baseUrl}/admin/users/export?${params.toString()}`, {
+    const response = await fetch(`${this.adminApiUrl}/users/export?${params.toString()}`, {
       headers: authHeaders,
     });
 
@@ -977,7 +1000,7 @@ class ApiClient {
       disabled: number;
     };
   }> {
-    return this.request('/bootstrap-packages');
+    return this.request('/bootstrap-packages', {}, true);
   }
 
   async getAdminBootstrapPackages(): Promise<{
@@ -989,11 +1012,11 @@ class ApiClient {
       disabled: number;
     };
   }> {
-    return this.request('/admin/bootstrap-packages');
+    return this.request('/bootstrap-packages', {}, true);
   }
 
   async getBootstrapPackage(packageId: string): Promise<any> {
-    return this.request(`/admin/bootstrap-packages/${packageId}`);
+    return this.request(`/bootstrap-packages/${packageId}`, {}, true);
   }
 
   async createBootstrapPackage(packageData: {
@@ -1013,23 +1036,23 @@ class ApiClient {
     estimatedInstallTimeMinutes: number;
     metadata?: Record<string, any>;
   }): Promise<any> {
-    return this.request('/admin/bootstrap-packages', {
+    return this.request('/bootstrap-packages', {
       method: 'POST',
       body: JSON.stringify(packageData),
-    });
+    }, true);
   }
 
   async updateBootstrapPackage(packageId: string, packageData: Partial<any>): Promise<any> {
-    return this.request(`/admin/bootstrap-packages/${packageId}`, {
+    return this.request(`/bootstrap-packages/${packageId}`, {
       method: 'PUT',
       body: JSON.stringify(packageData),
-    });
+    }, true);
   }
 
   async deleteBootstrapPackage(packageId: string): Promise<void> {
-    await this.request(`/admin/bootstrap-packages/${packageId}`, {
+    await this.request(`/bootstrap-packages/${packageId}`, {
       method: 'DELETE',
-    });
+    }, true);
   }
 
   // Phase 4: Post-Boot Package Installation API Methods

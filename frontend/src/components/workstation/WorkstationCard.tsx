@@ -34,6 +34,39 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
     },
   })
 
+  const startMutation = useMutation({
+    mutationFn: () => apiClient.startWorkstation(workstation.instanceId),
+    onSuccess: () => {
+      toast.success('Workstation is starting')
+      queryClient.invalidateQueries({ queryKey: ['workstations'] })
+    },
+    onError: (error: any) => {
+      toast.error(error.message || 'Failed to start workstation')
+    },
+  })
+
+  const stopMutation = useMutation({
+    mutationFn: () => apiClient.stopWorkstation(workstation.instanceId),
+    onSuccess: () => {
+      toast.success('Workstation is stopping')
+      queryClient.invalidateQueries({ queryKey: ['workstations'] })
+    },
+    onError: (error: any) => {
+      toast.error(error.message || 'Failed to stop workstation')
+    },
+  })
+
+  const rebootMutation = useMutation({
+    mutationFn: () => apiClient.rebootWorkstation(workstation.instanceId),
+    onSuccess: () => {
+      toast.success('Workstation is rebooting')
+      queryClient.invalidateQueries({ queryKey: ['workstations'] })
+    },
+    onError: (error: any) => {
+      toast.error(error.message || 'Failed to reboot workstation')
+    },
+  })
+
   const allowMyIpMutation = useMutation({
     mutationFn: () => apiClient.allowMyIp(workstation.instanceId),
     onSuccess: (data) => {
@@ -58,9 +91,23 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
     }
   }
 
+  const workstationName = workstation.tags?.Name || workstation.instanceId
+
   const handleTerminate = () => {
-    if (confirm(`Are you sure you want to terminate ${workstation.tags?.Name || workstation.instanceId}?`)) {
+    if (confirm(`Are you sure you want to terminate ${workstationName}? This permanently destroys the instance.`)) {
       terminateMutation.mutate()
+    }
+  }
+
+  const handleStop = () => {
+    if (confirm(`Stop ${workstationName}? The instance will be shut down but not destroyed.`)) {
+      stopMutation.mutate()
+    }
+  }
+
+  const handleReboot = () => {
+    if (confirm(`Reboot ${workstationName}?`)) {
+      rebootMutation.mutate()
     }
   }
 
@@ -204,13 +251,41 @@ export default function WorkstationCard({ workstation }: WorkstationCardProps) {
               {allowMyIpMutation.isPending ? 'Adding IP...' : 'Allow My IP'}
             </button>
             <button
-              onClick={handleTerminate}
-              disabled={terminateMutation.isPending}
-              className="rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500 disabled:opacity-50"
+              onClick={handleStop}
+              disabled={stopMutation.isPending}
+              className="rounded-md bg-yellow-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-yellow-500 disabled:opacity-50"
+              title="Stop the instance (can be started again later)"
             >
-              {terminateMutation.isPending ? 'Terminating...' : 'Terminate'}
+              {stopMutation.isPending ? 'Stopping...' : 'Stop'}
+            </button>
+            <button
+              onClick={handleReboot}
+              disabled={rebootMutation.isPending}
+              className="rounded-md bg-indigo-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 disabled:opacity-50"
+            >
+              {rebootMutation.isPending ? 'Rebooting...' : 'Reboot'}
             </button>
           </>
+        )}
+
+        {workstation.status === 'stopped' && (
+          <button
+            onClick={() => startMutation.mutate()}
+            disabled={startMutation.isPending}
+            className="rounded-md bg-green-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-green-500 disabled:opacity-50"
+          >
+            {startMutation.isPending ? 'Starting...' : 'Start'}
+          </button>
+        )}
+
+        {(workstation.status as string) !== 'terminated' && (workstation.status as string) !== 'terminating' && (
+          <button
+            onClick={handleTerminate}
+            disabled={terminateMutation.isPending}
+            className="rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white shadow-sm hover:bg-red-500 disabled:opacity-50"
+          >
+            {terminateMutation.isPending ? 'Terminating...' : 'Terminate'}
+          </button>
         )}
       </div>
 

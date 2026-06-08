@@ -248,7 +248,7 @@ export const BootstrapPackageSelector: React.FC<BootstrapPackageSelectorProps> =
             checked={isChecked}
             disabled={isDisabled}
             onChange={() => handlePackageToggle(pkg)}
-            className={`${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+            className={`w-4 h-4 shrink-0 ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
             title={isDisabled ? 'This package is required and cannot be deselected' : ''}
           />
           <label

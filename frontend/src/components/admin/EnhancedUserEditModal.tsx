@@ -45,14 +45,22 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
   const loadUserGroups = async () => {
     try {
       setLoadingGroups(true);
-      
-      // Load all available Cognito groups
-      const groupsResponse = await apiClient.get<{ groups: CognitoGroup[] }>('/admin/cognito-groups');
-      setAllGroups(groupsResponse.groups);
-      
-      // Load user's current groups
-      const userGroupsResponse = await apiClient.get<{ groups: CognitoGroup[] }>(`admin/cognito-users/${user.email}/groups`);
-      setUserGroups(userGroupsResponse.groups.map(g => g.GroupName));
+
+      // Load all available groups from the admin API
+      const groupsResponse = await apiClient.getGroups();
+      const mapped: CognitoGroup[] = (groupsResponse.groups || []).map((g: any) => ({
+        GroupName: g.GroupName || g.name || g.id,
+        Description: g.Description || g.description,
+      }));
+      setAllGroups(mapped);
+
+      // Try to load user's current Cognito groups; fall back to empty on error
+      try {
+        const userGroupsResponse = await apiClient.get<{ groups: CognitoGroup[] }>(`/users/${user.email}/groups`, true);
+        setUserGroups((userGroupsResponse.groups || []).map((g: any) => g.GroupName || g.name || g.id));
+      } catch {
+        setUserGroups([]);
+      }
     } catch (err: any) {
       console.error('Error loading groups:', err);
     } finally {
@@ -91,9 +99,10 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
 
     setSettingPassword(true);
     try {
-      await apiClient.post(`admin/cognito-users/${user.email}/reset-password`, {
+      await apiClient.setUserPassword(user.id || user.email, {
         password: newPassword,
-        permanent: true
+        forceChangeOnLogin: false,
+        temporary: false,
       });
       
       console.log('Password reset successfully for:', user.email);
@@ -127,15 +136,20 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
         roleIds: formData.role === 'admin' ? ['admin'] : ['user'],
       });
 
-      // Get current groups to determine what changed
-      const currentUserGroups = await apiClient.get<{ groups: CognitoGroup[] }>(`admin/cognito-users/${user.email}/groups`);
-      const currentGroupNames = currentUserGroups.groups.map(g => g.GroupName);
+      // Sync group memberships via admin API
+      let currentGroupNames: string[] = [];
+      try {
+        const currentUserGroups = await apiClient.get<{ groups: any[] }>(`/users/${user.email}/groups`, true);
+        currentGroupNames = (currentUserGroups.groups || []).map((g: any) => g.GroupName || g.name || g.id);
+      } catch {
+        currentGroupNames = [];
+      }
 
       // Add to new groups
       for (const groupName of userGroups) {
         if (!currentGroupNames.includes(groupName)) {
           try {
-            await apiClient.post(`admin/cognito-users/${user.email}/groups`, { groupName });
+            await apiClient.post(`/users/${user.email}/groups`, { groupName }, true);
           } catch (err) {
             console.error(`Error adding to group ${groupName}:`, err);
           }
@@ -146,7 +160,7 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
       for (const groupName of currentGroupNames) {
         if (!userGroups.includes(groupName)) {
           try {
-            await apiClient.delete(`admin/cognito-users/${user.email}/groups/${groupName}`);
+            await apiClient.delete(`/users/${user.email}/groups/${groupName}`, true);
           } catch (err) {
             console.error(`Error removing from group ${groupName}:`, err);
           }

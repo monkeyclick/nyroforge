@@ -11,6 +11,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.0] - 2026-06-05
+
+### Fixed
+
+#### Admin Panel — User Management
+- All user/role/group methods in `frontend/src/services/api.ts` were calling paths like `/admin/users` against the **main API**. Corrected to call the **Admin API** (`NEXT_PUBLIC_ADMIN_API_ENDPOINT`) at unprefixed paths (`/users`, `/roles`, `/groups`, etc.) using `useAdminApi: true`.
+- `cognito-admin-service` Lambda router checked `pathParts.includes('cognito-users')` — a legacy prefix absent from all live API routes. Rewrote router to match `/users`, `/roles`, `/permissions`, `/audit-logs` with correct index arithmetic.
+- Path segment names `enable`/`disable` (Lambda) did not match actual API route keywords `activate`/`suspend`. Fixed.
+- `listUsers` returned raw Cognito `{ Attributes: [{Name, Value}] }` records. Added `mapCognitoUser()` to produce the flat `EnhancedUser` shape (`id`, `name`, `email`, `status`, `roleIds`, `groupIds`) expected by the frontend. Resolved all-users-showing-as-"No Name".
+- `CognitoGroupsList` and `EnhancedUserEditModal` bypassed `api.ts` named methods and hardcoded wrong paths against the main API. Replaced with `apiClient.getGroups()`, `createGroup()`, `deleteGroup()`, and `setUserPassword()`.
+- Create-user form submits no password field. Lambda now auto-generates a secure temporary password (`Tmp-<random>`) when none is provided and returns it in the response.
+- `user-management-service` `checkAdminPermission()` queried the empty `EnhancedUsers` DynamoDB table, always returning `false`. Added `checkAdminPermissionFromClaims()` that reads `cognito:groups` from the JWT claims injected by the API Gateway authorizer. Admin check now uses JWT claims first.
+- `createRole()` stored `isSystem: false` as a JavaScript boolean. `SystemRoleIndex` GSI declares `AttributeType.STRING` — DynamoDB rejected every `PutItem`. Changed to `isSystem: 'false'` (string).
+- `updateRole()` and `deleteRoleById()` used `if (result.Item.isSystem)` to guard system roles. Any non-empty string (including `'false'`) is truthy in JavaScript, blocking all role updates. Changed to strict equality `=== 'true'`.
+
+### Added
+- `mapCognitoUser()` helper in `cognito-admin-service` to convert raw Cognito user records to the `EnhancedUser` shape used by the frontend.
+- `checkAdminPermissionFromClaims()` in `user-management-service` — reads Cognito group membership from JWT claims as the primary admin gate.
+- `getUser()` and `updateUser()` handlers in `cognito-admin-service` (previously missing).
+- DynamoDB-backed `listRoles()`, `getRoleById()`, `createRole()`, `updateRole()`, `deleteRoleById()`, `listPermissions()`, `listAuditLogs()` in `cognito-admin-service`.
+
+---
+
 ## [1.0.0] - 2024-01-01
 
 ### Added
@@ -85,5 +108,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/monkeyclick/nyroforge/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/monkeyclick/nyroforge/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/monkeyclick/nyroforge/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/monkeyclick/nyroforge/releases/tag/v1.0.0

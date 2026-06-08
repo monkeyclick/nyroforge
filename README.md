@@ -157,6 +157,17 @@ All API endpoints require Cognito JWT token in Authorization header:
 Authorization: Bearer <jwt-token>
 ```
 
+### Two API Gateways
+
+NyroForge exposes **two separate API Gateways** configured in `NEXT_PUBLIC_API_ENDPOINT` and `NEXT_PUBLIC_ADMIN_API_ENDPOINT`:
+
+| Gateway | Stage | Purpose | Frontend env var |
+|---------|-------|---------|-----------------|
+| User API | `/api` | Workstation lifecycle, cost, status, profile | `NEXT_PUBLIC_API_ENDPOINT` |
+| Admin API | `/prod` | User management, roles, groups, permissions, audit logs, bootstrap packages | `NEXT_PUBLIC_ADMIN_API_ENDPOINT` |
+
+> **Important:** Admin API paths have **no `/admin/` prefix**. The correct paths are `/users`, `/roles`, `/groups`, `/permissions`, `/audit-logs`, `/bootstrap-packages`. Always use the named methods in `api.ts` rather than hardcoding paths so the correct base URL is used.
+
 ### Core Endpoints
 
 #### Workstation Management
@@ -221,6 +232,39 @@ GET /api/instance-types
 
 # System configuration
 GET /api/config
+```
+
+#### Admin — User & Role Management (Admin API)
+
+```http
+# List users
+GET /users
+
+# Create user (password auto-generated if not provided; returned in response)
+POST /users
+{"email": "user@example.com", "given_name": "First", "family_name": "Last"}
+
+# Update user attributes
+PUT /users/{username}
+
+# Delete user
+DELETE /users/{username}
+
+# Activate / suspend user
+POST /users/{username}/activate
+POST /users/{username}/suspend
+
+# List / create / update / delete roles
+GET    /roles
+POST   /roles
+PUT    /roles/{roleId}
+DELETE /roles/{roleId}
+
+# List permissions
+GET /permissions
+
+# Audit log
+GET /audit-logs
 ```
 
 #### Credentials
@@ -459,6 +503,24 @@ Configure SNS notifications for:
      --granularity DAILY \
      --metrics BlendedCost
    ```
+
+5. **Admin Panel — User management shows no data or 404**
+   ```bash
+   # Verify admin API Lambda is receiving requests on the right path
+   aws logs filter-log-events \
+     --log-group-name /aws/lambda/workstation-cognito-admin-service \
+     --start-time $(date -d '1 hour ago' +%s 2>/dev/null || date -v-1H +%s)000
+   ```
+   Common causes:
+   - Frontend calling the main API instead of the Admin API (check `NEXT_PUBLIC_ADMIN_API_ENDPOINT` is set)
+   - Lambda router checking a path prefix that doesn't match the live API route
+   - Admin check failing because `EnhancedUsers` DynamoDB table is empty — admin gate must use JWT claims, not DynamoDB lookup
+
+6. **Admin Panel — All user names show as "No Name"**
+   The Lambda is returning raw Cognito records (`{ Attributes: [{Name, Value}] }`) instead of mapped objects. The `mapCognitoUser()` helper in `cognito-admin-service/index.ts` must be called before returning users to the frontend.
+
+7. **Role create/update returns 500 or 404**
+   The `isSystem` field on `UserRoles` must be stored as the **string** `'true'` or `'false'`, not a boolean. The `SystemRoleIndex` GSI declares `AttributeType.STRING` — DynamoDB rejects booleans. Also check that guards use `=== 'true'` not a bare truthy check (any non-empty string including `'false'` is truthy in JavaScript).
 
 ### Support Resources
 

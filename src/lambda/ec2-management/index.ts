@@ -1,5 +1,5 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
-import { EC2Client, RunInstancesCommand, TerminateInstancesCommand, DescribeInstancesCommand, DescribeImagesCommand, AuthorizeSecurityGroupIngressCommand, _InstanceType } from '@aws-sdk/client-ec2';
+import { EC2Client, RunInstancesCommand, TerminateInstancesCommand, StartInstancesCommand, StopInstancesCommand, RebootInstancesCommand, DescribeInstancesCommand, DescribeImagesCommand, AuthorizeSecurityGroupIngressCommand, _InstanceType } from '@aws-sdk/client-ec2';
 import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { SecretsManagerClient, CreateSecretCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SSMClient, GetParameterCommand, SendCommandCommand } from '@aws-sdk/client-ssm';
@@ -107,7 +107,7 @@ const REQUIRED_COST_TAGS = [
   'CostCenter',
   'Environment',
   'Project',
-  'Owner',
+  'owner',
   'CreatedBy',
   'CreatedDate',
   'Application',
@@ -121,7 +121,7 @@ interface CostAllocationTags {
   CostCenter: string;
   Environment: string;
   Project: string;
-  Owner: string;
+  owner: string;
   CreatedBy: string;
   CreatedDate: string;
   Application: string;
@@ -143,7 +143,7 @@ function generateCostAllocationTags(
     CostCenter: request.costCenter || 'default',
     Environment: request.environment || 'prod',
     Project: request.projectName || 'MediaWorkstationAutomation',
-    Owner: userId,
+    owner: userId,
     CreatedBy: 'ec2-management-lambda',
     CreatedDate: timestamp,
     Application: 'VDI-Workstation',
@@ -723,6 +723,10 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
             };
           }
           const updateRequest = JSON.parse(body || '{}');
+          // Power actions (start/stop/reboot) are treated as "update" operations
+          if (updateRequest.powerAction) {
+            return await powerWorkstation(pathParameters.workstationId, updateRequest.powerAction, userId);
+          }
           return await updateWorkstation(pathParameters.workstationId, updateRequest, userId);
         }
         break;
@@ -928,23 +932,24 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
           console.warn('⚠️  Missing cost allocation tags:', tagValidation.missingTags.join(', '));
         }
         
-        // Merge all tags: cost allocation tags + instance name + user custom tags
-        const allTags = [
+        // Merge tags: system defaults first, user tags override on conflict, deduplicate by key
+        const systemTags = [
           { Key: 'Name', Value: `MediaWorkstation-${workstationId}` },
-          // Required cost allocation tags
           { Key: 'CostCenter', Value: costAllocationTags.CostCenter },
           { Key: 'Environment', Value: costAllocationTags.Environment },
           { Key: 'Project', Value: costAllocationTags.Project },
-          { Key: 'Owner', Value: costAllocationTags.Owner },
+          { Key: 'owner', Value: costAllocationTags.owner },
           { Key: 'CreatedBy', Value: costAllocationTags.CreatedBy },
           { Key: 'CreatedDate', Value: costAllocationTags.CreatedDate },
           { Key: 'Application', Value: costAllocationTags.Application },
           { Key: 'WorkstationId', Value: costAllocationTags.WorkstationId },
           { Key: 'UserId', Value: costAllocationTags.UserId },
-          // User custom tags (may override defaults)
-          ...(request.tags ? Object.entries(request.tags).map(([key, value]) => ({ Key: key, Value: value })) : []),
         ];
-        
+        const userTags = request.tags ? Object.entries(request.tags).map(([key, value]) => ({ Key: key, Value: value })) : [];
+        const tagMap = new Map<string, string>();
+        [...systemTags, ...userTags].forEach(t => tagMap.set(t.Key, t.Value));
+        const allTags = Array.from(tagMap.entries()).map(([Key, Value]) => ({ Key, Value }));
+
         console.log(`Launching instance with ${allTags.length} tags`);
 
         const runCommand = new RunInstancesCommand({
@@ -952,8 +957,13 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
           InstanceType: request.instanceType as _InstanceType,
           MinCount: 1,
           MaxCount: 1,
-          SubnetId: subnetId,
-          SecurityGroupIds: [securityGroupId],
+          // Use NetworkInterfaces to force a public IP even when subnet MapPublicIpOnLaunch=false
+          NetworkInterfaces: [{
+            DeviceIndex: 0,
+            SubnetId: subnetId,
+            Groups: [securityGroupId],
+            AssociatePublicIpAddress: true,
+          }],
           IamInstanceProfile: {
             Arn: instanceProfileArn,
           },
@@ -971,7 +981,7 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
                 { Key: 'CostCenter', Value: costAllocationTags.CostCenter },
                 { Key: 'Environment', Value: costAllocationTags.Environment },
                 { Key: 'Project', Value: costAllocationTags.Project },
-                { Key: 'Owner', Value: costAllocationTags.Owner },
+                { Key: 'owner', Value: costAllocationTags.owner },
                 { Key: 'WorkstationId', Value: costAllocationTags.WorkstationId },
                 { Key: 'UserId', Value: costAllocationTags.UserId },
               ],
@@ -1572,6 +1582,165 @@ async function listWorkstations(queryParams: any, userId: string): Promise<APIGa
       body: JSON.stringify({
         message: 'Failed to list workstations',
         error: error instanceof Error ? error.message : 'Unknown error'
+      }),
+    };
+  }
+}
+
+/**
+ * Resolve a workstation record by either its workstationId (PK) or its EC2 instanceId.
+ * The frontend passes the EC2 instanceId in the {workstationId} path slot for several
+ * actions, so we support both lookups to stay robust.
+ */
+async function findWorkstationRecord(idParam: string): Promise<{ record: WorkstationRecord; pk: string } | null> {
+  // Try a direct PK lookup first (idParam is a workstationId like "ws-...")
+  const direct = await dynamoClient.send(new GetItemCommand({
+    TableName: WORKSTATIONS_TABLE,
+    Key: marshall({ PK: `WORKSTATION#${idParam}`, SK: 'METADATA' }),
+  }));
+
+  if (direct.Item) {
+    return { record: unmarshall(direct.Item) as WorkstationRecord, pk: `WORKSTATION#${idParam}` };
+  }
+
+  // Fall back to scanning by instanceId (idParam is an EC2 instance id like "i-...")
+  const { ScanCommand } = await import('@aws-sdk/client-dynamodb');
+  const scan = await dynamoClient.send(new ScanCommand({
+    TableName: WORKSTATIONS_TABLE,
+    FilterExpression: 'instanceId = :iid AND begins_with(PK, :pk)',
+    ExpressionAttributeValues: marshall({ ':iid': idParam, ':pk': 'WORKSTATION#' }),
+  }));
+
+  if (scan.Items && scan.Items.length > 0) {
+    const record = unmarshall(scan.Items[0]) as WorkstationRecord;
+    return { record, pk: record.PK };
+  }
+
+  return null;
+}
+
+type PowerAction = 'start' | 'stop' | 'reboot';
+
+/**
+ * Start, stop, or reboot a workstation's EC2 instance (without terminating it).
+ */
+async function powerWorkstation(workstationIdParam: string, action: PowerAction, userId: string): Promise<APIGatewayProxyResult> {
+  console.log('\n--- powerWorkstation Started ---');
+  console.log('WorkstationId:', workstationIdParam);
+  console.log('Action:', action);
+  console.log('UserId:', userId);
+
+  const headers = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS',
+  };
+
+  if (!['start', 'stop', 'reboot'].includes(action)) {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ message: `Invalid power action: ${action}` }),
+    };
+  }
+
+  try {
+    const found = await findWorkstationRecord(workstationIdParam);
+
+    if (!found) {
+      console.log('❌ Workstation not found');
+      return { statusCode: 404, headers, body: JSON.stringify({ message: 'Workstation not found' }) };
+    }
+
+    const { record: workstation, pk } = found;
+    console.log('✅ Workstation found. Owner:', workstation.userId, 'Status:', workstation.status);
+
+    // Check permissions - user can manage their own, or admin can manage any
+    if (!(await canAccessWorkstation(userId, workstation.userId))) {
+      console.log('❌ Access denied');
+      await logAuditEvent(userId, 'DENIED_POWER', 'workstation', workstationIdParam, { action });
+      return { statusCode: 403, headers, body: JSON.stringify({ message: 'Access denied' }) };
+    }
+
+    if (workstation.status === 'terminated') {
+      return {
+        statusCode: 409,
+        headers,
+        body: JSON.stringify({ message: 'Cannot perform power actions on a terminated workstation' }),
+      };
+    }
+
+    const instanceId = workstation.instanceId;
+    let newStatus: WorkstationRecord['status'];
+    let auditAction: string;
+
+    try {
+      switch (action) {
+        case 'start':
+          console.log('Starting EC2 instance:', instanceId);
+          await ec2Client.send(new StartInstancesCommand({ InstanceIds: [instanceId] }));
+          newStatus = 'launching';
+          auditAction = 'START_WORKSTATION';
+          break;
+        case 'stop':
+          console.log('Stopping EC2 instance:', instanceId);
+          await ec2Client.send(new StopInstancesCommand({ InstanceIds: [instanceId] }));
+          newStatus = 'stopping';
+          auditAction = 'STOP_WORKSTATION';
+          break;
+        case 'reboot':
+          console.log('Rebooting EC2 instance:', instanceId);
+          await ec2Client.send(new RebootInstancesCommand({ InstanceIds: [instanceId] }));
+          // Reboot keeps the instance in the running state
+          newStatus = 'running';
+          auditAction = 'REBOOT_WORKSTATION';
+          break;
+      }
+    } catch (ec2Error: any) {
+      console.error(`❌ EC2 ${action} failed:`, ec2Error);
+      return {
+        statusCode: 500,
+        headers,
+        body: JSON.stringify({
+          message: `Failed to ${action} workstation`,
+          error: ec2Error instanceof Error ? ec2Error.message : String(ec2Error),
+        }),
+      };
+    }
+
+    // Update workstation status in DynamoDB
+    console.log('Updating workstation status to:', newStatus!);
+    await dynamoClient.send(new UpdateItemCommand({
+      TableName: WORKSTATIONS_TABLE,
+      Key: marshall({ PK: pk, SK: 'METADATA' }),
+      UpdateExpression: 'SET #status = :status, updatedAt = :timestamp',
+      ExpressionAttributeNames: { '#status': 'status' },
+      ExpressionAttributeValues: marshall({
+        ':status': newStatus!,
+        ':timestamp': new Date().toISOString(),
+      }),
+    }));
+
+    await logAuditEvent(userId, auditAction!, 'workstation', workstationIdParam, { action, instanceId });
+
+    console.log('=== powerWorkstation Completed Successfully ===\n');
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({
+        status: newStatus!,
+        message: `Workstation ${action} initiated successfully`,
+      }),
+    };
+  } catch (error) {
+    console.error('❌ Error performing power action:', error);
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        message: `Failed to ${action} workstation`,
+        error: error instanceof Error ? error.message : 'Unknown error',
       }),
     };
   }
