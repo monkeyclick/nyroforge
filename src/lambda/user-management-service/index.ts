@@ -8,7 +8,8 @@ import {
   AdminDeleteUserCommand,
   AdminSetUserPasswordCommand,
   AdminGetUserCommand,
-  AdminListGroupsForUserCommand
+  AdminListGroupsForUserCommand,
+  ListUsersCommand
 } from '@aws-sdk/client-cognito-identity-provider';
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { randomUUID, randomBytes } from 'crypto';
@@ -1567,7 +1568,7 @@ async function findUserForDeletion(userId: string): Promise<{
         },
         Limit: 1,
       }));
-      
+
       if (scanResult.Items && scanResult.Items.length > 0) {
         console.log('Found user by email in DynamoDB');
         return { user: scanResult.Items[0] as EnhancedUser, source: 'dynamodb' };
@@ -1575,12 +1576,30 @@ async function findUserForDeletion(userId: string): Promise<{
     } catch (error) {
       console.warn('Error scanning for user by email:', error);
     }
-    
+  }
+
+  // Resolve the Cognito username: emails are usernames directly; a UUID is a
+  // Cognito sub (the frontend uses subs as user ids), which we look up.
+  let cognitoUsername: string | null = userId.includes('@') ? userId : null;
+  if (!cognitoUsername && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId)) {
+    try {
+      const listResult = await cognitoClient.send(new ListUsersCommand({
+        UserPoolId: USER_POOL_ID,
+        Filter: `sub = "${userId}"`,
+        Limit: 1,
+      }));
+      cognitoUsername = listResult.Users?.[0]?.Username || null;
+    } catch (error) {
+      console.warn('Error looking up user by sub in Cognito:', error);
+    }
+  }
+
+  if (cognitoUsername) {
     // Try to find the user in Cognito by username (email)
     try {
       const cognitoUser = await cognitoClient.send(new AdminGetUserCommand({
         UserPoolId: USER_POOL_ID,
-        Username: userId,
+        Username: cognitoUsername,
       }));
       
       if (cognitoUser.Username) {
@@ -1591,15 +1610,15 @@ async function findUserForDeletion(userId: string): Promise<{
         try {
           const groupsResult = await cognitoClient.send(new AdminListGroupsForUserCommand({
             UserPoolId: USER_POOL_ID,
-            Username: userId,
+            Username: cognitoUsername,
           }));
           cognitoGroups = (groupsResult.Groups || []).map(g => g.GroupName || '').filter(Boolean);
         } catch (groupError) {
           console.warn('Failed to get Cognito groups:', groupError);
         }
-        
+
         // Create a synthetic EnhancedUser from Cognito data
-        const email = cognitoUser.UserAttributes?.find(a => a.Name === 'email')?.Value || userId;
+        const email = cognitoUser.UserAttributes?.find(a => a.Name === 'email')?.Value || cognitoUsername;
         const givenName = cognitoUser.UserAttributes?.find(a => a.Name === 'given_name')?.Value || '';
         const familyName = cognitoUser.UserAttributes?.find(a => a.Name === 'family_name')?.Value || '';
         const name = `${givenName} ${familyName}`.trim() || email.split('@')[0];

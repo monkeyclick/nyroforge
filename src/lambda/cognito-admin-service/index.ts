@@ -18,7 +18,7 @@ import {
 } from '@aws-sdk/client-cognito-identity-provider';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand, GetCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomInt } from 'crypto';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 
 const ddbClient = new DynamoDBClient({});
@@ -40,7 +40,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
   try {
     const { path, httpMethod } = event;
-    const pathParts = path.split('/').filter(Boolean);
+    const pathParts = path.split('/').filter(Boolean).map(p => decodeURIComponent(p));
 
     // Check if user has admin permissions from JWT
     const hasAdminPermission = await checkAdminPermission(event);
@@ -49,10 +49,12 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     }
 
     // Route handlers
-    // Support both /users and legacy /cognito-users path prefixes
     if (pathParts.includes('users')) {
       const usersIdx = pathParts.indexOf('users');
-      const username = pathParts[usersIdx + 1]; // undefined for /users (list/create)
+      const rawUsername = pathParts[usersIdx + 1]; // undefined for /users (list/create)
+      // The frontend may address users by Cognito sub (the `id` field) or by
+      // username/email — resolve subs to usernames once, up front.
+      const username = rawUsername ? await resolveUsername(rawUsername) : undefined;
 
       // Handle group management sub-routes first (more specific)
       if (pathParts.includes('groups') && username) {
@@ -88,12 +90,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         return await deleteUser(username);
       }
     } else if (pathParts.includes('roles')) {
-      if (httpMethod === 'GET' && pathParts.length === 1) {
+      const rolesIdx = pathParts.indexOf('roles');
+      const roleId = pathParts[rolesIdx + 1];
+      if (httpMethod === 'GET' && !roleId) {
         return await listRoles();
-      } else if (httpMethod === 'POST' && pathParts.length === 1) {
+      } else if (httpMethod === 'POST' && !roleId) {
         return await createRole(event);
-      } else if (pathParts.length >= 2) {
-        const roleId = pathParts[pathParts.indexOf('roles') + 1];
+      } else if (roleId) {
         if (httpMethod === 'GET') return await getRoleById(roleId);
         if (httpMethod === 'PUT') return await updateRole(roleId, event);
         if (httpMethod === 'DELETE') return await deleteRoleById(roleId);
@@ -103,12 +106,13 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     } else if (pathParts.includes('audit-logs')) {
       if (httpMethod === 'GET') return await listAuditLogs(event);
     } else if (pathParts.includes('cognito-groups')) {
-      if (httpMethod === 'GET' && pathParts.length === 2) {
+      const groupsIdx = pathParts.indexOf('cognito-groups');
+      const groupName = pathParts[groupsIdx + 1];
+      if (httpMethod === 'GET' && !groupName) {
         return await listGroups();
-      } else if (httpMethod === 'POST' && pathParts.length === 2) {
+      } else if (httpMethod === 'POST' && !groupName) {
         return await createGroup(event);
-      } else if (httpMethod === 'DELETE' && pathParts.length === 3) {
-        const groupName = pathParts[2];
+      } else if (httpMethod === 'DELETE' && groupName) {
         return await deleteGroup(groupName);
       }
     }
@@ -120,6 +124,85 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return createErrorResponse(500, 'An internal error occurred. Please try again later.');
   }
 };
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The frontend uses the Cognito `sub` as the user id, but Cognito admin APIs
+ * take the username (which is the email in this pool). Resolve a sub-shaped
+ * id to its username; pass anything else straight through.
+ */
+async function resolveUsername(idOrUsername: string): Promise<string> {
+  if (!UUID_RE.test(idOrUsername)) return idOrUsername;
+  try {
+    const res = await cognitoClient.send(new ListUsersCommand({
+      UserPoolId: USER_POOL_ID,
+      Filter: `sub = "${idOrUsername}"`,
+      Limit: 1,
+    }));
+    return res.Users?.[0]?.Username || idOrUsername;
+  } catch (error) {
+    console.error('Failed to resolve username from sub:', error);
+    return idOrUsername;
+  }
+}
+
+/**
+ * Translate Cognito exceptions into actionable client errors instead of a
+ * blanket 500. Anything unrecognized still becomes a 500.
+ */
+function mapCognitoError(error: any, fallbackMessage: string): APIGatewayProxyResult {
+  const name = error?.name || '';
+  switch (name) {
+    case 'UsernameExistsException':
+      return createErrorResponse(409, 'A user with this email already exists.');
+    case 'UserNotFoundException':
+      return createErrorResponse(404, 'User not found.');
+    case 'GroupExistsException':
+      return createErrorResponse(409, 'A group with this name already exists.');
+    case 'ResourceNotFoundException':
+      return createErrorResponse(404, error.message || 'Resource not found.');
+    case 'InvalidPasswordException':
+      return createErrorResponse(400, `Password does not meet requirements: ${error.message}`);
+    case 'InvalidParameterException':
+      return createErrorResponse(400, error.message || 'Invalid request parameters.');
+    case 'NotAuthorizedException':
+      return createErrorResponse(403, error.message || 'Not authorized to perform this action.');
+    case 'TooManyRequestsException':
+    case 'LimitExceededException':
+      return createErrorResponse(429, 'Too many requests. Please wait a moment and try again.');
+    case 'UserNotConfirmedException':
+      return createErrorResponse(409, 'User has not confirmed their account yet.');
+    default:
+      console.error(fallbackMessage, error);
+      return createErrorResponse(500, fallbackMessage, error);
+  }
+}
+
+function generateTempPassword(): string {
+  // Ambiguous characters (I, l, O, 0, 1) excluded — these get read to users
+  // over chat/phone.
+  const upper = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+  const lower = 'abcdefghjkmnpqrstuvwxyz';
+  const digits = '23456789';
+  const symbols = '!@#$%^&*';
+  const all = upper + lower + digits + symbols;
+  const pick = (set: string, n: number) =>
+    Array.from({ length: n }, () => set[randomInt(set.length)]);
+  const chars = [
+    ...pick(upper, 2),
+    ...pick(lower, 2),
+    ...pick(digits, 2),
+    ...pick(symbols, 1),
+    ...pick(all, 7),
+  ];
+  // Fisher-Yates shuffle so required characters aren't in predictable positions
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j], chars[i]];
+  }
+  return chars.join('');
+}
 
 function mapCognitoUser(user: any, groups: string[] = []): Record<string, any> {
   const attrs: Record<string, string> = {};
@@ -149,40 +232,68 @@ function mapCognitoUser(user: any, groups: string[] = []): Record<string, any> {
   };
 }
 
+async function getGroupNamesForUser(username: string, attempt = 0): Promise<string[]> {
+  try {
+    const res = await cognitoClient.send(new AdminListGroupsForUserCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: username,
+    }));
+    return (res.Groups || []).map((g: any) => g.GroupName || '').filter(Boolean);
+  } catch (error: any) {
+    if ((error.name === 'TooManyRequestsException' || error.name === 'LimitExceededException') && attempt < 2) {
+      await new Promise(r => setTimeout(r, 250 * (attempt + 1)));
+      return getGroupNamesForUser(username, attempt + 1);
+    }
+    console.error(`Failed to list groups for ${username}:`, error);
+    return [];
+  }
+}
+
+async function fetchMappedUser(username: string): Promise<Record<string, any>> {
+  const response = await cognitoClient.send(new AdminGetUserCommand({
+    UserPoolId: USER_POOL_ID,
+    Username: username,
+  }));
+  const groups = await getGroupNamesForUser(username);
+  return mapCognitoUser(response, groups);
+}
+
 async function listUsers(): Promise<APIGatewayProxyResult> {
   try {
-    const command = new ListUsersCommand({
-      UserPoolId: USER_POOL_ID,
-      Limit: 60
-    });
+    const cognitoUsers: any[] = [];
+    let paginationToken: string | undefined;
+    let pages = 0;
+    do {
+      const response: any = await cognitoClient.send(new ListUsersCommand({
+        UserPoolId: USER_POOL_ID,
+        Limit: 60,
+        PaginationToken: paginationToken,
+      }));
+      cognitoUsers.push(...(response.Users || []));
+      paginationToken = response.PaginationToken;
+    } while (paginationToken && ++pages < 10);
 
-    const response = await cognitoClient.send(command);
-
-    const usersWithGroups = await Promise.all(
-      (response.Users || []).map(async (user) => {
-        let groupNames: string[] = [];
-        try {
-          const groupsResponse = await cognitoClient.send(new AdminListGroupsForUserCommand({
-            UserPoolId: USER_POOL_ID,
-            Username: user.Username!
-          }));
-          groupNames = (groupsResponse.Groups || []).map((g: any) => g.GroupName || '').filter(Boolean);
-        } catch (e) {
-          // ignore
-        }
-        return mapCognitoUser(user, groupNames);
-      })
-    );
+    // Chunked group lookups — a full parallel burst trips Cognito admin-API
+    // throttling, which used to silently drop group data (and the admin badge
+    // derived from it) for random users.
+    const usersWithGroups: Record<string, any>[] = [];
+    const CHUNK_SIZE = 5;
+    for (let i = 0; i < cognitoUsers.length; i += CHUNK_SIZE) {
+      const chunk = cognitoUsers.slice(i, i + CHUNK_SIZE);
+      const mapped = await Promise.all(
+        chunk.map(async (user) => mapCognitoUser(user, await getGroupNamesForUser(user.Username!)))
+      );
+      usersWithGroups.push(...mapped);
+    }
 
     return createSuccessResponse({
       users: usersWithGroups,
-      pagination: { total: usersWithGroups.length, page: 1, limit: 60, pages: 1 },
+      pagination: { total: usersWithGroups.length, page: 1, limit: usersWithGroups.length, pages: 1 },
       total: usersWithGroups.length,
     });
 
   } catch (error) {
-    console.error('Error listing users:', error);
-    return createErrorResponse(500, 'Failed to list users', error);
+    return mapCognitoError(error, 'Failed to list users');
   }
 }
 
@@ -200,17 +311,17 @@ async function createUser(event: APIGatewayProxyEvent): Promise<APIGatewayProxyR
       groupName
     } = body;
 
-    // Support both password formats; auto-generate a temp password if none provided
-    // (admin creates the account; user will be prompted to set their own password on first login)
-    const autoGenPassword = !temporaryPassword && !password
-      ? `Tmp-${Math.random().toString(36).slice(2, 8)}${Math.random().toString(36).slice(2, 8).toUpperCase()}!1`
-      : null;
-    const userPassword = temporaryPassword || password || autoGenPassword;
-    const isAutoGenerated = !!autoGenPassword;
-
-    if (!email) {
-      return createErrorResponse(400, 'Email is required');
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return createErrorResponse(400, 'A valid email address is required.');
     }
+
+    // Password semantics:
+    //  - `password`          → permanent, user logs straight in
+    //  - `temporaryPassword` → user must set their own password on first login
+    //  - neither             → auto-generate a temporary one and return it once
+    const isPermanent = !!password && !temporaryPassword;
+    const isAutoGenerated = !password && !temporaryPassword;
+    const userPassword = temporaryPassword || password || generateTempPassword();
 
     const userAttributes = [
       { Name: 'email', Value: email },
@@ -235,108 +346,91 @@ async function createUser(event: APIGatewayProxyEvent): Promise<APIGatewayProxyR
       }
     }
 
-    const command = new AdminCreateUserCommand({
+    const response = await cognitoClient.send(new AdminCreateUserCommand({
       UserPoolId: USER_POOL_ID,
       Username: email,
       UserAttributes: userAttributes,
       TemporaryPassword: userPassword,
       MessageAction: 'SUPPRESS'
-    });
+    }));
 
-    const response = await cognitoClient.send(command);
-
-    // Set permanent password if not temporary
-    if (!temporaryPassword) {
-      const setPasswordCommand = new AdminSetUserPasswordCommand({
+    if (isPermanent) {
+      await cognitoClient.send(new AdminSetUserPasswordCommand({
         UserPoolId: USER_POOL_ID,
         Username: email,
         Password: userPassword,
         Permanent: true
-      });
-      await cognitoClient.send(setPasswordCommand);
+      }));
     }
 
     // Add to groups - support both array and single group
-    const groupsToAdd = groupName ? [groupName] : groups;
+    const groupsToAdd: string[] = [...new Set<string>([...(groupName ? [groupName] : []), ...groups])];
+    const addedGroups: string[] = [];
+    const groupErrors: string[] = [];
     for (const group of groupsToAdd) {
       try {
-        const addToGroupCommand = new AdminAddUserToGroupCommand({
+        await cognitoClient.send(new AdminAddUserToGroupCommand({
           UserPoolId: USER_POOL_ID,
           Username: email,
           GroupName: group
-        });
-        await cognitoClient.send(addToGroupCommand);
-      } catch (error) {
+        }));
+        addedGroups.push(group);
+      } catch (error: any) {
         console.error(`Error adding user to group ${group}:`, error);
+        groupErrors.push(`${group}: ${error.name === 'ResourceNotFoundException' ? 'group does not exist' : error.message}`);
       }
     }
 
     return createSuccessResponse({
-      user: response.User,
-      message: 'User created successfully',
-      ...(isAutoGenerated && { temporaryPassword: userPassword, note: 'A temporary password was auto-generated. Share it with the user and have them change it on first login.' }),
+      user: mapCognitoUser(response.User, addedGroups),
+      message: groupErrors.length
+        ? `User created, but some group assignments failed — ${groupErrors.join('; ')}`
+        : 'User created successfully',
+      ...(isAutoGenerated && {
+        temporaryPassword: userPassword,
+        note: 'A temporary password was auto-generated. Share it with the user; they must set a new password on first login.',
+      }),
     });
 
   } catch (error) {
-    console.error('Error creating user:', error);
-    return createErrorResponse(500, 'Failed to create user', error);
+    return mapCognitoError(error, 'Failed to create user');
   }
 }
 
 async function deleteUser(username: string): Promise<APIGatewayProxyResult> {
   try {
-    const command = new AdminDeleteUserCommand({
+    await cognitoClient.send(new AdminDeleteUserCommand({
       UserPoolId: USER_POOL_ID,
       Username: username
-    });
-
-    await cognitoClient.send(command);
+    }));
 
     return createSuccessResponse({
       message: `User ${username} deleted successfully`
     });
 
   } catch (error) {
-    console.error('Error deleting user:', error);
-    return createErrorResponse(500, 'Failed to delete user', error);
+    return mapCognitoError(error, 'Failed to delete user');
   }
 }
 
 async function getUser(username: string): Promise<APIGatewayProxyResult> {
   try {
-    const response = await cognitoClient.send(new AdminGetUserCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: username
-    }));
-
-    let groupNames: string[] = [];
-    try {
-      const groupsResponse = await cognitoClient.send(new AdminListGroupsForUserCommand({
-        UserPoolId: USER_POOL_ID,
-        Username: username
-      }));
-      groupNames = (groupsResponse.Groups || []).map((g: any) => g.GroupName || '').filter(Boolean);
-    } catch (e) {
-      // ignore
-    }
-
-    return createSuccessResponse(mapCognitoUser(response, groupNames));
+    return createSuccessResponse(await fetchMappedUser(username));
   } catch (error: any) {
-    if (error.name === 'UserNotFoundException') {
-      return createErrorResponse(404, 'User not found');
-    }
-    console.error('Error getting user:', error);
-    return createErrorResponse(500, 'Failed to get user', error);
+    return mapCognitoError(error, 'Failed to get user');
   }
 }
 
 async function updateUser(username: string, event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   try {
     const body = JSON.parse(event.body || '{}');
-    const { name, firstName, lastName, email } = body;
+    const { name, firstName, lastName, email, groupIds } = body;
 
     const userAttributes: { Name: string; Value: string }[] = [];
-    if (email) userAttributes.push({ Name: 'email', Value: email });
+    if (email) {
+      userAttributes.push({ Name: 'email', Value: email });
+      userAttributes.push({ Name: 'email_verified', Value: 'true' });
+    }
     if (name) {
       const parts = name.split(' ');
       userAttributes.push({ Name: 'given_name', Value: parts[0] });
@@ -346,23 +440,54 @@ async function updateUser(username: string, event: APIGatewayProxyEvent): Promis
       if (lastName) userAttributes.push({ Name: 'family_name', Value: lastName });
     }
 
-    if (userAttributes.length === 0) {
+    if (userAttributes.length === 0 && !Array.isArray(groupIds)) {
       return createErrorResponse(400, 'No updatable attributes provided');
     }
 
-    await cognitoClient.send(new AdminUpdateUserAttributesCommand({
-      UserPoolId: USER_POOL_ID,
-      Username: username,
-      UserAttributes: userAttributes
-    }));
-
-    return createSuccessResponse({ message: `User ${username} updated successfully` });
-  } catch (error: any) {
-    if (error.name === 'UserNotFoundException') {
-      return createErrorResponse(404, 'User not found');
+    if (userAttributes.length > 0) {
+      await cognitoClient.send(new AdminUpdateUserAttributesCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+        UserAttributes: userAttributes
+      }));
     }
-    console.error('Error updating user:', error);
-    return createErrorResponse(500, 'Failed to update user', error);
+
+    // Sync Cognito group membership to the requested set (group names)
+    const groupErrors: string[] = [];
+    if (Array.isArray(groupIds)) {
+      const current = await getGroupNamesForUser(username);
+      const toAdd = groupIds.filter((g: string) => !current.includes(g));
+      const toRemove = current.filter((g) => !groupIds.includes(g));
+      for (const group of toAdd) {
+        try {
+          await cognitoClient.send(new AdminAddUserToGroupCommand({
+            UserPoolId: USER_POOL_ID, Username: username, GroupName: group
+          }));
+        } catch (error: any) {
+          groupErrors.push(`add ${group}: ${error.name === 'ResourceNotFoundException' ? 'group does not exist' : error.message}`);
+        }
+      }
+      for (const group of toRemove) {
+        try {
+          await cognitoClient.send(new AdminRemoveUserFromGroupCommand({
+            UserPoolId: USER_POOL_ID, Username: username, GroupName: group
+          }));
+        } catch (error: any) {
+          groupErrors.push(`remove ${group}: ${error.message}`);
+        }
+      }
+    }
+
+    const updated = await fetchMappedUser(username);
+    if (groupErrors.length) {
+      return createSuccessResponse({
+        ...updated,
+        warning: `Some group changes failed — ${groupErrors.join('; ')}`,
+      });
+    }
+    return createSuccessResponse(updated);
+  } catch (error: any) {
+    return mapCognitoError(error, 'Failed to update user');
   }
 }
 
@@ -465,39 +590,29 @@ async function listAuditLogs(event: APIGatewayProxyEvent): Promise<APIGatewayPro
 
 async function enableUser(username: string): Promise<APIGatewayProxyResult> {
   try {
-    const command = new AdminEnableUserCommand({
+    await cognitoClient.send(new AdminEnableUserCommand({
       UserPoolId: USER_POOL_ID,
       Username: username
-    });
+    }));
 
-    await cognitoClient.send(command);
-
-    return createSuccessResponse({
-      message: `User ${username} enabled successfully`
-    });
+    return createSuccessResponse(await fetchMappedUser(username));
 
   } catch (error) {
-    console.error('Error enabling user:', error);
-    return createErrorResponse(500, 'Failed to enable user', error);
+    return mapCognitoError(error, 'Failed to enable user');
   }
 }
 
 async function disableUser(username: string): Promise<APIGatewayProxyResult> {
   try {
-    const command = new AdminDisableUserCommand({
+    await cognitoClient.send(new AdminDisableUserCommand({
       UserPoolId: USER_POOL_ID,
       Username: username
-    });
+    }));
 
-    await cognitoClient.send(command);
-
-    return createSuccessResponse({
-      message: `User ${username} disabled successfully`
-    });
+    return createSuccessResponse(await fetchMappedUser(username));
 
   } catch (error) {
-    console.error('Error disabling user:', error);
-    return createErrorResponse(500, 'Failed to disable user', error);
+    return mapCognitoError(error, 'Failed to disable user');
   }
 }
 
@@ -514,41 +629,35 @@ async function resetUserPassword(username: string, event: APIGatewayProxyEvent):
       return createErrorResponse(400, 'Password must be at least 8 characters long');
     }
 
-    const command = new AdminSetUserPasswordCommand({
+    await cognitoClient.send(new AdminSetUserPasswordCommand({
       UserPoolId: USER_POOL_ID,
       Username: username,
       Password: password,
       Permanent: permanent !== false // Default to permanent
-    });
-
-    await cognitoClient.send(command);
+    }));
 
     return createSuccessResponse({
       message: `Password reset successfully for user ${username}`
     });
 
   } catch (error: any) {
-    console.error('Error resetting password:', error);
-    return createErrorResponse(500, 'Failed to reset password', error);
+    return mapCognitoError(error, 'Failed to reset password');
   }
 }
 
 async function getUserGroups(username: string): Promise<APIGatewayProxyResult> {
   try {
-    const command = new AdminListGroupsForUserCommand({
+    const response = await cognitoClient.send(new AdminListGroupsForUserCommand({
       UserPoolId: USER_POOL_ID,
       Username: username
-    });
-
-    const response = await cognitoClient.send(command);
+    }));
 
     return createSuccessResponse({
       groups: response.Groups || []
     });
 
   } catch (error) {
-    console.error('Error getting user groups:', error);
-    return createErrorResponse(500, 'Failed to get user groups', error);
+    return mapCognitoError(error, 'Failed to get user groups');
   }
 }
 
@@ -561,60 +670,55 @@ async function addToGroup(username: string, event: APIGatewayProxyEvent): Promis
       return createErrorResponse(400, 'Group name is required');
     }
 
-    const command = new AdminAddUserToGroupCommand({
+    await cognitoClient.send(new AdminAddUserToGroupCommand({
       UserPoolId: USER_POOL_ID,
       Username: username,
       GroupName: groupName
-    });
-
-    await cognitoClient.send(command);
+    }));
 
     return createSuccessResponse({
       message: `User ${username} added to group ${groupName} successfully`
     });
 
   } catch (error) {
-    console.error('Error adding user to group:', error);
-    return createErrorResponse(500, 'Failed to add user to group', error);
+    return mapCognitoError(error, 'Failed to add user to group');
   }
 }
 
 async function removeFromGroup(username: string, groupName: string): Promise<APIGatewayProxyResult> {
   try {
-    const command = new AdminRemoveUserFromGroupCommand({
+    if (!groupName) {
+      return createErrorResponse(400, 'Group name is required');
+    }
+
+    await cognitoClient.send(new AdminRemoveUserFromGroupCommand({
       UserPoolId: USER_POOL_ID,
       Username: username,
       GroupName: groupName
-    });
-
-    await cognitoClient.send(command);
+    }));
 
     return createSuccessResponse({
       message: `User ${username} removed from group ${groupName} successfully`
     });
 
   } catch (error) {
-    console.error('Error removing user from group:', error);
-    return createErrorResponse(500, 'Failed to remove user from group', error);
+    return mapCognitoError(error, 'Failed to remove user from group');
   }
 }
 
 async function listGroups(): Promise<APIGatewayProxyResult> {
   try {
-    const command = new ListGroupsCommand({
+    const response = await cognitoClient.send(new ListGroupsCommand({
       UserPoolId: USER_POOL_ID,
       Limit: 60
-    });
-
-    const response = await cognitoClient.send(command);
+    }));
 
     return createSuccessResponse({
       groups: response.Groups || []
     });
 
   } catch (error) {
-    console.error('Error listing groups:', error);
-    return createErrorResponse(500, 'Failed to list groups', error);
+    return mapCognitoError(error, 'Failed to list groups');
   }
 }
 
@@ -627,14 +731,12 @@ async function createGroup(event: APIGatewayProxyEvent): Promise<APIGatewayProxy
       return createErrorResponse(400, 'Group name is required');
     }
 
-    const command = new CreateGroupCommand({
+    const response = await cognitoClient.send(new CreateGroupCommand({
       UserPoolId: USER_POOL_ID,
       GroupName: groupName,
       Description: description,
       Precedence: precedence !== undefined ? precedence : undefined
-    });
-
-    const response = await cognitoClient.send(command);
+    }));
 
     return createSuccessResponse({
       group: response.Group,
@@ -642,30 +744,23 @@ async function createGroup(event: APIGatewayProxyEvent): Promise<APIGatewayProxy
     });
 
   } catch (error: any) {
-    console.error('Error creating group:', error);
-    if (error.name === 'GroupExistsException') {
-      return createErrorResponse(409, 'Group already exists');
-    }
-    return createErrorResponse(500, 'Failed to create group', error);
+    return mapCognitoError(error, 'Failed to create group');
   }
 }
 
 async function deleteGroup(groupName: string): Promise<APIGatewayProxyResult> {
   try {
-    const command = new DeleteGroupCommand({
+    await cognitoClient.send(new DeleteGroupCommand({
       UserPoolId: USER_POOL_ID,
       GroupName: groupName
-    });
-
-    await cognitoClient.send(command);
+    }));
 
     return createSuccessResponse({
       message: `Group ${groupName} deleted successfully`
     });
 
   } catch (error: any) {
-    console.error('Error deleting group:', error);
-    return createErrorResponse(500, 'Failed to delete group', error);
+    return mapCognitoError(error, 'Failed to delete group');
   }
 }
 
@@ -730,7 +825,7 @@ function createErrorResponse(statusCode: number, message: string, error?: any): 
     },
     body: JSON.stringify({
       message,
-      error: error instanceof Error ? error.message : String(error)
+      error: error instanceof Error ? error.message : error !== undefined ? String(error) : undefined
     }),
   };
 }

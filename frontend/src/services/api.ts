@@ -17,6 +17,7 @@ import {
   EnhancedUser,
   Role,
   Group,
+  CognitoGroup,
   CreateUserRequest,
   UpdateUserRequest,
   CreateRoleRequest,
@@ -67,16 +68,16 @@ class ApiClient {
     }
   }
 
-  private async getAuthHeaders(): Promise<Record<string, string>> {
-    const token = await this.getStoredToken();
+  private async getAuthHeaders(forceRefresh = false): Promise<Record<string, string>> {
+    const token = await this.getStoredToken(forceRefresh);
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
 
-  private async getStoredToken(): Promise<string | null> {
+  private async getStoredToken(forceRefresh = false): Promise<string | null> {
     if (typeof window === 'undefined') return null;
-    
+
     try {
-      const session = await fetchAuthSession();
+      const session = await fetchAuthSession({ forceRefresh });
       return session.tokens?.idToken?.toString() || null;
     } catch (error) {
       console.error('Failed to get auth token:', error);
@@ -154,7 +155,8 @@ class ApiClient {
   private async request<T>(
     endpoint: string,
     options: RequestInit = {},
-    useAdminApi: boolean = false
+    useAdminApi: boolean = false,
+    isRetry: boolean = false
   ): Promise<T> {
     // Check configuration before making requests
     const configCheck = this.checkConfiguration();
@@ -165,7 +167,7 @@ class ApiClient {
 
     const baseUrl = useAdminApi ? this.adminApiUrl : this.baseUrl;
     const url = `${baseUrl}${endpoint}`;
-    const authHeaders = await this.getAuthHeaders();
+    const authHeaders = await this.getAuthHeaders(isRetry);
     const headers = {
       'Content-Type': 'application/json',
       'Accept': 'application/json', // Explicitly request JSON
@@ -182,6 +184,14 @@ class ApiClient {
     } catch (error) {
       console.error('Network request failed:', error);
       throw new Error(`Network error: Unable to reach ${url}. Please check your internet connection and API endpoint configuration.`);
+    }
+
+    // Expired token: refresh the session once and retry before giving up
+    if (response.status === 401 && !isRetry) {
+      return this.request<T>(endpoint, options, useAdminApi, true);
+    }
+    if (response.status === 401) {
+      throw new Error('Your session has expired. Please sign in again.');
     }
 
     // Get the raw response text first to check for XML/HTML
@@ -266,17 +276,6 @@ class ApiClient {
       method: 'PATCH',
       body: data ? JSON.stringify(data) : undefined,
     }, useAdminApi);
-  }
-
-  // Authentication
-  async getCurrentUser(): Promise<EnhancedUser> {
-    return this.request<EnhancedUser>('/auth/me');
-  }
-
-  async refreshToken(): Promise<{ token: string; user: EnhancedUser }> {
-    return this.request<{ token: string; user: EnhancedUser }>('/auth/refresh', {
-      method: 'POST',
-    });
   }
 
   // Workstations (existing functionality)
@@ -365,8 +364,13 @@ class ApiClient {
     return this.request<EnhancedUser>(`/users/${userId}`, {}, true);
   }
 
-  async createUser(userData: CreateUserRequest): Promise<EnhancedUser> {
-    return this.request<EnhancedUser>('/users', {
+  async createUser(userData: CreateUserRequest): Promise<{
+    user: EnhancedUser;
+    message: string;
+    temporaryPassword?: string;
+    note?: string;
+  }> {
+    return this.request('/users', {
       method: 'POST',
       body: JSON.stringify(userData),
     }, true);
@@ -469,8 +473,10 @@ class ApiClient {
     };
     auditLogId: string;
   }> {
-    return this.request(`/users/${userId}`, {
-      method: 'DELETE',
+    // API Gateway exposes hard delete as POST /users/{id}/hard-delete
+    // (DELETE /users/{id} is a plain Cognito delete with no cleanup/audit)
+    return this.request(`/users/${userId}/hard-delete`, {
+      method: 'POST',
       body: JSON.stringify(options),
     }, true);
   }
@@ -657,6 +663,48 @@ class ApiClient {
 
   async getAvailablePermissions(): Promise<Permission[]> {
     return this.request<Permission[]>('/permissions', {}, true);
+  }
+
+  // Cognito Group Management — native user-pool groups. These are the groups
+  // that appear in JWT claims and drive authorization and package bindings.
+  async getCognitoGroups(): Promise<{ groups: CognitoGroup[] }> {
+    return this.request('/cognito-groups', {}, true);
+  }
+
+  async createCognitoGroup(data: {
+    groupName: string;
+    description?: string;
+    precedence?: number;
+  }): Promise<{ group: CognitoGroup; message: string }> {
+    return this.request('/cognito-groups', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }, true);
+  }
+
+  async deleteCognitoGroup(groupName: string): Promise<{ message: string }> {
+    return this.request(`/cognito-groups/${encodeURIComponent(groupName)}`, {
+      method: 'DELETE',
+    }, true);
+  }
+
+  async getUserCognitoGroups(userIdOrEmail: string): Promise<{ groups: CognitoGroup[] }> {
+    return this.request(`/users/${encodeURIComponent(userIdOrEmail)}/groups`, {}, true);
+  }
+
+  async addUserToCognitoGroup(userIdOrEmail: string, groupName: string): Promise<{ message: string }> {
+    return this.request(`/users/${encodeURIComponent(userIdOrEmail)}/groups`, {
+      method: 'POST',
+      body: JSON.stringify({ groupName }),
+    }, true);
+  }
+
+  async removeUserFromCognitoGroup(userIdOrEmail: string, groupName: string): Promise<{ message: string }> {
+    return this.request(
+      `/users/${encodeURIComponent(userIdOrEmail)}/groups/${encodeURIComponent(groupName)}`,
+      { method: 'DELETE' },
+      true
+    );
   }
 
   // Group Management
@@ -1086,17 +1134,17 @@ class ApiClient {
    * Get packages associated with a group (admin only)
    */
   async getGroupPackages(groupId: string): Promise<{ packages: GroupPackageBinding[] }> {
-    return this.request(`/admin/groups/${groupId}/packages`);
+    return this.request(`/groups/${groupId}/packages`, {}, true);
   }
 
   /**
    * Associate a package with a group (admin only)
    */
   async addPackageToGroup(groupId: string, data: AddPackageToGroupRequest): Promise<GroupPackageBinding> {
-    return this.request(`/admin/groups/${groupId}/packages`, {
+    return this.request(`/groups/${groupId}/packages`, {
       method: 'POST',
       body: JSON.stringify(data),
-    });
+    }, true);
   }
 
   /**
@@ -1107,19 +1155,19 @@ class ApiClient {
     packageId: string,
     data: UpdateGroupPackageRequest
   ): Promise<GroupPackageBinding> {
-    return this.request(`/admin/groups/${groupId}/packages/${packageId}`, {
+    return this.request(`/groups/${groupId}/packages/${packageId}`, {
       method: 'PUT',
       body: JSON.stringify(data),
-    });
+    }, true);
   }
 
   /**
    * Remove package association from a group (admin only)
    */
   async removePackageFromGroup(groupId: string, packageId: string): Promise<{ message: string }> {
-    return this.request(`/admin/groups/${groupId}/packages/${packageId}`, {
+    return this.request(`/groups/${groupId}/packages/${packageId}`, {
       method: 'DELETE',
-    });
+    }, true);
   }
 
   /**

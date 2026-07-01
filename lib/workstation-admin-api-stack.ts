@@ -465,6 +465,15 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     userResource.addMethod('PUT', cognitoAdminIntegration, authorizedMethodOptions);
     userResource.addMethod('DELETE', cognitoAdminIntegration, authorizedMethodOptions);
 
+    // /users/{userId}/groups - Cognito group membership for a user
+    const userGroupsResource = userResource.addResource('groups');
+    userGroupsResource.addMethod('GET', cognitoAdminIntegration, authorizedMethodOptions);
+    userGroupsResource.addMethod('POST', cognitoAdminIntegration, authorizedMethodOptions);
+
+    // /users/{userId}/groups/{groupName}
+    const userGroupResource = userGroupsResource.addResource('{groupName}');
+    userGroupResource.addMethod('DELETE', cognitoAdminIntegration, authorizedMethodOptions);
+
     // /users/{userId}/suspend
     const suspendUserResource = userResource.addResource('suspend');
     suspendUserResource.addMethod('POST', cognitoAdminIntegration, authorizedMethodOptions);
@@ -505,6 +514,16 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const passwordPolicyResource = this.adminApi.root.addResource('password-policy');
     passwordPolicyResource.addMethod('GET', userManagementIntegration, authorizedMethodOptions);
     passwordPolicyResource.addMethod('PUT', userManagementIntegration, authorizedMethodOptions);
+
+    // /cognito-groups resource - native Cognito user-pool groups (the ones
+    // that appear in JWT claims and drive authorization)
+    const cognitoGroupsResource = this.adminApi.root.addResource('cognito-groups');
+    cognitoGroupsResource.addMethod('GET', cognitoAdminIntegration, authorizedMethodOptions);
+    cognitoGroupsResource.addMethod('POST', cognitoAdminIntegration, authorizedMethodOptions);
+
+    // /cognito-groups/{groupName}
+    const cognitoGroupResource = cognitoGroupsResource.addResource('{groupName}');
+    cognitoGroupResource.addMethod('DELETE', cognitoAdminIntegration, authorizedMethodOptions);
 
     // /roles resource
     const rolesResource = this.adminApi.root.addResource('roles');

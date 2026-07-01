@@ -1,18 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { apiClient } from '@/services/api';
+import { CognitoGroup } from '@/types/auth';
+
+const ADMIN_GROUP = 'workstation-admin';
 
 interface User {
   id: string;
   email: string;
   name?: string;
-  phone?: string;
+  username?: string;
   roleIds?: string[];
   status?: string;
-}
-
-interface CognitoGroup {
-  GroupName: string;
-  Description?: string;
 }
 
 interface EnhancedUserEditModalProps {
@@ -22,78 +20,82 @@ interface EnhancedUserEditModalProps {
 }
 
 const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onClose, onSave }) => {
-  const [formData, setFormData] = useState({
-    name: user.name || '',
-    email: user.email || '',
-    phone: user.phone || '',
-    role: user.roleIds?.includes('admin') ? 'admin' : 'user',
-  });
-  
+  // Cognito usernames are emails in this pool; the backend also resolves subs,
+  // but prefer the most direct identifier we have.
+  const cognitoUsername = user.username || user.email || user.id;
+
+  const [name, setName] = useState(user.name || '');
+  const [role, setRole] = useState<'user' | 'admin'>(
+    user.roleIds?.includes('admin') ? 'admin' : 'user'
+  );
+
   const [allGroups, setAllGroups] = useState<CognitoGroup[]>([]);
   const [userGroups, setUserGroups] = useState<string[]>([]);
   const [loadingGroups, setLoadingGroups] = useState(true);
+  const [groupLoadError, setGroupLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
+
   const [showPasswordSection, setShowPasswordSection] = useState(false);
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [settingPassword, setSettingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
 
   useEffect(() => {
-    loadUserGroups();
-  }, []);
-
-  const loadUserGroups = async () => {
-    try {
-      setLoadingGroups(true);
-
-      // Load all available groups from the admin API
-      const groupsResponse = await apiClient.getGroups();
-      const mapped: CognitoGroup[] = (groupsResponse.groups || []).map((g: any) => ({
-        GroupName: g.GroupName || g.name || g.id,
-        Description: g.Description || g.description,
-      }));
-      setAllGroups(mapped);
-
-      // Try to load user's current Cognito groups; fall back to empty on error
+    let cancelled = false;
+    (async () => {
       try {
-        const userGroupsResponse = await apiClient.get<{ groups: CognitoGroup[] }>(`/users/${user.email}/groups`, true);
-        setUserGroups((userGroupsResponse.groups || []).map((g: any) => g.GroupName || g.name || g.id));
-      } catch {
-        setUserGroups([]);
+        setLoadingGroups(true);
+        setGroupLoadError(null);
+
+        const [groupsResponse, userGroupsResponse] = await Promise.all([
+          apiClient.getCognitoGroups(),
+          apiClient.getUserCognitoGroups(cognitoUsername),
+        ]);
+        if (cancelled) return;
+
+        setAllGroups(
+          (groupsResponse.groups || []).filter(g => g.GroupName !== ADMIN_GROUP)
+        );
+        const memberOf = (userGroupsResponse.groups || []).map(g => g.GroupName);
+        setUserGroups(memberOf.filter(g => g !== ADMIN_GROUP));
+        setRole(memberOf.includes(ADMIN_GROUP) ? 'admin' : 'user');
+      } catch (err: any) {
+        if (!cancelled) {
+          setGroupLoadError(err.message || 'Failed to load groups');
+        }
+      } finally {
+        if (!cancelled) setLoadingGroups(false);
       }
-    } catch (err: any) {
-      console.error('Error loading groups:', err);
-    } finally {
-      setLoadingGroups(false);
-    }
-  };
+    })();
+    return () => { cancelled = true; };
+  }, [cognitoUsername]);
 
   const handleGroupToggle = (groupName: string) => {
-    setUserGroups(prev => 
-      prev.includes(groupName) 
+    setUserGroups(prev =>
+      prev.includes(groupName)
         ? prev.filter(g => g !== groupName)
         : [...prev, groupName]
     );
   };
 
   const handleResetPassword = async () => {
+    setPasswordError(null);
+    setPasswordSuccess(null);
+
     if (!newPassword || !confirmPassword) {
-      console.error('Validation failed: Please enter and confirm the new password');
+      setPasswordError('Please enter and confirm the new password.');
       return;
     }
-
     if (newPassword !== confirmPassword) {
-      console.error('Validation failed: Passwords do not match');
+      setPasswordError('Passwords do not match.');
       return;
     }
-
     if (newPassword.length < 8) {
-      console.error('Validation failed: Password must be at least 8 characters long');
-      return;
-    }
-
-    // TODO: Replace native confirm() with custom ConfirmationDialog component
-    if (!confirm(`Are you sure you want to reset the password for "${user.email}"? This action cannot be undone.`)) {
+      setPasswordError('Password must be at least 8 characters long.');
       return;
     }
 
@@ -104,74 +106,45 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
         forceChangeOnLogin: false,
         temporary: false,
       });
-      
-      console.log('Password reset successfully for:', user.email);
-      setShowPasswordSection(false);
+
+      setPasswordSuccess(`Password updated for ${user.email}.`);
       setNewPassword('');
       setConfirmPassword('');
+      setShowPasswordSection(false);
     } catch (err: any) {
-      console.error('Failed to reset password:', err);
+      setPasswordError(err.message || 'Failed to reset password.');
     } finally {
       setSettingPassword(false);
     }
   };
 
   const handleSave = async () => {
-    if (!formData.name.trim()) {
-      console.error('Validation failed: Name is required');
-      return;
-    }
+    setError(null);
+    setWarning(null);
 
-    if (!formData.email.trim()) {
-      console.error('Validation failed: Email is required');
+    if (!name.trim()) {
+      setError('Name is required.');
       return;
     }
 
     setSaving(true);
     try {
-      // Update user basic info in DynamoDB
-      await apiClient.updateUser(user.id, {
-        name: formData.name,
-        phone: formData.phone || undefined,
-        roleIds: formData.role === 'admin' ? ['admin'] : ['user'],
+      // One call: the backend updates attributes and syncs Cognito group
+      // membership (including admin access) to the requested set.
+      const groupIds = role === 'admin' ? [ADMIN_GROUP, ...userGroups] : userGroups;
+      const updated: any = await apiClient.updateUser(cognitoUsername, {
+        name: name.trim(),
+        groupIds,
       });
 
-      // Sync group memberships via admin API
-      let currentGroupNames: string[] = [];
-      try {
-        const currentUserGroups = await apiClient.get<{ groups: any[] }>(`/users/${user.email}/groups`, true);
-        currentGroupNames = (currentUserGroups.groups || []).map((g: any) => g.GroupName || g.name || g.id);
-      } catch {
-        currentGroupNames = [];
+      if (updated?.warning) {
+        setWarning(updated.warning);
+      } else {
+        onSave();
+        onClose();
       }
-
-      // Add to new groups
-      for (const groupName of userGroups) {
-        if (!currentGroupNames.includes(groupName)) {
-          try {
-            await apiClient.post(`/users/${user.email}/groups`, { groupName }, true);
-          } catch (err) {
-            console.error(`Error adding to group ${groupName}:`, err);
-          }
-        }
-      }
-
-      // Remove from old groups
-      for (const groupName of currentGroupNames) {
-        if (!userGroups.includes(groupName)) {
-          try {
-            await apiClient.delete(`/users/${user.email}/groups/${groupName}`, true);
-          } catch (err) {
-            console.error(`Error removing from group ${groupName}:`, err);
-          }
-        }
-      }
-
-      console.log('User updated successfully:', user.email);
-      onSave();
-      onClose();
     } catch (err: any) {
-      console.error('Failed to update user:', err);
+      setError(err.message || 'Failed to update user.');
     } finally {
       setSaving(false);
     }
@@ -194,6 +167,23 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
         </div>
 
         <div className="p-6 space-y-6 max-h-[calc(100vh-200px)] overflow-y-auto">
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-800">
+              {error}
+            </div>
+          )}
+          {warning && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-md p-3 text-sm text-yellow-800">
+              {warning}
+              <button
+                onClick={() => { onSave(); onClose(); }}
+                className="ml-2 underline"
+              >
+                Close anyway
+              </button>
+            </div>
+          )}
+
           {/* Basic Information */}
           <div>
             <h4 className="text-sm font-medium text-gray-900 mb-3">Basic Information</h4>
@@ -204,8 +194,8 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
                 </label>
                 <input
                   type="text"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   placeholder="John Doe"
                   disabled={saving}
@@ -218,8 +208,7 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
                 </label>
                 <input
                   type="email"
-                  value={formData.email}
-                  onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                  value={user.email}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-gray-50"
                   disabled={true}
                   title="Email cannot be changed"
@@ -231,31 +220,20 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Phone Number
-                </label>
-                <input
-                  type="tel"
-                  value={formData.phone}
-                  onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="+1 (555) 123-4567"
-                  disabled={saving}
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
                   Role *
                 </label>
                 <select
-                  value={formData.role}
-                  onChange={(e) => setFormData({ ...formData, role: e.target.value })}
+                  value={role}
+                  onChange={(e) => setRole(e.target.value as 'user' | 'admin')}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  disabled={saving}
+                  disabled={saving || loadingGroups}
                 >
                   <option value="user">User</option>
                   <option value="admin">Administrator</option>
                 </select>
+                <p className="mt-1 text-xs text-gray-500">
+                  Administrator adds the user to the <span className="font-mono">{ADMIN_GROUP}</span> group
+                </p>
               </div>
             </div>
           </div>
@@ -265,7 +243,10 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
             <div className="flex items-center justify-between mb-3">
               <h4 className="text-sm font-medium text-gray-900">Password Management</h4>
               <button
-                onClick={() => setShowPasswordSection(!showPasswordSection)}
+                onClick={() => {
+                  setShowPasswordSection(!showPasswordSection);
+                  setPasswordError(null);
+                }}
                 className="text-sm text-blue-600 hover:text-blue-700"
                 disabled={saving || settingPassword}
               >
@@ -273,8 +254,20 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
               </button>
             </div>
 
+            {passwordSuccess && (
+              <div className="bg-green-50 border border-green-200 rounded-md p-3 text-sm text-green-800 mb-3">
+                {passwordSuccess}
+              </div>
+            )}
+
             {showPasswordSection && (
               <div className="space-y-4 bg-gray-50 p-4 rounded-md">
+                {passwordError && (
+                  <div className="bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-800">
+                    {passwordError}
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     New Password *
@@ -317,12 +310,16 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
           {/* Groups Section */}
           <div className="border-t border-gray-200 pt-4">
             <h4 className="text-sm font-medium text-gray-900 mb-3">
-              Cognito Groups ({userGroups.length} selected)
+              Groups ({userGroups.length} selected)
             </h4>
 
             {loadingGroups ? (
               <div className="flex items-center justify-center py-8">
                 <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+              </div>
+            ) : groupLoadError ? (
+              <div className="bg-red-50 border border-red-200 rounded-md p-3 text-sm text-red-800">
+                {groupLoadError}
               </div>
             ) : allGroups.length === 0 ? (
               <p className="text-sm text-gray-500 py-4">No groups available. Create groups first.</p>
@@ -363,7 +360,7 @@ const EnhancedUserEditModal: React.FC<EnhancedUserEditModalProps> = ({ user, onC
           </button>
           <button
             onClick={handleSave}
-            disabled={saving || settingPassword}
+            disabled={saving || settingPassword || loadingGroups}
             className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
           >
             {saving ? (

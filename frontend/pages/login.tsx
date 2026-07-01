@@ -1,8 +1,7 @@
 import { useState, FormEvent } from 'react'
 import { useRouter } from 'next/router'
 import { useAuthStore, SYSTEM_ROLES } from '@/stores/authStore'
-import { signIn, fetchAuthSession, signOut, getCurrentUser, fetchUserAttributes } from 'aws-amplify/auth'
-import { apiClient } from '@/services/api'
+import { signIn, confirmSignIn, fetchAuthSession, signOut, getCurrentUser, fetchUserAttributes } from 'aws-amplify/auth'
 import { Permission } from '@/types/auth'
 
 // Helper function to get default permissions for a role
@@ -17,6 +16,66 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
+
+  // Set when Cognito requires the user to replace their temporary password
+  const [needsNewPassword, setNeedsNewPassword] = useState(false)
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmNewPassword, setConfirmNewPassword] = useState('')
+
+  // Builds the session user object from Cognito and routes to the dashboard.
+  // Everything here comes from the ID token and user attributes — no backend
+  // calls, so a regular (non-admin) user logs in without any 403 noise.
+  const completeLogin = async () => {
+    const session = await fetchAuthSession()
+    const idToken = session.tokens?.idToken?.toString()
+
+    if (!idToken) {
+      throw new Error('Failed to get authentication token')
+    }
+
+    const cognitoUser = await getCurrentUser()
+    const userAttributes = await fetchUserAttributes()
+
+    const idTokenPayload = session.tokens?.idToken?.payload
+    const cognitoGroups = (idTokenPayload?.['cognito:groups'] as string[]) || []
+
+    // Determine role based on Cognito groups
+    let roleIds = ['user']
+    if (cognitoGroups.includes('workstation-admin') || cognitoGroups.includes('Admins') || cognitoGroups.includes('admins') || cognitoGroups.includes('admin')) {
+      roleIds = ['admin']
+    } else if (cognitoGroups.includes('SuperAdmins') || cognitoGroups.includes('super-admin')) {
+      roleIds = ['super-admin']
+    }
+
+    const userData: any = {
+      id: cognitoUser.userId,
+      email: userAttributes.email || '',
+      name: `${userAttributes.given_name || ''} ${userAttributes.family_name || ''}`.trim() || userAttributes.email || '',
+      status: 'active' as const,
+      roleIds: roleIds,
+      groupIds: cognitoGroups,
+      directPermissions: [] as any[],
+      attributes: {},
+      preferences: {},
+      loginHistory: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+
+    const userRoles = roleIds.map((roleId: string) => ({
+      id: roleId,
+      name: roleId.charAt(0).toUpperCase() + roleId.slice(1),
+      description: `Default ${roleId} role`,
+      permissions: getDefaultPermissionsForRole(roleId),
+      isSystem: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      createdBy: 'system',
+    }))
+
+    login(userData, userRoles, [])
+    router.push('/')
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -38,114 +97,36 @@ export default function LoginPage() {
         password: password,
       })
 
-      // Check if additional steps are required (MFA, new password, etc.)
-      if (signInResult.nextStep) {
-        
-        // DONE means authentication is complete, proceed with login
-        if (signInResult.nextStep.signInStep !== 'DONE') {
-          throw new Error(`Additional step required: ${signInResult.nextStep.signInStep}. Please disable MFA in AWS Console: Cognito > User Pools > MediaWorkstationUsers > General Settings > MFA`)
-        }
+      const step = signInResult.nextStep?.signInStep
+
+      // Admin-created accounts start with a temporary password — Cognito asks
+      // the user to set their own before completing sign-in.
+      if (step === 'CONFIRM_SIGN_IN_WITH_NEW_PASSWORD_REQUIRED') {
+        setNeedsNewPassword(true)
+        return
       }
 
-      // Proceed if signed in or if nextStep is DONE
-      if (signInResult.isSignedIn || signInResult.nextStep?.signInStep === 'DONE') {
-        // Get the authentication session and token
-        const session = await fetchAuthSession()
-        
-        const idToken = session.tokens?.idToken?.toString()
+      if (step && step !== 'DONE') {
+        if (step.startsWith('CONFIRM_SIGN_IN_WITH') && step.includes('MFA')) {
+          throw new Error('This account has MFA enabled, which is not supported by this app yet. Contact your administrator.')
+        }
+        if (step === 'RESET_PASSWORD') {
+          throw new Error('Your password must be reset. Contact your administrator to set a new password.')
+        }
+        if (step === 'CONFIRM_SIGN_UP') {
+          throw new Error('This account has not been confirmed yet. Contact your administrator.')
+        }
+        throw new Error(`Sign-in requires an additional step (${step}) that this app does not support. Contact your administrator.`)
+      }
 
-        if (!idToken) {
-          throw new Error('Failed to get authentication token')
-        }
-
-        // Get current user and attributes
-        const cognitoUser = await getCurrentUser()
-        const userAttributes = await fetchUserAttributes()
-        
-        // Check for Cognito groups from the ID token payload
-        const idTokenPayload = session.tokens?.idToken?.payload
-        const cognitoGroups = (idTokenPayload?.['cognito:groups'] as string[]) || []
-        
-        // Determine role based on Cognito groups
-        let roleIds = ['user']
-        if (cognitoGroups.includes('Admins') || cognitoGroups.includes('admins') || cognitoGroups.includes('admin') || cognitoGroups.includes('workstation-admin')) {
-          roleIds = ['admin']
-        } else if (cognitoGroups.includes('SuperAdmins') || cognitoGroups.includes('super-admin')) {
-          roleIds = ['super-admin']
-        }
-        // Create user object from Cognito attributes
-        const userData: any = {
-          id: cognitoUser.userId,
-          email: userAttributes.email || '',
-          name: `${userAttributes.given_name || ''} ${userAttributes.family_name || ''}`.trim() || userAttributes.email || '',
-          status: 'active' as const,
-          roleIds: roleIds,
-          groupIds: cognitoGroups,
-          directPermissions: [] as any[],
-          attributes: {},
-          preferences: {},
-          loginHistory: [],
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        }
-        
-        // Try to fetch backend data, but continue even if it fails
-        try {
-          const backendUser = await apiClient.getCurrentUser()
-          // Merge backend data if available
-          Object.assign(userData, backendUser)
-        } catch (error: any) {
-          console.warn('Could not fetch backend user data, using Cognito attributes:', error.message)
-        }
-        
-        // Try to fetch roles and groups, but use defaults if it fails
-        let userRoles: any[] = []
-        let userGroups: any[] = []
-        
-        try {
-          const [rolesResponse, groupsResponse] = await Promise.all([
-            apiClient.getRoles().catch(() => ({ roles: [] })),
-            apiClient.getGroups().catch(() => ({ groups: [] })),
-          ])
-
-          userRoles = rolesResponse.roles.filter(role =>
-            userData.roleIds?.includes(role.id)
-          )
-          userGroups = groupsResponse.groups.filter(group =>
-            userData.groupIds?.includes(group.id)
-          )
-          
-        } catch (error) {
-          console.warn('Could not fetch roles/groups, using defaults')
-        }
-        
-        // If no roles were found from backend, create default role objects
-        // This ensures permissions are properly calculated even in local dev
-        if (userRoles.length === 0 && userData.roleIds?.length > 0) {
-          userRoles = userData.roleIds.map((roleId: string) => ({
-            id: roleId,
-            name: roleId.charAt(0).toUpperCase() + roleId.slice(1),
-            description: `Default ${roleId} role`,
-            permissions: getDefaultPermissionsForRole(roleId),
-            isSystem: true,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            createdBy: 'system',
-          }))
-        }
-
-        // Update auth store
-        login(userData, userRoles, userGroups)
-
-        // Redirect to dashboard (home page)
-        router.push('/')
+      if (signInResult.isSignedIn || step === 'DONE') {
+        await completeLogin()
       } else {
-        console.error('Sign-in was not successful')
         throw new Error('Sign in was not successful')
       }
     } catch (error: any) {
       console.error('Login error:', error)
-      
+
       // Handle specific Cognito error codes
       if (error.name === 'UserNotFoundException') {
         setError('User not found. Please check your email.')
@@ -153,6 +134,10 @@ export default function LoginPage() {
         setError('Incorrect email or password.')
       } else if (error.name === 'UserNotConfirmedException') {
         setError('Please verify your email before signing in.')
+      } else if (error.name === 'PasswordResetRequiredException') {
+        setError('Your password must be reset. Contact your administrator.')
+      } else if (error.name === 'LimitExceededException' || error.name === 'TooManyRequestsException') {
+        setError('Too many attempts. Please wait a few minutes and try again.')
       } else if (error.message) {
         setError(error.message)
       } else {
@@ -161,6 +146,113 @@ export default function LoginPage() {
     } finally {
       setIsLoading(false)
     }
+  }
+
+  const handleNewPasswordSubmit = async (e: FormEvent) => {
+    e.preventDefault()
+    setError('')
+
+    if (newPassword !== confirmNewPassword) {
+      setError('Passwords do not match.')
+      return
+    }
+    if (newPassword.length < 8) {
+      setError('Password must be at least 8 characters long.')
+      return
+    }
+
+    setIsLoading(true)
+    try {
+      const result = await confirmSignIn({ challengeResponse: newPassword })
+
+      if (result.isSignedIn) {
+        await completeLogin()
+      } else {
+        throw new Error(`Could not complete sign-in (next step: ${result.nextStep?.signInStep}). Contact your administrator.`)
+      }
+    } catch (error: any) {
+      console.error('New password error:', error)
+      if (error.name === 'InvalidPasswordException') {
+        setError(`Password does not meet requirements: ${error.message}`)
+      } else if (error.name === 'NotAuthorizedException') {
+        // Challenge session expired — start over
+        setNeedsNewPassword(false)
+        setNewPassword('')
+        setConfirmNewPassword('')
+        setError('Your session expired. Please sign in again with your temporary password.')
+      } else {
+        setError(error.message || 'Failed to set new password. Please try again.')
+      }
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  if (needsNewPassword) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', padding: '1rem' }}>
+        <div className="login-card">
+          <div className="flex justify-center mb-6">
+            <div className="flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-500 to-blue-600">
+              <span className="text-3xl">🔑</span>
+            </div>
+          </div>
+          <h2 className="text-center text-2xl font-bold mb-2 text-gray-900">
+            Set Your Password
+          </h2>
+          <p className="text-center text-gray-600 mb-8">
+            Your account was created with a temporary password. Choose a new one to continue.
+          </p>
+
+          <form onSubmit={handleNewPasswordSubmit}>
+            <div className="form-group">
+              <label htmlFor="new-password">New Password</label>
+              <input
+                id="new-password"
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                autoComplete="new-password"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="confirm-new-password">Confirm New Password</label>
+              <input
+                id="confirm-new-password"
+                type="password"
+                value={confirmNewPassword}
+                onChange={(e) => setConfirmNewPassword(e.target.value)}
+                autoComplete="new-password"
+                required
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="btn-primary w-full flex items-center justify-center"
+              disabled={isLoading}
+            >
+              {isLoading ? (
+                <>
+                  <span className="loading-spinner mr-2"></span>
+                  Setting password...
+                </>
+              ) : (
+                'Set Password & Sign In'
+              )}
+            </button>
+
+            {error && (
+              <div className="alert-error mt-4">
+                {error}
+              </div>
+            )}
+          </form>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -177,7 +269,7 @@ export default function LoginPage() {
         <p className="text-center text-gray-600 mb-8">
           Sign in to manage your workstations
         </p>
-        
+
         <form onSubmit={handleSubmit}>
           <div className="form-group">
             <label htmlFor="email">Email</label>
@@ -201,8 +293,8 @@ export default function LoginPage() {
             />
           </div>
 
-          <button 
-            type="submit" 
+          <button
+            type="submit"
             className="btn-primary w-full flex items-center justify-center"
             disabled={isLoading}
           >

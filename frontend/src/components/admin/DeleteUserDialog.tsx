@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { fetchAuthSession } from 'aws-amplify/auth';
+import { apiClient } from '@/services/api';
 import {
   TrashIcon,
   ExclamationTriangleIcon,
@@ -11,21 +11,6 @@ import {
   ShieldCheckIcon,
   CheckCircleIcon
 } from '@heroicons/react/24/outline';
-
-// Get admin API endpoint from environment
-const getAdminApiEndpoint = () => {
-  return process.env.NEXT_PUBLIC_ADMIN_API_ENDPOINT || '';
-};
-
-// Helper to get auth headers
-const getAuthHeaders = async () => {
-  const session = await fetchAuthSession();
-  const token = session.tokens?.idToken?.toString();
-  return {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`,
-  };
-};
 
 // Types
 interface User {
@@ -106,20 +91,8 @@ const DeleteUserDialog: React.FC<DeleteUserDialogProps> = ({
     setError(null);
     
     try {
-      const headers = await getAuthHeaders();
-      const apiEndpoint = getAdminApiEndpoint();
-      const response = await fetch(`${apiEndpoint}/users/${user.id}/deletion-preview`, {
-        method: 'GET',
-        headers,
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to fetch deletion preview');
-      }
-      
-      const data = await response.json();
-      setDeletionPreview(data);
+      const data = await apiClient.getDeletionPreview(user.id);
+      setDeletionPreview(data as DeletionPreview);
     } catch (err: any) {
       setError(err.message || 'Failed to load deletion preview');
     } finally {
@@ -152,25 +125,12 @@ const DeleteUserDialog: React.FC<DeleteUserDialogProps> = ({
     setError(null);
     
     try {
-      const headers = await getAuthHeaders();
-      const apiEndpoint = getAdminApiEndpoint();
-      const response = await fetch(`${apiEndpoint}/users/${user.id}/soft-delete`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          reason: softDeleteReason,
-          notes: softDeleteNotes,
-          notifyUser: notifyUserSoft,
-          retentionDays,
-        }),
+      const data = await apiClient.softDeleteUser(user.id, {
+        reason: softDeleteReason,
+        notes: softDeleteNotes,
+        notifyUser: notifyUserSoft,
+        retentionDays,
       });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to delete user');
-      }
-      
-      const data = await response.json();
       setDeleteResult(data);
       setStep('success');
     } catch (err: any) {
@@ -188,28 +148,14 @@ const DeleteUserDialog: React.FC<DeleteUserDialogProps> = ({
     setError(null);
     
     try {
-      const headers = await getAuthHeaders();
-      const apiEndpoint = getAdminApiEndpoint();
-      // Note: API Gateway route for hard-delete is configured as POST, not DELETE
-      const response = await fetch(`${apiEndpoint}/users/${user.id}/hard-delete`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          confirmationEmail,
-          reason: hardDeleteReason,
-          acknowledgements: {
-            understandIrreversible: ackIrreversible,
-            verifiedDeletion: ackVerified,
-          },
-        }),
+      const data = await apiClient.hardDeleteUser(user.id, {
+        confirmationEmail,
+        reason: hardDeleteReason,
+        acknowledgements: {
+          understandIrreversible: ackIrreversible,
+          verifiedDeletion: ackVerified,
+        },
       });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to permanently delete user');
-      }
-      
-      const data = await response.json();
       setDeleteResult(data);
       setStep('success');
     } catch (err: any) {

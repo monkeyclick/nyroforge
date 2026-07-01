@@ -235,10 +235,27 @@ export interface UserInvitation {
 export interface CreateUserRequest {
   email: string;
   name: string;
-  roleIds: string[];
+  roleIds?: string[];
+  /** Cognito group names to add the user to at creation */
+  groups?: string[];
   groupIds?: string[];
+  /** User must set their own password on first login. Omit both password
+   *  fields to have the backend auto-generate one and return it once. */
+  temporaryPassword?: string;
+  /** Permanent password — user can log straight in */
+  password?: string;
   sendInvitation?: boolean;
   attributes?: Record<string, any>;
+}
+
+/** Native AWS Cognito user-pool group, as returned by the Cognito API */
+export interface CognitoGroup {
+  GroupName: string;
+  Description?: string;
+  Precedence?: number;
+  RoleArn?: string;
+  CreationDate?: string;
+  LastModifiedDate?: string;
 }
 
 export interface UpdateUserRequest {

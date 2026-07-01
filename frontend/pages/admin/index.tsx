@@ -16,6 +16,7 @@ import InstanceScopeManagement from '@/components/admin/InstanceScopeManagement'
 import InstanceFamilyManagement from '@/components/admin/InstanceFamilyManagement'
 import DeleteUserDialog from '@/components/admin/DeleteUserDialog'
 import PasswordManagementDialog from '@/components/admin/PasswordManagementDialog'
+import AddUserModal from '@/components/admin/AddUserModal'
 
 interface AmiValidationResult {
   available: boolean;
@@ -42,13 +43,6 @@ export default function AdminPage() {
   const [isSavingSettings, setIsSavingSettings] = useState(false)
   const [isSavingDefaults, setIsSavingDefaults] = useState(false)
   const [showAddUserModal, setShowAddUserModal] = useState(false)
-  const [newUserData, setNewUserData] = useState({
-    email: '',
-    name: '',
-    role: 'user',
-    temporaryPassword: '',
-  })
-  const [isCreatingUser, setIsCreatingUser] = useState(false)
   const [showEditModal, setShowEditModal] = useState(false)
   const [editingUser, setEditingUser] = useState<any>(null)
   const [showAddExistingInstanceModal, setShowAddExistingInstanceModal] = useState(false)
@@ -1032,144 +1026,13 @@ export default function AdminPage() {
 
       {/* Add User Modal */}
       {showAddUserModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl max-w-md w-full mx-4">
-            <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
-              <h3 className="text-lg font-semibold text-gray-900">Add New User</h3>
-              <button
-                onClick={() => {
-                  setShowAddUserModal(false);
-                  setNewUserData({ email: '', name: '', role: 'user', temporaryPassword: '' });
-                }}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            
-            <div className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Email Address *
-                </label>
-                <input
-                  type="email"
-                  value={newUserData.email}
-                  onChange={(e) => setNewUserData({ ...newUserData, email: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                  placeholder="user@example.com"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Full Name *
-                </label>
-                <input
-                  type="text"
-                  value={newUserData.name}
-                  onChange={(e) => setNewUserData({ ...newUserData, name: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                  placeholder="John Doe"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Role *
-                </label>
-                <select
-                  value={newUserData.role}
-                  onChange={(e) => setNewUserData({ ...newUserData, role: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                >
-                  <option value="user">User</option>
-                  <option value="admin">Administrator</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Temporary Password *
-                </label>
-                <input
-                  type="password"
-                  value={newUserData.temporaryPassword}
-                  onChange={(e) => setNewUserData({ ...newUserData, temporaryPassword: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                  placeholder="Minimum 8 characters"
-                  required
-                />
-                <p className="mt-1 text-xs text-gray-500">
-                  User will be required to change this password on first login
-                </p>
-              </div>
-            </div>
-
-            <div className="px-6 py-4 bg-gray-50 border-t border-gray-200 flex justify-end space-x-3">
-              <button
-                onClick={() => {
-                  setShowAddUserModal(false);
-                  setNewUserData({ email: '', name: '', role: 'user', temporaryPassword: '' });
-                }}
-                disabled={isCreatingUser}
-                className="px-4 py-2 text-sm border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={async () => {
-                  if (!newUserData.email || !newUserData.name || !newUserData.temporaryPassword) {
-                    alert('Please fill in all required fields');
-                    return;
-                  }
-
-                  if (newUserData.temporaryPassword.length < 8) {
-                    alert('Password must be at least 8 characters');
-                    return;
-                  }
-
-                  setIsCreatingUser(true);
-                  try {
-                    console.log('Creating user with data:', {
-                      email: newUserData.email,
-                      name: newUserData.name,
-                      role: newUserData.role,
-                    });
-                    
-                    // Use the API client instead of direct fetch
-                    await apiClient.createUser({
-                      email: newUserData.email,
-                      name: newUserData.name,
-                      roleIds: newUserData.role === 'admin' ? ['admin'] : ['user'],
-                      groupIds: [],
-                    });
-
-                    alert('User created successfully! They can now log in with their email.');
-                    setShowAddUserModal(false);
-                    setNewUserData({ email: '', name: '', role: 'user', temporaryPassword: '' });
-                    
-                    // Refresh the users list
-                    queryClient.invalidateQueries({ queryKey: ['admin-users'] });
-                  } catch (error) {
-                    console.error('Error creating user:', error);
-                    alert(`Failed to create user: ${error instanceof Error ? error.message : 'Network error'}\n\nCheck browser console for more details.`);
-                  } finally {
-                    setIsCreatingUser(false);
-                  }
-                }}
-                disabled={isCreatingUser}
-                className="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isCreatingUser ? 'Creating...' : 'Create User'}
-              </button>
-            </div>
-          </div>
-        </div>
+        <AddUserModal
+          onClose={() => setShowAddUserModal(false)}
+          onCreated={() => {
+            queryClient.invalidateQueries({ queryKey: ['admin-users'] });
+            refetchUsers();
+          }}
+        />
       )}
 
       {/* Edit User Modal */}

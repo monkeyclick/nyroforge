@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { fetchAuthSession } from 'aws-amplify/auth';
+import { apiClient } from '@/services/api';
 import {
   KeyIcon,
   XMarkIcon,
@@ -13,21 +13,6 @@ import {
   ShieldExclamationIcon,
   InformationCircleIcon
 } from '@heroicons/react/24/outline';
-
-// Get admin API endpoint from environment
-const getAdminApiEndpoint = () => {
-  return process.env.NEXT_PUBLIC_ADMIN_API_ENDPOINT || '';
-};
-
-// Helper to get auth headers
-const getAuthHeaders = async () => {
-  const session = await fetchAuthSession();
-  const token = session.tokens?.idToken?.toString();
-  return {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`,
-  };
-};
 
 // Types
 interface User {
@@ -187,29 +172,8 @@ const PasswordManagementDialog: React.FC<PasswordManagementDialogProps> = ({
   // Fetch password policy
   const fetchPasswordPolicy = useCallback(async () => {
     try {
-      const headers = await getAuthHeaders();
-      const apiEndpoint = getAdminApiEndpoint();
-      const response = await fetch(`${apiEndpoint}/password-policy`, {
-        method: 'GET',
-        headers,
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setPasswordPolicy(data);
-      } else {
-        // Use default policy
-        setPasswordPolicy({
-          minLength: 12,
-          maxLength: 128,
-          requireUppercase: true,
-          requireLowercase: true,
-          requireNumbers: true,
-          requireSpecialChars: true,
-          allowedSpecialChars: '!@#$%^&*()_+-=[]{}|;:,.<>?',
-          preventCommonPasswords: true,
-          preventUsernameInPassword: true,
-        });
-      }
+      const data = await apiClient.getPasswordPolicy();
+      setPasswordPolicy(data);
     } catch {
       // Use default policy on error
       setPasswordPolicy({
@@ -393,31 +357,18 @@ const PasswordManagementDialog: React.FC<PasswordManagementDialogProps> = ({
     setError(null);
 
     try {
-      const headers = await getAuthHeaders();
-      const apiEndpoint = getAdminApiEndpoint();
-      const response = await fetch(`${apiEndpoint}/users/${user.id}/password`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          password,
-          forceChangeOnLogin,
-          temporary,
-          expiresIn: temporary ? expiresIn : undefined,
-          notifications: {
-            notifyUser,
-            includePasswordInEmail,
-            notifyAdmin,
-          },
-          reason,
-        }),
+      const data = await apiClient.setUserPassword(user.id, {
+        password,
+        forceChangeOnLogin,
+        temporary,
+        expiresIn: temporary ? expiresIn : undefined,
+        notifications: {
+          notifyUser,
+          includePasswordInEmail,
+          notifyAdmin,
+        },
+        reason,
       });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to set password');
-      }
-
-      const data = await response.json();
       setResult(data);
       setSuccess(true);
     } catch (err: any) {
@@ -435,30 +386,17 @@ const PasswordManagementDialog: React.FC<PasswordManagementDialogProps> = ({
     setError(null);
 
     try {
-      const headers = await getAuthHeaders();
-      const apiEndpoint = getAdminApiEndpoint();
-      const response = await fetch(`${apiEndpoint}/users/${user.id}/password/generate`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          expiresIn,
-          length: passwordLength,
-          forceChangeOnLogin,
-          notifications: {
-            notifyUser,
-            includePasswordInEmail,
-            notifyAdmin,
-          },
-          reason,
-        }),
+      const data = await apiClient.generateUserPassword(user.id, {
+        expiresIn,
+        length: passwordLength,
+        forceChangeOnLogin,
+        notifications: {
+          notifyUser,
+          includePasswordInEmail,
+          notifyAdmin,
+        },
+        reason,
       });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to generate password');
-      }
-
-      const data = await response.json();
       setResult(data);
       setGeneratedPassword(data.details?.generatedPassword || '');
       setSuccess(true);
