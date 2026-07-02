@@ -14,6 +14,16 @@ import {
 import { DynamoDBClient, GetItemCommand, PutItemCommand, UpdateItemCommand, ScanCommand } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
+import { isValidCidr } from '../shared/validation';
+import { errorResponse } from '../shared/http';
+
+// Reject rules broader than this prefix length (e.g. 0.0.0.0/0 or /7).
+const MIN_CIDR_PREFIX_LENGTH = 8;
+const ALLOWED_PROTOCOLS = ['tcp', 'udp', 'icmp'];
+
+function validationError(message: string): APIGatewayProxyResult {
+  return errorResponse(400, message);
+}
 
 const ec2Client = new EC2Client({});
 const dynamoClient = new DynamoDBClient({});
@@ -195,7 +205,10 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
           const attachRequest = JSON.parse(body || '{}');
           return await attachSecurityGroupToWorkstation(attachRequest, userId);
         } else if (event.path.includes('/allow-my-ip')) {
-          // Add user's IP to workstation security group
+          // Add user's IP to workstation security group.
+          // Intentionally NOT gated on security:manage — regular users may
+          // whitelist their own IP; allowMyIpToWorkstation enforces
+          // ownership-or-admin internally.
           const allowMyIpRequest = JSON.parse(body || '{}');
           return await allowMyIpToWorkstation(allowMyIpRequest, userId, event);
         } else if (event.path.includes('/add-rule')) {
@@ -431,9 +444,26 @@ async function addSecurityGroupRule(request: {
   applicationName?: string;
 }, userId: string): Promise<APIGatewayProxyResult> {
   console.log('Adding security group rule:', request);
-  
+
   try {
     const { groupId, port, fromPort, toPort, protocol, cidrIp, description, applicationName } = request;
+
+    // Validate caller-supplied rule parameters before touching EC2.
+    if (!isValidCidr(cidrIp)) {
+      return validationError('Invalid cidrIp: must be a valid IPv4 CIDR (e.g. 203.0.113.5/32)');
+    }
+    const prefixLength = Number(cidrIp.split('/')[1]);
+    if (prefixLength < MIN_CIDR_PREFIX_LENGTH) {
+      return validationError(`CIDR range too broad: prefix must be /${MIN_CIDR_PREFIX_LENGTH} or narrower`);
+    }
+    if (!ALLOWED_PROTOCOLS.includes(protocol)) {
+      return validationError(`Invalid protocol: must be one of ${ALLOWED_PROTOCOLS.join(', ')}`);
+    }
+    for (const p of [port, fromPort, toPort]) {
+      if (p !== undefined && (!Number.isInteger(p) || p < 1 || p > 65535)) {
+        return validationError('Invalid port: must be an integer between 1 and 65535');
+      }
+    }
 
     // Use applicationName to get port if provided
     let actualPort = port;
@@ -1020,24 +1050,25 @@ async function allowMyIpToWorkstation(request: {
 }
 
 function getUserIpFromEvent(event: APIGatewayProxyEvent): string | null {
-  // Try to get IP from various headers (API Gateway, CloudFront, direct)
+  // Prefer the connection IP recorded by API Gateway: X-Forwarded-For /
+  // X-Real-IP are caller-controlled headers, so trusting them first would let
+  // a client whitelist an arbitrary IP via /allow-my-ip.
   const sourceIp = event.requestContext?.identity?.sourceIp;
-  const xForwardedFor = event.headers?.['X-Forwarded-For'] || event.headers?.['x-forwarded-for'];
-  const xRealIp = event.headers?.['X-Real-IP'] || event.headers?.['x-real-ip'];
-  
-  // X-Forwarded-For can contain multiple IPs, take the first one (original client)
-  if (xForwardedFor) {
-    const ips = xForwardedFor.split(',');
-    return ips[0].trim();
-  }
-  
-  if (xRealIp) {
-    return xRealIp;
-  }
-  
   if (sourceIp) {
     return sourceIp;
   }
-  
+
+  // Fallbacks for events without requestContext identity (e.g. proxies/tests).
+  const xForwardedFor = event.headers?.['X-Forwarded-For'] || event.headers?.['x-forwarded-for'];
+  if (xForwardedFor) {
+    // X-Forwarded-For can contain multiple IPs, take the first one (original client)
+    return xForwardedFor.split(',')[0].trim();
+  }
+
+  const xRealIp = event.headers?.['X-Real-IP'] || event.headers?.['x-real-ip'];
+  if (xRealIp) {
+    return xRealIp;
+  }
+
   return null;
 }

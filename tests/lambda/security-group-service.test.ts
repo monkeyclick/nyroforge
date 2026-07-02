@@ -303,7 +303,7 @@ describe('Security Group Service Lambda', () => {
           groupId: 'sg-12345',
           applicationName: 'rdp',
           protocol: 'tcp',
-          cidrIp: '0.0.0.0/0',
+          cidrIp: '203.0.113.5/32',
         }),
       });
       mockDynamoSend.mockImplementation((command: any) => {
@@ -318,6 +318,125 @@ describe('Security Group Service Lambda', () => {
       expect(result.statusCode).toBe(200);
       const body = JSON.parse(result.body);
       expect(body.rule.FromPort).toBe(3389);
+    });
+
+    function addRuleEvent(ruleBody: Record<string, any>) {
+      return makeEvent({
+        httpMethod: 'POST',
+        path: '/security-groups/add-rule',
+        body: JSON.stringify(ruleBody),
+      });
+    }
+
+    function grantManagePermission() {
+      mockDynamoSend.mockImplementation((command: any) => {
+        if (command.constructor.name === 'GetItemCommand') {
+          return Promise.resolve({ Item: buildUserItemWithPermission('security:manage') });
+        }
+        return Promise.resolve({});
+      });
+    }
+
+    it('returns 400 for 0.0.0.0/0 (world-open CIDR rejected)', async () => {
+      grantManagePermission();
+      const result = await handler(
+        addRuleEvent({ groupId: 'sg-12345', port: 3389, protocol: 'tcp', cidrIp: '0.0.0.0/0' }),
+        mockContext
+      );
+      expect(result.statusCode).toBe(400);
+      expect(mockEC2Send).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for a malformed CIDR', async () => {
+      grantManagePermission();
+      const result = await handler(
+        addRuleEvent({ groupId: 'sg-12345', port: 3389, protocol: 'tcp', cidrIp: 'not-a-cidr' }),
+        mockContext
+      );
+      expect(result.statusCode).toBe(400);
+      expect(mockEC2Send).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for an invalid protocol', async () => {
+      grantManagePermission();
+      const result = await handler(
+        addRuleEvent({ groupId: 'sg-12345', port: 3389, protocol: '-1', cidrIp: '10.0.0.5/32' }),
+        mockContext
+      );
+      expect(result.statusCode).toBe(400);
+      expect(mockEC2Send).not.toHaveBeenCalled();
+    });
+
+    it('returns 400 for an out-of-range port', async () => {
+      grantManagePermission();
+      const result = await handler(
+        addRuleEvent({ groupId: 'sg-12345', port: 99999, protocol: 'tcp', cidrIp: '10.0.0.5/32' }),
+        mockContext
+      );
+      expect(result.statusCode).toBe(400);
+      expect(mockEC2Send).not.toHaveBeenCalled();
+    });
+
+    it('passes a valid /32 rule through to EC2', async () => {
+      grantManagePermission();
+      mockEC2Send.mockResolvedValue({});
+      const result = await handler(
+        addRuleEvent({ groupId: 'sg-12345', port: 3389, protocol: 'tcp', cidrIp: '203.0.113.5/32' }),
+        mockContext
+      );
+      expect(result.statusCode).toBe(200);
+      expect(mockEC2Send).toHaveBeenCalled();
+    });
+  });
+
+  // ── POST allow-my-ip ─────────────────────────────────────────────────────
+  describe('POST /security-groups/allow-my-ip', () => {
+    function allowMyIpEvent(headers: Record<string, string>, sourceIp?: string) {
+      const event = makeEvent({
+        httpMethod: 'POST',
+        path: '/security-groups/allow-my-ip',
+        headers,
+        body: JSON.stringify({ workstationId: 'ws-1' }),
+      });
+      (event.requestContext as any).identity = sourceIp ? { sourceIp } : {};
+      return event;
+    }
+
+    function mockOwnedWorkstation() {
+      mockDynamoSend.mockImplementation((command: any) => {
+        if (command.constructor.name === 'GetItemCommand') {
+          return Promise.resolve({
+            Item: marshall({
+              PK: 'WORKSTATION#ws-1',
+              SK: 'METADATA',
+              userId: 'admin@test.com',
+              securityGroupId: 'sg-999',
+            }),
+          });
+        }
+        return Promise.resolve({});
+      });
+    }
+
+    it('uses the API Gateway sourceIp, ignoring a spoofed X-Forwarded-For', async () => {
+      mockOwnedWorkstation();
+      mockEC2Send.mockResolvedValue({});
+
+      const result = await handler(
+        allowMyIpEvent({ 'X-Forwarded-For': '6.6.6.6' }, '198.51.100.7'),
+        mockContext
+      );
+      expect(result.statusCode).toBe(200);
+      expect(JSON.parse(result.body).ipAddress).toBe('198.51.100.7/32');
+    });
+
+    it('falls back to X-Forwarded-For only when sourceIp is unavailable', async () => {
+      mockOwnedWorkstation();
+      mockEC2Send.mockResolvedValue({});
+
+      const result = await handler(allowMyIpEvent({ 'X-Forwarded-For': '203.0.113.9' }), mockContext);
+      expect(result.statusCode).toBe(200);
+      expect(JSON.parse(result.body).ipAddress).toBe('203.0.113.9/32');
     });
   });
 

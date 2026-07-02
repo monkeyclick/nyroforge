@@ -7,6 +7,8 @@ import {
   GetItemCommand
 } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+import { corsHeaders } from '../shared/http';
+import { requireAdmin } from '../shared/auth';
 
 const dynamodb = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-west-2' });
 
@@ -83,23 +85,34 @@ export const handler = async (event: any) => {
       return await retryPackageInstallation(workstationId, packageId);
     }
     
+    // Group package-binding CRUD (admin API) is admin-only; the user-facing
+    // routes above (/user/group-packages, /workstations/*/packages*) stay
+    // available to any authenticated user.
     if (httpMethod === 'GET' && path.includes('/admin/groups/') && path.includes('/packages')) {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
       const groupId = pathParams.groupId || extractFromPath(path, 'groups');
       return await getGroupPackages(groupId);
     }
-    
+
     if (httpMethod === 'POST' && path.includes('/admin/groups/') && path.includes('/packages')) {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
       const groupId = pathParams.groupId || extractFromPath(path, 'groups');
       return await addPackageToGroup(groupId, body, userEmail);
     }
-    
+
     if (httpMethod === 'PUT' && path.includes('/admin/groups/') && path.includes('/packages/')) {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
       const groupId = pathParams.groupId || extractFromPath(path, 'groups');
       const packageId = pathParams.packageId || extractFromPath(path, 'packages');
       return await updateGroupPackage(groupId, packageId, body, userEmail);
     }
-    
+
     if (httpMethod === 'DELETE' && path.includes('/admin/groups/') && path.includes('/packages/')) {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
       const groupId = pathParams.groupId || extractFromPath(path, 'groups');
       const packageId = pathParams.packageId || extractFromPath(path, 'packages');
       return await removePackageFromGroup(groupId, packageId);
@@ -121,15 +134,12 @@ export const handler = async (event: any) => {
       headers: corsHeaders(),
       body: JSON.stringify({ error: 'Not Found', path, method: httpMethod })
     };
-  } catch (error: any) {
+  } catch (error) {
     console.error('Error:', error);
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ 
-        error: 'Internal Server Error', 
-        message: error.message 
-      })
+      body: JSON.stringify({ error: 'Internal Server Error' })
     };
   }
 };
@@ -204,7 +214,7 @@ async function getUserGroupPackages(event: any): Promise<any> {
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -249,7 +259,7 @@ async function getPackageInstallationStatus(workstationId: string): Promise<any>
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -295,7 +305,7 @@ async function retryPackageInstallation(workstationId: string, packageId: string
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -327,7 +337,7 @@ async function getGroupPackages(groupId: string): Promise<any> {
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -397,7 +407,7 @@ async function addPackageToGroup(groupId: string, data: any, userEmail: string):
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -468,7 +478,7 @@ async function updateGroupPackage(groupId: string, packageId: string, data: any,
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -498,7 +508,7 @@ async function removePackageFromGroup(groupId: string, packageId: string): Promi
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -578,7 +588,7 @@ async function addPackagesToWorkstation(workstationId: string, data: any): Promi
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -608,7 +618,7 @@ async function removeQueuedPackage(workstationId: string, packageId: string): Pr
     return {
       statusCode: 500,
       headers: corsHeaders(),
-      body: JSON.stringify({ error: error.message })
+      body: JSON.stringify({ error: 'Internal server error' })
     };
   }
 }
@@ -622,14 +632,3 @@ function extractFromPath(path: string, prefix: string): string {
   return index >= 0 && parts[index + 1] ? parts[index + 1] : '';
 }
 
-/**
- * CORS headers
- */
-function corsHeaders() {
-  return {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-  };
-}

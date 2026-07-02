@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { DynamoDBClient, PutItemCommand, GetItemCommand, ScanCommand, UpdateItemCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
+import { requireAdmin } from '../shared/auth';
 
 const dynamoClient = new DynamoDBClient({});
 const BOOTSTRAP_TABLE = process.env.BOOTSTRAP_PACKAGES_TABLE!;
@@ -44,6 +45,15 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
   try {
     const { httpMethod, pathParameters, body } = event;
+
+    // Reads are available to any authenticated user (the launch flow lists
+    // bootstrap packages); mutations are admin-only.
+    if (httpMethod === 'POST' || httpMethod === 'PUT' || httpMethod === 'DELETE') {
+      const denied = requireAdmin(event);
+      if (denied) {
+        return denied;
+      }
+    }
 
     switch (httpMethod) {
       case 'GET':

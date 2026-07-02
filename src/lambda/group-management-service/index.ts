@@ -1,6 +1,8 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { corsHeaders, errorResponse } from '../shared/http';
+import { requireAdmin } from '../shared/auth';
 
 const client = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(client);
@@ -66,15 +68,16 @@ interface GroupAuditLog {
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   console.log('Event:', JSON.stringify(event, null, 2));
 
-  const headers = {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-  };
+  const headers = corsHeaders();
 
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers, body: '' };
+  }
+
+  // Every route in this service is an admin-only operation on the admin API.
+  const denied = requireAdmin(event);
+  if (denied) {
+    return denied;
   }
 
   try {
@@ -127,13 +130,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       headers,
       body: JSON.stringify({ error: 'Not found' })
     };
-  } catch (error: any) {
-    console.error('Error:', error);
-    return {
-      statusCode: 500,
-      headers,
-      body: JSON.stringify({ error: error.message || 'Internal server error' })
-    };
+  } catch (error) {
+    return errorResponse(500, 'Internal server error', error);
   }
 };
 
@@ -144,10 +142,7 @@ async function listGroups(): Promise<APIGatewayProxyResult> {
 
   return {
     statusCode: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify({ groups: result.Items || [] })
   };
 }
@@ -182,10 +177,7 @@ async function createGroup(event: APIGatewayProxyEvent, currentUserId: string): 
 
   return {
     statusCode: 201,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify(group)
   };
 }
@@ -199,10 +191,7 @@ async function getGroupById(groupId: string): Promise<APIGatewayProxyResult> {
   if (!result.Item) {
     return {
       statusCode: 404,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Group not found' })
     };
   }
@@ -224,10 +213,7 @@ async function getGroupById(groupId: string): Promise<APIGatewayProxyResult> {
 
   return {
     statusCode: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify(group)
   };
 }
@@ -282,10 +268,7 @@ async function updateGroup(groupId: string, event: APIGatewayProxyEvent, current
 
   return {
     statusCode: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify(result.Attributes)
   };
 }
@@ -304,10 +287,7 @@ async function deleteGroup(groupId: string, currentUserId: string): Promise<APIG
   if (membersResult.Items && membersResult.Items.length > 0) {
     return {
       statusCode: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Cannot delete group with members. Remove all members first.' })
     };
   }
@@ -321,10 +301,7 @@ async function deleteGroup(groupId: string, currentUserId: string): Promise<APIG
 
   return {
     statusCode: 204,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: ''
   };
 }
@@ -341,10 +318,7 @@ async function getGroupMembers(groupId: string): Promise<APIGatewayProxyResult> 
 
   return {
     statusCode: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify({ members: result.Items || [] })
   };
 }
@@ -364,10 +338,7 @@ async function addUserToGroup(groupId: string, event: APIGatewayProxyEvent, curr
   if (!groupResult.Item) {
     return {
       statusCode: 404,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Group not found' })
     };
   }
@@ -381,10 +352,7 @@ async function addUserToGroup(groupId: string, event: APIGatewayProxyEvent, curr
   if (!userResult.Item) {
     return {
       statusCode: 404,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'User not found' })
     };
   }
@@ -410,10 +378,7 @@ async function addUserToGroup(groupId: string, event: APIGatewayProxyEvent, curr
 
   return {
     statusCode: 201,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify(membership)
   };
 }
@@ -430,10 +395,7 @@ async function removeUserFromGroup(groupId: string, userId: string, currentUserI
 
   return {
     statusCode: 204,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: ''
   };
 }
@@ -448,10 +410,7 @@ async function evaluateGroupRules(groupId: string, currentUserId: string): Promi
   if (!groupResult.Item) {
     return {
       statusCode: 404,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Group not found' })
     };
   }
@@ -461,10 +420,7 @@ async function evaluateGroupRules(groupId: string, currentUserId: string): Promi
   if (group.membershipType !== 'dynamic' || !group.dynamicRules) {
     return {
       statusCode: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Group is not dynamic or has no rules' })
     };
   }
@@ -524,10 +480,7 @@ async function evaluateGroupRules(groupId: string, currentUserId: string): Promi
 
   return {
     statusCode: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify({ matchedUsers, count: matchedUsers.length })
   };
 }
@@ -619,10 +572,7 @@ async function getGroupAuditLogs(groupId?: string): Promise<APIGatewayProxyResul
 
     return {
       statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ logs: result.Items || [] })
     };
   } else {
@@ -633,10 +583,7 @@ async function getGroupAuditLogs(groupId?: string): Promise<APIGatewayProxyResul
 
     return {
       statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ logs: result.Items || [] })
     };
   }

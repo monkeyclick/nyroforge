@@ -32,6 +32,9 @@ import {
   DeleteStorageVirtualMachineCommand,
 } from '@aws-sdk/client-fsx';
 
+import { isAdmin, requireAdmin } from '../shared/auth';
+import { isSafeObjectKey } from '../shared/validation';
+
 const s3Client = new S3Client({});
 const ssmClient = new SSMClient({});
 const efsClient = new EFSClient({});
@@ -161,7 +164,7 @@ async function listObjects(bucketName: string, prefix: string = ''): Promise<API
     return {
       statusCode: 500,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ error: 'Failed to list objects', details: String(error) }),
+      body: JSON.stringify({ error: 'Failed to list objects' }),
     };
   }
 }
@@ -332,7 +335,7 @@ async function listFileSystems(): Promise<APIGatewayProxyResult> {
     return {
       statusCode: 500,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ error: 'Failed to list file systems', details: String(error) }),
+      body: JSON.stringify({ error: 'Failed to list file systems' }),
     };
   }
 }
@@ -405,8 +408,7 @@ async function deleteEfsFileSystem(fileSystemId: string): Promise<APIGatewayProx
         statusCode: 400,
         headers: CORS_HEADERS,
         body: JSON.stringify({
-          error: 'File system is still in use. Mount targets may still be deleting. Please wait a few minutes and try again.',
-          details: String(error),
+          error: 'File system is still in use. Mount targets may still be deleting. Please wait a few minutes and try again.'
         }),
       };
     }
@@ -414,7 +416,7 @@ async function deleteEfsFileSystem(fileSystemId: string): Promise<APIGatewayProx
     return {
       statusCode: 500,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ error: 'Failed to delete EFS file system', details: String(error) }),
+      body: JSON.stringify({ error: 'Failed to delete EFS file system' }),
     };
   }
 }
@@ -498,7 +500,7 @@ async function deleteFsxFileSystem(fileSystemId: string, fileSystemType: string)
     return {
       statusCode: 500,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ error: 'Failed to delete FSx file system', details: String(error) }),
+      body: JSON.stringify({ error: 'Failed to delete FSx file system' }),
     };
   }
 }
@@ -568,7 +570,7 @@ async function deleteS3Bucket(bucketName: string): Promise<APIGatewayProxyResult
     return {
       statusCode: 500,
       headers: CORS_HEADERS,
-      body: JSON.stringify({ error: 'Failed to delete S3 bucket', details: String(error) }),
+      body: JSON.stringify({ error: 'Failed to delete S3 bucket' }),
     };
   }
 }
@@ -601,12 +603,20 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
     const userId = claims.sub;
 
+    // Admins may operate on the whole transfer bucket; regular users are
+    // confined to their own `users/<sub>/` prefix (see object routes below).
+    const admin = isAdmin(event);
+    const userPrefix = `users/${userId}/`;
+
     const config = await getStorageConfig();
-    
+
     // GET /admin/storage/config
     if (path.endsWith('/config') && method === 'GET') {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
+
       const efsStatus = await getEfsStatus(config.efsFileSystemId);
-      
+
       return {
         statusCode: 200,
         headers: CORS_HEADERS,
@@ -627,7 +637,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         };
       }
       
-      const prefix = event.queryStringParameters?.prefix || '';
+      const requestedPrefix = event.queryStringParameters?.prefix || '';
+      if (requestedPrefix && !isSafeObjectKey(requestedPrefix)) {
+        return {
+          statusCode: 400,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ error: 'Invalid prefix' }),
+        };
+      }
+
+      // Non-admins can only list within their own prefix.
+      const prefix = admin
+        ? requestedPrefix
+        : requestedPrefix.startsWith(userPrefix)
+          ? requestedPrefix
+          : `${userPrefix}${requestedPrefix}`;
       return await listObjects(config.transferBucket, prefix);
     }
     
@@ -649,7 +673,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           body: JSON.stringify({ error: 'Missing key parameter' }),
         };
       }
-      
+      if (!isSafeObjectKey(key)) {
+        return {
+          statusCode: 400,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ error: 'Invalid key' }),
+        };
+      }
+      if (!admin && !key.startsWith(userPrefix)) {
+        return {
+          statusCode: 403,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ error: 'Forbidden: key outside your storage prefix' }),
+        };
+      }
+
       return await getDownloadUrl(config.transferBucket, key);
     }
     
@@ -665,7 +703,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       
       const body = JSON.parse(event.body || '{}');
       const { key, contentType } = body;
-      
+
       if (!key) {
         return {
           statusCode: 400,
@@ -673,7 +711,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           body: JSON.stringify({ error: 'Missing key parameter' }),
         };
       }
-      
+      if (!isSafeObjectKey(key)) {
+        return {
+          statusCode: 400,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ error: 'Invalid key' }),
+        };
+      }
+      if (!admin && !key.startsWith(userPrefix)) {
+        return {
+          statusCode: 403,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ error: 'Forbidden: key outside your storage prefix' }),
+        };
+      }
+
       return await getUploadUrl(config.transferBucket, key, contentType || 'application/octet-stream');
     }
     
@@ -697,17 +749,37 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           body: JSON.stringify({ error: 'Missing or empty keys array' }),
         };
       }
-      
+      if (!keys.every((k: unknown) => typeof k === 'string' && isSafeObjectKey(k))) {
+        return {
+          statusCode: 400,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ error: 'Invalid key in keys array' }),
+        };
+      }
+      if (!admin && !keys.every((k: string) => k.startsWith(userPrefix))) {
+        return {
+          statusCode: 403,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ error: 'Forbidden: key outside your storage prefix' }),
+        };
+      }
+
       return await deleteObjects(config.transferBucket, keys);
     }
     
     // GET /admin/storage/filesystems - List all deployed file systems
     if (path.endsWith('/filesystems') && method === 'GET') {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
+
       return await listFileSystems();
     }
-    
+
     // DELETE /admin/storage/filesystem - Delete a file system
     if (path.endsWith('/filesystem') && method === 'DELETE') {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
+
       const body = JSON.parse(event.body || '{}');
       const { fileSystemId, fileSystemType } = body;
       

@@ -1,5 +1,6 @@
 import { APIGatewayProxyHandler } from 'aws-lambda';
 import { EC2Client, DescribeImagesCommand } from '@aws-sdk/client-ec2';
+import { requireAdmin } from '../shared/auth';
 
 // AMI name patterns for Windows Server versions
 const AMI_PATTERNS: Record<string, string> = {
@@ -20,6 +21,12 @@ export const handler: APIGatewayProxyHandler = async (event) => {
 
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers, body: '' };
+  }
+
+  // Admin-only service: validation runs against arbitrary regions/AMIs.
+  const denied = requireAdmin(event);
+  if (denied) {
+    return denied;
   }
 
   try {
