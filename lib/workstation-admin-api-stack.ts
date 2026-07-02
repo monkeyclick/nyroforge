@@ -553,6 +553,11 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     groupMembersResource.addMethod('POST', groupManagementIntegration, authorizedMethodOptions);
     groupMembersResource.addMethod('DELETE', groupManagementIntegration, authorizedMethodOptions);
 
+    // /groups/{groupId}/members/{userId} — the frontend removes members via
+    // DELETE on the specific member resource.
+    const groupMemberResource = groupMembersResource.addResource('{userId}');
+    groupMemberResource.addMethod('DELETE', groupManagementIntegration, authorizedMethodOptions);
+
     // /groups/{groupId}/evaluate-rules
     const evaluateRulesResource = groupResource.addResource('evaluate-rules');
     evaluateRulesResource.addMethod('POST', groupManagementIntegration, authorizedMethodOptions);

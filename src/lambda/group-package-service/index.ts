@@ -88,21 +88,21 @@ export const handler = async (event: any) => {
     // Group package-binding CRUD (admin API) is admin-only; the user-facing
     // routes above (/user/group-packages, /workstations/*/packages*) stay
     // available to any authenticated user.
-    if (httpMethod === 'GET' && path.includes('/admin/groups/') && path.includes('/packages')) {
+    if (httpMethod === 'GET' && path.includes('/groups/') && path.includes('/packages')) {
       const denied = requireAdmin(event);
       if (denied) return denied;
       const groupId = pathParams.groupId || extractFromPath(path, 'groups');
       return await getGroupPackages(groupId);
     }
 
-    if (httpMethod === 'POST' && path.includes('/admin/groups/') && path.includes('/packages')) {
+    if (httpMethod === 'POST' && path.includes('/groups/') && path.includes('/packages')) {
       const denied = requireAdmin(event);
       if (denied) return denied;
       const groupId = pathParams.groupId || extractFromPath(path, 'groups');
       return await addPackageToGroup(groupId, body, userEmail);
     }
 
-    if (httpMethod === 'PUT' && path.includes('/admin/groups/') && path.includes('/packages/')) {
+    if (httpMethod === 'PUT' && path.includes('/groups/') && path.includes('/packages/')) {
       const denied = requireAdmin(event);
       if (denied) return denied;
       const groupId = pathParams.groupId || extractFromPath(path, 'groups');
@@ -110,7 +110,7 @@ export const handler = async (event: any) => {
       return await updateGroupPackage(groupId, packageId, body, userEmail);
     }
 
-    if (httpMethod === 'DELETE' && path.includes('/admin/groups/') && path.includes('/packages/')) {
+    if (httpMethod === 'DELETE' && path.includes('/groups/') && path.includes('/packages/')) {
       const denied = requireAdmin(event);
       if (denied) return denied;
       const groupId = pathParams.groupId || extractFromPath(path, 'groups');

@@ -87,40 +87,40 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     const currentUserId = event.requestContext?.authorizer?.claims?.sub || 'system';
 
     // Group CRUD operations
-    if (path === '/admin/groups' && method === 'GET') {
+    if (path === '/groups' && method === 'GET') {
       return await listGroups();
     }
-    if (path === '/admin/groups' && method === 'POST') {
+    if (path === '/groups' && method === 'POST') {
       return await createGroup(event, currentUserId);
     }
-    if (path.match(/^\/admin\/groups\/[^/]+$/) && method === 'GET') {
+    if (path.match(/^\/groups\/[^/]+$/) && method === 'GET') {
       return await getGroupById(pathParams.groupId!);
     }
-    if (path.match(/^\/admin\/groups\/[^/]+$/) && method === 'PUT') {
+    if (path.match(/^\/groups\/[^/]+$/) && method === 'PUT') {
       return await updateGroup(pathParams.groupId!, event, currentUserId);
     }
-    if (path.match(/^\/admin\/groups\/[^/]+$/) && method === 'DELETE') {
+    if (path.match(/^\/groups\/[^/]+$/) && method === 'DELETE') {
       return await deleteGroup(pathParams.groupId!, currentUserId);
     }
 
     // Group membership operations
-    if (path.match(/^\/admin\/groups\/[^/]+\/members$/) && method === 'GET') {
+    if (path.match(/^\/groups\/[^/]+\/members$/) && method === 'GET') {
       return await getGroupMembers(pathParams.groupId!);
     }
-    if (path.match(/^\/admin\/groups\/[^/]+\/members$/) && method === 'POST') {
+    if (path.match(/^\/groups\/[^/]+\/members$/) && method === 'POST') {
       return await addUserToGroup(pathParams.groupId!, event, currentUserId);
     }
-    if (path.match(/^\/admin\/groups\/[^/]+\/members\/[^/]+$/) && method === 'DELETE') {
+    if (path.match(/^\/groups\/[^/]+\/members\/[^/]+$/) && method === 'DELETE') {
       return await removeUserFromGroup(pathParams.groupId!, pathParams.userId!, currentUserId);
     }
 
     // Rule evaluation
-    if (path.match(/^\/admin\/groups\/[^/]+\/evaluate-rules$/) && method === 'POST') {
+    if (path.match(/^\/groups\/[^/]+\/evaluate-rules$/) && method === 'POST') {
       return await evaluateGroupRules(pathParams.groupId!, currentUserId);
     }
 
     // Audit logs
-    if (path === '/admin/group-audit-logs' && method === 'GET') {
+    if (path === '/group-audit-logs' && method === 'GET') {
       const groupId = event.queryStringParameters?.groupId;
       return await getGroupAuditLogs(groupId);
     }

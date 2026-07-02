@@ -628,6 +628,35 @@ export class WorkstationApiStack extends cdk.Stack {
       }
     );
 
+    // /workstations/{workstationId}/packages - package installation status
+    const workstationPackagesResource = workstationResource.addResource('packages');
+    workstationPackagesResource.addMethod('GET',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.groupPackageService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // POST /workstations/{workstationId}/packages/{packageId}/retry
+    const workstationPackageResource = workstationPackagesResource.addResource('{packageId}');
+    const packageRetryResource = workstationPackageResource.addResource('retry');
+    packageRetryResource.addMethod('POST',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.groupPackageService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // GET /user/group-packages - auto-install packages from the user's groups
+    const userResource = this.api.root.addResource('user');
+    const userGroupPackagesResource = userResource.addResource('group-packages');
+    userGroupPackagesResource.addMethod('GET',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.groupPackageService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
     // /dashboard resource
     const dashboardResource = this.api.root.addResource('dashboard');
     
