@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/router'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { signOut } from 'aws-amplify/auth'
+import toast from 'react-hot-toast'
 import LaunchWorkstationModal from '@/components/workstation/LaunchWorkstationModal'
 import RdpCredentialsModal from '@/components/workstation/RdpCredentialsModal'
 import DcvConnectionModal from '@/components/workstation/DcvConnectionModal'
@@ -53,8 +54,36 @@ export default function DashboardPage() {
       setEditingNameValue('')
     },
     onError: (error: any) => {
-      alert('Failed to update name: ' + error.message)
+      toast.error('Failed to update name: ' + error.message)
     }
+  })
+
+  // Power actions (start / stop / reboot) — the instance is preserved
+  const powerMutation = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: 'start' | 'stop' | 'reboot' }) =>
+      apiClient.setWorkstationPower(id, action),
+    onSuccess: (_data, { action }) => {
+      toast.success(
+        action === 'start' ? 'Workstation is starting' :
+        action === 'stop' ? 'Workstation is stopping' :
+        'Workstation is rebooting'
+      )
+      queryClient.invalidateQueries({ queryKey: ['workstations'] })
+    },
+    onError: (error: any, { action }) => {
+      toast.error(error.message || `Failed to ${action} workstation`)
+    },
+  })
+
+  const terminateMutation = useMutation({
+    mutationFn: (id: string) => apiClient.terminateWorkstation(id),
+    onSuccess: () => {
+      toast.success('Workstation is being terminated')
+      queryClient.invalidateQueries({ queryKey: ['workstations'] })
+    },
+    onError: (error: any) => {
+      toast.error(error.message || 'Failed to terminate workstation')
+    },
   })
 
   const handleStartEditName = useCallback((ws: Workstation) => {
@@ -87,16 +116,17 @@ export default function DashboardPage() {
     router.push('/login')
   }
 
-  const handleTerminate = async (instanceId: string, workstationId?: string) => {
-    if (!confirm('Terminate this workstation?')) return
-    try {
-      // Use workstationId if available, otherwise fall back to instanceId
-      const id = workstationId || instanceId
-      await apiClient.terminateWorkstation(id)
-      queryClient.invalidateQueries({ queryKey: ['workstations'] })
-    } catch (error: any) {
-      alert('Failed to terminate: ' + error.message)
-    }
+  const handlePower = (ws: Workstation, action: 'start' | 'stop' | 'reboot') => {
+    const name = ws.friendlyName || ws.instanceId
+    if (action === 'stop' && !confirm(`Stop ${name}?\n\nThe instance shuts down but is NOT destroyed — you can start it again later.`)) return
+    if (action === 'reboot' && !confirm(`Reboot ${name}?`)) return
+    powerMutation.mutate({ id: ws.workstationId || ws.instanceId, action })
+  }
+
+  const handleTerminate = (ws: Workstation) => {
+    const name = ws.friendlyName || ws.instanceId
+    if (!confirm(`⚠️ TERMINATE ${name}?\n\nThis permanently destroys the instance and all data on it. This cannot be undone.`)) return
+    terminateMutation.mutate(ws.workstationId || ws.instanceId)
   }
 
   if (!user) return null
@@ -158,7 +188,7 @@ export default function DashboardPage() {
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">FILTER</h2>
               <div className="space-y-1">
-                {['all', 'running', 'stopped', 'launching'].map(status => (
+                {['all', 'running', 'stopped', 'launching', 'stopping', 'terminating'].map(status => (
                   <button
                     key={status}
                     onClick={() => setFilterStatus(status)}
@@ -218,7 +248,12 @@ export default function DashboardPage() {
                     {filteredWorkstations.map(ws => {
                       const wsId = ws.workstationId || ws.instanceId
                       const isEditingName = editingNameId === wsId
-                      
+                      const pendingPowerAction = powerMutation.isPending && powerMutation.variables?.id === wsId
+                        ? powerMutation.variables.action
+                        : null
+                      const isTerminatePending = terminateMutation.isPending && terminateMutation.variables === wsId
+                      const isBusy = !!pendingPowerAction || isTerminatePending
+
                       return (
                         <div
                           key={ws.instanceId}
@@ -273,6 +308,7 @@ export default function DashboardPage() {
                                     <span className={`px-2 py-0.5 text-xs font-medium rounded ${
                                       ws.status === 'running' ? 'bg-green-100 text-green-700' :
                                       ws.status === 'stopped' ? 'bg-gray-100 text-gray-700' :
+                                      (ws.status as string) === 'stopping' || (ws.status as string) === 'terminating' ? 'bg-orange-100 text-orange-700' :
                                       'bg-yellow-100 text-yellow-700'
                                     }`}>
                                       {ws.status}
@@ -296,7 +332,7 @@ export default function DashboardPage() {
                               </div>
                               
                               {/* Ownership Information */}
-                              {(ws.ownerName || ws.ownerGroups?.length) && (
+                              {(ws.ownerName || ws.ownerGroups?.length || ws.assignedUsers?.length) && (
                                 <div className="mt-2 pt-2 border-t border-gray-100">
                                   <div className="flex items-center gap-4 text-xs">
                                     {ws.ownerName && (
@@ -321,11 +357,22 @@ export default function DashboardPage() {
                                         </span>
                                       </div>
                                     )}
+                                    {ws.assignedUsers && ws.assignedUsers.length > 0 && (
+                                      <div
+                                        className="flex items-center gap-1 text-blue-600"
+                                        title={`Shared with: ${ws.assignedUsers.join(', ')}`}
+                                      >
+                                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                                        </svg>
+                                        <span>Shared with {ws.assignedUsers.length} user{ws.assignedUsers.length > 1 ? 's' : ''}</span>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               )}
                             </div>
-                            <div className="flex gap-2">
+                            <div className="flex flex-wrap gap-2 justify-end">
                               {ws.status === 'running' && (
                                 <>
                                   <button
@@ -338,7 +385,7 @@ export default function DashboardPage() {
                                         setShowRdpModal(true);
                                       } catch (error: any) {
                                         console.error('Credentials error:', error);
-                                        alert(error.message || 'Failed to get credentials');
+                                        toast.error(error.message || 'Failed to get credentials');
                                       }
                                     }}
                                     className="px-3 py-1.5 text-xs border border-gray-300 rounded hover:bg-gray-50"
@@ -361,7 +408,7 @@ export default function DashboardPage() {
                                         setShowDcvModal(true);
                                       } catch (error: any) {
                                         console.error('Credentials error:', error);
-                                        alert(error.message || 'Failed to get credentials');
+                                        toast.error(error.message || 'Failed to get credentials');
                                       }
                                     }}
                                     className="px-3 py-1.5 text-xs border border-blue-300 bg-blue-50 text-blue-700 rounded hover:bg-blue-100"
@@ -370,12 +417,42 @@ export default function DashboardPage() {
                                     ⚡ DCV
                                   </button>
                                   <button
-                                    onClick={() => handleTerminate(ws.instanceId, ws.workstationId)}
-                                    className="px-3 py-1.5 text-xs bg-red-600 text-white rounded hover:bg-red-700"
+                                    onClick={() => handlePower(ws, 'reboot')}
+                                    disabled={isBusy}
+                                    className="px-3 py-1.5 text-xs border border-gray-300 text-gray-700 rounded hover:bg-gray-50 disabled:opacity-50"
+                                    title="Reboot the instance"
                                   >
-                                    Stop
+                                    {pendingPowerAction === 'reboot' ? 'Rebooting…' : '↻ Reboot'}
+                                  </button>
+                                  <button
+                                    onClick={() => handlePower(ws, 'stop')}
+                                    disabled={isBusy}
+                                    className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50"
+                                    title="Shut down the instance — it can be started again later"
+                                  >
+                                    {pendingPowerAction === 'stop' ? 'Stopping…' : '⏸ Stop'}
                                   </button>
                                 </>
+                              )}
+                              {ws.status === 'stopped' && (
+                                <button
+                                  onClick={() => handlePower(ws, 'start')}
+                                  disabled={isBusy}
+                                  className="px-3 py-1.5 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                                  title="Start the instance"
+                                >
+                                  {pendingPowerAction === 'start' ? 'Starting…' : '▶ Start'}
+                                </button>
+                              )}
+                              {!['terminated', 'terminating'].includes(ws.status as string) && (
+                                <button
+                                  onClick={() => handleTerminate(ws)}
+                                  disabled={isBusy}
+                                  className="px-3 py-1.5 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
+                                  title="Permanently destroy the instance and all data on it"
+                                >
+                                  {isTerminatePending ? 'Terminating…' : '🗑 Terminate'}
+                                </button>
                               )}
                             </div>
                           </div>

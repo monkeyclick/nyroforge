@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useRouter } from 'next/router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { signOut, fetchAuthSession } from 'aws-amplify/auth'
+import toast from 'react-hot-toast'
 import { apiClient } from '@/services/api'
 import { useAuthStore } from '@/stores/authStore'
 import SecurityManagement from '@/components/admin/SecurityManagement'
@@ -12,6 +13,7 @@ import CognitoGroupsList from '@/components/admin/CognitoGroupsList'
 import EnhancedUserEditModal from '@/components/admin/EnhancedUserEditModal'
 import StorageManagement from '@/components/admin/StorageManagement'
 import AddExistingInstanceModal from '@/components/admin/AddExistingInstanceModal'
+import AssignUsersModal from '@/components/admin/AssignUsersModal'
 import InstanceScopeManagement from '@/components/admin/InstanceScopeManagement'
 import InstanceFamilyManagement from '@/components/admin/InstanceFamilyManagement'
 import DeleteUserDialog from '@/components/admin/DeleteUserDialog'
@@ -46,6 +48,7 @@ export default function AdminPage() {
   const [showEditModal, setShowEditModal] = useState(false)
   const [editingUser, setEditingUser] = useState<any>(null)
   const [showAddExistingInstanceModal, setShowAddExistingInstanceModal] = useState(false)
+  const [assigningWorkstation, setAssigningWorkstation] = useState<any>(null)
   
   // User deletion and password management state
   const [showDeleteDialog, setShowDeleteDialog] = useState(false)
@@ -124,10 +127,43 @@ export default function AdminPage() {
   const terminateWorkstation = useMutation({
     mutationFn: (workstationId: string) => apiClient.terminateWorkstation(workstationId),
     onSuccess: () => {
+      toast.success('Workstation is being terminated');
       queryClient.invalidateQueries({ queryKey: ['admin-workstations'] });
       queryClient.invalidateQueries({ queryKey: ['admin-dashboard'] });
     },
+    onError: (error: any) => {
+      toast.error(error.message || 'Failed to terminate workstation');
+    },
   });
+
+  const powerWorkstation = useMutation({
+    mutationFn: ({ id, action }: { id: string; action: 'start' | 'stop' | 'reboot' }) =>
+      apiClient.setWorkstationPower(id, action),
+    onSuccess: (_data, { action }) => {
+      toast.success(
+        action === 'start' ? 'Workstation is starting' :
+        action === 'stop' ? 'Workstation is stopping' :
+        'Workstation is rebooting'
+      );
+      queryClient.invalidateQueries({ queryKey: ['admin-workstations'] });
+      queryClient.invalidateQueries({ queryKey: ['admin-dashboard'] });
+    },
+    onError: (error: any, { action }) => {
+      toast.error(error.message || `Failed to ${action} workstation`);
+    },
+  });
+
+  const handleAdminPower = (ws: any, action: 'start' | 'stop') => {
+    const name = ws.friendlyName || ws.instanceId;
+    if (action === 'stop' && !confirm(`Stop ${name} (owner: ${ws.userId})?\n\nThe instance shuts down but is NOT destroyed.`)) return;
+    powerWorkstation.mutate({ id: ws.workstationId || ws.instanceId, action });
+  };
+
+  const handleAdminTerminate = (ws: any) => {
+    const name = ws.friendlyName || ws.instanceId;
+    if (!confirm(`⚠️ TERMINATE ${name} (owner: ${ws.userId})?\n\nThis permanently destroys the instance and all data on it. This cannot be undone.`)) return;
+    terminateWorkstation.mutate(ws.workstationId || ws.instanceId);
+  };
 
   const handleLogout = async () => {
     await signOut()
@@ -290,7 +326,7 @@ export default function AdminPage() {
                     <thead className="bg-gray-50">
                       <tr>
                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Instance ID</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Owner</th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Region</th>
                         <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
@@ -312,33 +348,91 @@ export default function AdminPage() {
                           </td>
                         </tr>
                       ) : (
-                        workstations.map((ws: any) => (
+                        workstations.map((ws: any) => {
+                          const wsId = ws.workstationId || ws.instanceId;
+                          const pendingPowerAction = powerWorkstation.isPending && powerWorkstation.variables?.id === wsId
+                            ? powerWorkstation.variables.action
+                            : null;
+                          const isTerminatePending = terminateWorkstation.isPending && terminateWorkstation.variables === wsId;
+                          const isBusy = !!pendingPowerAction || isTerminatePending;
+
+                          return (
                           <tr key={ws.instanceId} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 text-sm font-mono text-gray-900">{ws.instanceId}</td>
-                            <td className="px-4 py-3 text-sm text-gray-600">{ws.userId}</td>
+                            <td className="px-4 py-3 text-sm font-mono text-gray-900">
+                              <div>{ws.instanceId}</div>
+                              {ws.friendlyName && (
+                                <div className="text-xs text-gray-400 font-sans">{ws.friendlyName}</div>
+                              )}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-600">
+                              <div>{ws.userId}</div>
+                              {ws.assignedUsers && ws.assignedUsers.length > 0 && (
+                                <div
+                                  className="text-xs text-blue-600 mt-0.5"
+                                  title={`Shared with: ${ws.assignedUsers.join(', ')}`}
+                                >
+                                  +{ws.assignedUsers.length} shared user{ws.assignedUsers.length > 1 ? 's' : ''}
+                                </div>
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-sm text-gray-600">{ws.instanceType}</td>
                             <td className="px-4 py-3 text-sm text-gray-600">{ws.region}</td>
                             <td className="px-4 py-3 text-sm">
                               <span className={`px-2 py-1 text-xs font-medium rounded ${
                                 ws.status === 'running' ? 'bg-green-100 text-green-700' :
                                 ws.status === 'stopped' ? 'bg-gray-100 text-gray-700' :
+                                ws.status === 'stopping' || ws.status === 'terminating' ? 'bg-orange-100 text-orange-700' :
                                 'bg-yellow-100 text-yellow-700'
                               }`}>
                                 {ws.status}
                               </span>
                             </td>
                             <td className="px-4 py-3 text-sm font-mono text-gray-600">{ws.publicIp || '-'}</td>
-                            <td className="px-4 py-3 text-sm text-right">
-                              <button
-                                onClick={() => terminateWorkstation.mutate(ws.instanceId)}
-                                className="text-red-600 hover:text-red-800 text-xs"
-                                disabled={terminateWorkstation.isPending}
-                              >
-                                {terminateWorkstation.isPending ? 'Terminating...' : 'Terminate'}
-                              </button>
+                            <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
+                              <div className="flex items-center justify-end gap-2">
+                                {ws.status === 'stopped' && (
+                                  <button
+                                    onClick={() => handleAdminPower(ws, 'start')}
+                                    className="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
+                                    disabled={isBusy}
+                                    title="Start the instance"
+                                  >
+                                    {pendingPowerAction === 'start' ? 'Starting…' : 'Start'}
+                                  </button>
+                                )}
+                                {ws.status === 'running' && (
+                                  <button
+                                    onClick={() => handleAdminPower(ws, 'stop')}
+                                    className="px-2 py-1 text-xs bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50"
+                                    disabled={isBusy}
+                                    title="Shut down the instance — it can be started again later"
+                                  >
+                                    {pendingPowerAction === 'stop' ? 'Stopping…' : 'Stop'}
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => setAssigningWorkstation(ws)}
+                                  className="px-2 py-1 text-xs border border-blue-300 text-blue-700 rounded hover:bg-blue-50 disabled:opacity-50"
+                                  disabled={isBusy}
+                                  title="Reassign owner or share with other users"
+                                >
+                                  Assign
+                                </button>
+                                {!['terminated', 'terminating'].includes(ws.status) && (
+                                  <button
+                                    onClick={() => handleAdminTerminate(ws)}
+                                    className="px-2 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
+                                    disabled={isBusy}
+                                    title="Permanently destroy the instance and all data on it"
+                                  >
+                                    {isTerminatePending ? 'Terminating…' : 'Terminate'}
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
-                        ))
+                          );
+                        })
                       )}
                     </tbody>
                   </table>
@@ -1059,6 +1153,18 @@ export default function AdminPage() {
           queryClient.invalidateQueries({ queryKey: ['admin-dashboard'] });
         }}
       />
+
+      {/* Reassign Owner / Share Access Modal */}
+      {assigningWorkstation && (
+        <AssignUsersModal
+          workstation={assigningWorkstation}
+          onClose={() => setAssigningWorkstation(null)}
+          onSuccess={() => {
+            queryClient.invalidateQueries({ queryKey: ['admin-workstations'] });
+            queryClient.invalidateQueries({ queryKey: ['workstations'] });
+          }}
+        />
+      )}
 
       {/* Delete User Dialog */}
       {showDeleteDialog && selectedUserForAction && (

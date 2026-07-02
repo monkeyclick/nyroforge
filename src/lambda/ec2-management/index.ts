@@ -1,6 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
-import { EC2Client, RunInstancesCommand, TerminateInstancesCommand, StartInstancesCommand, StopInstancesCommand, RebootInstancesCommand, DescribeInstancesCommand, DescribeImagesCommand, AuthorizeSecurityGroupIngressCommand, _InstanceType } from '@aws-sdk/client-ec2';
-import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
+import { EC2Client, RunInstancesCommand, TerminateInstancesCommand, StartInstancesCommand, StopInstancesCommand, RebootInstancesCommand, DescribeInstancesCommand, DescribeImagesCommand, AuthorizeSecurityGroupIngressCommand, CreateTagsCommand, _InstanceType } from '@aws-sdk/client-ec2';
+import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand, QueryCommand, ScanCommand } from '@aws-sdk/client-dynamodb';
+import { isAdmin as isCognitoAdmin } from '../shared/auth';
 import { SecretsManagerClient, CreateSecretCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SSMClient, GetParameterCommand, SendCommandCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
@@ -188,6 +189,8 @@ interface WorkstationRecord {
   SK: string;
   instanceId: string;
   userId: string;
+  // Additional users granted full access to this workstation (admin-managed)
+  assignedUsers?: string[];
   userRole: string;
   region: string;
   availabilityZone: string;
@@ -310,16 +313,31 @@ async function hasPermission(userId: string, permission: Permission): Promise<bo
   return result;
 }
 
-async function canAccessWorkstation(userId: string, workstationUserId: string): Promise<boolean> {
-  console.log(`[canAccessWorkstation] Checking if user ${userId} can access workstation owned by ${workstationUserId}`);
-  
+async function canAccessWorkstation(
+  userId: string,
+  workstation: Pick<WorkstationRecord, 'userId' | 'assignedUsers'>,
+  callerIsAdmin: boolean
+): Promise<boolean> {
+  console.log(`[canAccessWorkstation] Checking if user ${userId} can access workstation owned by ${workstation.userId} (admin: ${callerIsAdmin})`);
+
+  // Admins (workstation-admin Cognito group) can manage any workstation
+  if (callerIsAdmin) {
+    return true;
+  }
+
   // Users can always access their own workstations
-  if (userId === workstationUserId) {
+  if (userId === workstation.userId) {
     console.log('[canAccessWorkstation] User owns the workstation - access granted');
     return true;
   }
 
-  // Check if user has manage-all permission
+  // Users the workstation has been shared with get full access
+  if (workstation.assignedUsers?.includes(userId)) {
+    console.log('[canAccessWorkstation] User is in assignedUsers - access granted');
+    return true;
+  }
+
+  // Legacy DynamoDB permission system fallback
   const result = await hasPermission(userId, 'workstations:manage-all');
   console.log(`[canAccessWorkstation] User has manage-all permission: ${result}`);
   return result;
@@ -544,13 +562,18 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
     }
 
     const { httpMethod, pathParameters, body, requestContext } = event;
-    const userId = requestContext.authorizer?.claims?.email || 
-                   requestContext.authorizer?.claims?.sub || 
+    const userId = requestContext.authorizer?.claims?.email ||
+                   requestContext.authorizer?.claims?.sub ||
                    requestContext.authorizer?.claims?.['cognito:username'] ||
                    'unknown';
-    
+    // Cognito groups are the authoritative access system: membership in the
+    // workstation-admin group grants manage-all semantics regardless of the
+    // legacy DynamoDB permission tables.
+    const callerIsAdmin = isCognitoAdmin(event);
+
     console.log('\n--- Request Context ---');
     console.log('Extracted userId:', userId);
+    console.log('Caller is admin (Cognito group):', callerIsAdmin);
     console.log('HTTP Method:', httpMethod);
     console.log('Path Parameters:', JSON.stringify(pathParameters));
     console.log('Query Parameters:', JSON.stringify(event.queryStringParameters));
@@ -616,7 +639,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
       case 'GET':
         if (pathParameters?.workstationId) {
           console.log('Route: GET /workstations/{workstationId}');
-          if (!(await hasPermission(userId, 'workstations:read'))) {
+          if (!callerIsAdmin && !(await hasPermission(userId, 'workstations:read'))) {
             await logAuditEvent(userId, 'DENIED_ACCESS', 'workstation', pathParameters.workstationId);
             return {
               statusCode: 403,
@@ -629,10 +652,10 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
               body: JSON.stringify({ message: 'Insufficient permissions' }),
             };
           }
-          return await getWorkstation(pathParameters.workstationId, userId);
+          return await getWorkstation(pathParameters.workstationId, userId, callerIsAdmin);
         } else {
           console.log('Route: GET /workstations (list)');
-          if (!(await hasPermission(userId, 'workstations:read'))) {
+          if (!callerIsAdmin && !(await hasPermission(userId, 'workstations:read'))) {
             await logAuditEvent(userId, 'DENIED_ACCESS', 'workstations', 'list');
             return {
               statusCode: 403,
@@ -645,12 +668,12 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
               body: JSON.stringify({ message: 'Insufficient permissions' }),
             };
           }
-          return await listWorkstations(event.queryStringParameters, userId);
+          return await listWorkstations(event.queryStringParameters, userId, callerIsAdmin);
         }
-      
+
       case 'POST':
         console.log('Route: POST /workstations (launch)');
-        if (!(await hasPermission(userId, 'workstations:create'))) {
+        if (!callerIsAdmin && !(await hasPermission(userId, 'workstations:create'))) {
           await logAuditEvent(userId, 'DENIED_CREATE', 'workstation', 'new');
           return {
             statusCode: 403,
@@ -669,7 +692,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
       case 'DELETE':
         if (pathParameters?.workstationId) {
           console.log('Route: DELETE /workstations/{workstationId}');
-          if (!(await hasPermission(userId, 'workstations:delete'))) {
+          if (!callerIsAdmin && !(await hasPermission(userId, 'workstations:delete'))) {
             await logAuditEvent(userId, 'DENIED_DELETE', 'workstation', pathParameters.workstationId);
             return {
               statusCode: 403,
@@ -682,14 +705,14 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
               body: JSON.stringify({ message: 'Insufficient permissions to delete workstations' }),
             };
           }
-          return await terminateWorkstation(pathParameters.workstationId, userId);
+          return await terminateWorkstation(pathParameters.workstationId, userId, callerIsAdmin);
         }
         break;
-      
+
       case 'PUT':
         if (event.path?.includes('/reconcile')) {
           console.log('Route: PUT /workstations/reconcile');
-          if (!(await hasPermission(userId, 'workstations:manage-all'))) {
+          if (!callerIsAdmin && !(await hasPermission(userId, 'workstations:manage-all'))) {
             await logAuditEvent(userId, 'DENIED_RECONCILE', 'workstations', 'all');
             return {
               statusCode: 403,
@@ -709,7 +732,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
       case 'PATCH':
         if (pathParameters?.workstationId) {
           console.log('Route: PATCH /workstations/{workstationId}');
-          if (!(await hasPermission(userId, 'workstations:update'))) {
+          if (!callerIsAdmin && !(await hasPermission(userId, 'workstations:update'))) {
             await logAuditEvent(userId, 'DENIED_UPDATE', 'workstation', pathParameters.workstationId);
             return {
               statusCode: 403,
@@ -725,9 +748,9 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
           const updateRequest = JSON.parse(body || '{}');
           // Power actions (start/stop/reboot) are treated as "update" operations
           if (updateRequest.powerAction) {
-            return await powerWorkstation(pathParameters.workstationId, updateRequest.powerAction, userId);
+            return await powerWorkstation(pathParameters.workstationId, updateRequest.powerAction, userId, callerIsAdmin);
           }
-          return await updateWorkstation(pathParameters.workstationId, updateRequest, userId);
+          return await updateWorkstation(pathParameters.workstationId, updateRequest, userId, callerIsAdmin);
         }
         break;
     }
@@ -1168,23 +1191,15 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
   }
 }
 
-async function getWorkstation(workstationId: string, userId: string): Promise<APIGatewayProxyResult> {
+async function getWorkstation(workstationId: string, userId: string, callerIsAdmin: boolean): Promise<APIGatewayProxyResult> {
   console.log('\n--- getWorkstation Started ---');
   console.log('WorkstationId:', workstationId);
   console.log('UserId:', userId);
-  
-  try {
-    const getCommand = new GetItemCommand({
-      TableName: WORKSTATIONS_TABLE,
-      Key: marshall({
-        PK: `WORKSTATION#${workstationId}`,
-        SK: 'METADATA',
-      }),
-    });
 
-    const result = await dynamoClient.send(getCommand);
-    
-    if (!result.Item) {
+  try {
+    const found = await findWorkstationRecord(workstationId);
+
+    if (!found) {
       console.log('❌ Workstation not found');
       return {
         statusCode: 404,
@@ -1198,12 +1213,12 @@ async function getWorkstation(workstationId: string, userId: string): Promise<AP
       };
     }
 
-    const workstation = unmarshall(result.Item) as WorkstationRecord;
+    const workstation = found.record;
     console.log('✅ Workstation found');
     console.log('Workstation owner:', workstation.userId);
 
     // Check permissions
-    if (!(await canAccessWorkstation(userId, workstation.userId))) {
+    if (!(await canAccessWorkstation(userId, workstation, callerIsAdmin))) {
       console.log('❌ Access denied');
       await logAuditEvent(userId, 'DENIED_ACCESS', 'workstation', workstationId);
       return {
@@ -1299,17 +1314,17 @@ async function getWorkstation(workstationId: string, userId: string): Promise<AP
   }
 }
 
-async function listWorkstations(queryParams: any, userId: string): Promise<APIGatewayProxyResult> {
+async function listWorkstations(queryParams: any, userId: string, callerIsAdmin: boolean): Promise<APIGatewayProxyResult> {
   console.log('\n--- listWorkstations Started ---');
   console.log('Query Params:', JSON.stringify(queryParams));
   console.log('UserId:', userId);
-  
+
   try {
     let queryCommand;
 
-    const hasManageAll = await hasPermission(userId, 'workstations:manage-all');
+    const hasManageAll = callerIsAdmin || await hasPermission(userId, 'workstations:manage-all');
     console.log('User has manage-all permission:', hasManageAll);
-    
+
     if (hasManageAll && queryParams?.userId) {
       console.log('Admin querying specific user workstations:', queryParams.userId);
       queryCommand = new QueryCommand({
@@ -1334,18 +1349,19 @@ async function listWorkstations(queryParams: any, userId: string): Promise<APIGa
         }),
       });
     } else if (!hasManageAll) {
-      console.log('User querying own workstations');
-      queryCommand = new QueryCommand({
+      // Owned workstations plus ones shared with the user via assignedUsers.
+      // assignedUsers is not indexable, so this is a filtered scan (table is small).
+      console.log('User querying own + assigned workstations');
+      queryCommand = new ScanCommand({
         TableName: WORKSTATIONS_TABLE,
-        IndexName: 'UserIdIndex',
-        KeyConditionExpression: 'userId = :userId',
+        FilterExpression: 'begins_with(PK, :pk) AND (userId = :userId OR contains(assignedUsers, :userId))',
         ExpressionAttributeValues: marshall({
+          ':pk': 'WORKSTATION#',
           ':userId': userId,
         }),
       });
     } else {
       console.log('Admin querying all workstations (using Scan)');
-      const { ScanCommand } = await import('@aws-sdk/client-dynamodb');
       queryCommand = new ScanCommand({
         TableName: WORKSTATIONS_TABLE,
         FilterExpression: 'begins_with(PK, :pk)',
@@ -1624,7 +1640,7 @@ type PowerAction = 'start' | 'stop' | 'reboot';
 /**
  * Start, stop, or reboot a workstation's EC2 instance (without terminating it).
  */
-async function powerWorkstation(workstationIdParam: string, action: PowerAction, userId: string): Promise<APIGatewayProxyResult> {
+async function powerWorkstation(workstationIdParam: string, action: PowerAction, userId: string, callerIsAdmin: boolean): Promise<APIGatewayProxyResult> {
   console.log('\n--- powerWorkstation Started ---');
   console.log('WorkstationId:', workstationIdParam);
   console.log('Action:', action);
@@ -1657,7 +1673,7 @@ async function powerWorkstation(workstationIdParam: string, action: PowerAction,
     console.log('✅ Workstation found. Owner:', workstation.userId, 'Status:', workstation.status);
 
     // Check permissions - user can manage their own, or admin can manage any
-    if (!(await canAccessWorkstation(userId, workstation.userId))) {
+    if (!(await canAccessWorkstation(userId, workstation, callerIsAdmin))) {
       console.log('❌ Access denied');
       await logAuditEvent(userId, 'DENIED_POWER', 'workstation', workstationIdParam, { action });
       return { statusCode: 403, headers, body: JSON.stringify({ message: 'Access denied' }) };
@@ -1746,24 +1762,16 @@ async function powerWorkstation(workstationIdParam: string, action: PowerAction,
   }
 }
 
-async function terminateWorkstation(workstationId: string, userId: string): Promise<APIGatewayProxyResult> {
+async function terminateWorkstation(workstationId: string, userId: string, callerIsAdmin: boolean): Promise<APIGatewayProxyResult> {
   console.log('\n--- terminateWorkstation Started ---');
   console.log('WorkstationId:', workstationId);
   console.log('UserId:', userId);
-  
-  try {
-    // Get workstation record
-    const getCommand = new GetItemCommand({
-      TableName: WORKSTATIONS_TABLE,
-      Key: marshall({
-        PK: `WORKSTATION#${workstationId}`,
-        SK: 'METADATA',
-      }),
-    });
 
-    const result = await dynamoClient.send(getCommand);
-    
-    if (!result.Item) {
+  try {
+    // Resolve by workstationId or EC2 instanceId (frontend sends either)
+    const found = await findWorkstationRecord(workstationId);
+
+    if (!found) {
       console.log('❌ Workstation not found');
       return {
         statusCode: 404,
@@ -1777,13 +1785,13 @@ async function terminateWorkstation(workstationId: string, userId: string): Prom
       };
     }
 
-    const workstation = unmarshall(result.Item) as WorkstationRecord;
+    const { record: workstation, pk } = found;
     console.log('✅ Workstation found');
     console.log('Workstation owner:', workstation.userId);
     console.log('Workstation status:', workstation.status);
 
     // Check permissions
-    if (!(await canAccessWorkstation(userId, workstation.userId))) {
+    if (!(await canAccessWorkstation(userId, workstation, callerIsAdmin))) {
       console.log('❌ Access denied');
       await logAuditEvent(userId, 'DENIED_DELETE', 'workstation', workstationId);
       return {
@@ -1806,7 +1814,7 @@ async function terminateWorkstation(workstationId: string, userId: string): Prom
       const deleteCommand = new DeleteItemCommand({
         TableName: WORKSTATIONS_TABLE,
         Key: marshall({
-          PK: `WORKSTATION#${workstationId}`,
+          PK: pk,
           SK: 'METADATA',
         }),
       });
@@ -1855,7 +1863,7 @@ async function terminateWorkstation(workstationId: string, userId: string): Prom
     const updateCommand = new UpdateItemCommand({
       TableName: WORKSTATIONS_TABLE,
       Key: marshall({
-        PK: `WORKSTATION#${workstationId}`,
+        PK: pk,
         SK: 'METADATA',
       }),
       UpdateExpression: 'SET #status = :status, updatedAt = :timestamp',
@@ -2083,25 +2091,25 @@ async function reconcileWorkstations(userId: string): Promise<APIGatewayProxyRes
   }
 }
 
-async function updateWorkstation(workstationId: string, updateRequest: { friendlyName?: string }, userId: string): Promise<APIGatewayProxyResult> {
+interface UpdateWorkstationRequest {
+  friendlyName?: string;
+  // Admin-only: reassign the owning user
+  owner?: string;
+  // Admin-only: full list of additional users granted access
+  assignedUsers?: string[];
+}
+
+async function updateWorkstation(workstationId: string, updateRequest: UpdateWorkstationRequest, userId: string, callerIsAdmin: boolean): Promise<APIGatewayProxyResult> {
   console.log('\n--- updateWorkstation Started ---');
   console.log('WorkstationId:', workstationId);
   console.log('UpdateRequest:', JSON.stringify(updateRequest));
   console.log('UserId:', userId);
-  
-  try {
-    // Get workstation record to verify it exists and check ownership
-    const getCommand = new GetItemCommand({
-      TableName: WORKSTATIONS_TABLE,
-      Key: marshall({
-        PK: `WORKSTATION#${workstationId}`,
-        SK: 'METADATA',
-      }),
-    });
 
-    const result = await dynamoClient.send(getCommand);
-    
-    if (!result.Item) {
+  try {
+    // Resolve by workstationId or EC2 instanceId (frontend sends either)
+    const found = await findWorkstationRecord(workstationId);
+
+    if (!found) {
       console.log('❌ Workstation not found');
       return {
         statusCode: 404,
@@ -2115,12 +2123,12 @@ async function updateWorkstation(workstationId: string, updateRequest: { friendl
       };
     }
 
-    const workstation = unmarshall(result.Item) as WorkstationRecord;
+    const { record: workstation, pk } = found;
     console.log('✅ Workstation found');
     console.log('Workstation owner:', workstation.userId);
 
     // Check permissions - user can update their own, or admin can update any
-    if (!(await canAccessWorkstation(userId, workstation.userId))) {
+    if (!(await canAccessWorkstation(userId, workstation, callerIsAdmin))) {
       console.log('❌ Access denied');
       await logAuditEvent(userId, 'DENIED_UPDATE', 'workstation', workstationId);
       return {
@@ -2135,6 +2143,24 @@ async function updateWorkstation(workstationId: string, updateRequest: { friendl
       };
     }
 
+    const wantsOwnershipChange = updateRequest.owner !== undefined || updateRequest.assignedUsers !== undefined;
+
+    // Ownership changes (reassign owner / share with users) are admin-only
+    if (wantsOwnershipChange && !callerIsAdmin) {
+      console.log('❌ Ownership change denied - caller is not admin');
+      await logAuditEvent(userId, 'DENIED_REASSIGN', 'workstation', workstationId, updateRequest);
+      return {
+        statusCode: 403,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+          'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+        },
+        body: JSON.stringify({ message: 'Only administrators can reassign or share workstations' }),
+      };
+    }
+
     // Build update expression for allowed fields
     const updateExpressions: string[] = ['updatedAt = :timestamp'];
     const expressionAttributeValues: Record<string, any> = {
@@ -2146,12 +2172,70 @@ async function updateWorkstation(workstationId: string, updateRequest: { friendl
       expressionAttributeValues[':friendlyName'] = updateRequest.friendlyName;
     }
 
+    let newOwner: string | undefined;
+    if (updateRequest.owner !== undefined) {
+      newOwner = String(updateRequest.owner).trim();
+      if (!newOwner) {
+        return {
+          statusCode: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+          },
+          body: JSON.stringify({ message: 'owner must be a non-empty user identifier (email)' }),
+        };
+      }
+      updateExpressions.push('userId = :owner');
+      expressionAttributeValues[':owner'] = newOwner;
+    }
+
+    let newAssignedUsers: string[] | undefined;
+    if (updateRequest.assignedUsers !== undefined) {
+      if (!Array.isArray(updateRequest.assignedUsers) || updateRequest.assignedUsers.some(u => typeof u !== 'string')) {
+        return {
+          statusCode: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+          },
+          body: JSON.stringify({ message: 'assignedUsers must be an array of user identifiers (emails)' }),
+        };
+      }
+      const effectiveOwner = newOwner ?? workstation.userId;
+      // Dedupe and drop the owner (owner access is implicit)
+      newAssignedUsers = [...new Set(
+        updateRequest.assignedUsers.map(u => u.trim()).filter(u => u && u !== effectiveOwner)
+      )];
+      updateExpressions.push('assignedUsers = :assignedUsers');
+      expressionAttributeValues[':assignedUsers'] = newAssignedUsers;
+    }
+
+    // Keep EC2 cost-allocation tags in sync when the owner changes
+    if (newOwner && newOwner !== workstation.userId && workstation.instanceId) {
+      try {
+        await ec2Client.send(new CreateTagsCommand({
+          Resources: [workstation.instanceId],
+          Tags: [
+            { Key: 'owner', Value: newOwner },
+            { Key: 'UserId', Value: newOwner },
+          ],
+        }));
+        console.log(`✅ Updated owner/UserId tags on ${workstation.instanceId}`);
+      } catch (tagError) {
+        console.warn('⚠️  Failed to update EC2 owner tags (continuing):', tagError);
+      }
+    }
+
     // Perform the update
     console.log('Updating workstation in DynamoDB...');
     const updateCommand = new UpdateItemCommand({
       TableName: WORKSTATIONS_TABLE,
       Key: marshall({
-        PK: `WORKSTATION#${workstationId}`,
+        PK: pk,
         SK: 'METADATA',
       }),
       UpdateExpression: `SET ${updateExpressions.join(', ')}`,
@@ -2163,7 +2247,15 @@ async function updateWorkstation(workstationId: string, updateRequest: { friendl
     const updatedWorkstation = updateResult.Attributes ? unmarshall(updateResult.Attributes) : null;
     console.log('✅ Workstation updated');
 
-    await logAuditEvent(userId, 'UPDATE_WORKSTATION', 'workstation', workstationId, updateRequest);
+    if (wantsOwnershipChange) {
+      await logAuditEvent(userId, 'REASSIGN_WORKSTATION', 'workstation', workstationId, {
+        previousOwner: workstation.userId,
+        newOwner: newOwner ?? workstation.userId,
+        assignedUsers: newAssignedUsers ?? workstation.assignedUsers ?? [],
+      });
+    } else {
+      await logAuditEvent(userId, 'UPDATE_WORKSTATION', 'workstation', workstationId, updateRequest);
+    }
 
     console.log('=== updateWorkstation Completed Successfully ===\n');
     return {

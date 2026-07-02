@@ -35,6 +35,8 @@ export interface Workstation {
   // Ownership information
   ownerName?: string;
   ownerGroups?: string[];
+  // Additional users granted full access (admin-managed)
+  assignedUsers?: string[];
 }
 
 export interface DashboardSummary {

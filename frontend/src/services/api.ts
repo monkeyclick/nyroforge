@@ -1203,6 +1203,19 @@ class ApiClient {
     });
   }
 
+  /**
+   * Reassign the owner and/or set the shared-user list of a workstation (admin only)
+   */
+  async updateWorkstationOwnership(
+    workstationId: string,
+    data: { owner?: string; assignedUsers?: string[] }
+  ): Promise<{ message: string; workstation: Workstation }> {
+    return this.request(`/workstations/${workstationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
   // Instance Family Management (Admin)
   async getInstanceFamilies(): Promise<{
     allowedFamilies: string[];
