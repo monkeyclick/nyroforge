@@ -29,6 +29,15 @@ export interface WorkstationInfrastructureStackProps extends cdk.StackProps {
    * @default false
    */
   enableTerminationProtection?: boolean;
+
+  /**
+   * Deployment environment. Drives the removal policy for stateful resources
+   * (DynamoDB tables, KMS key, Cognito user pool): 'prod' retains, everything
+   * else destroys. Must use the same enum as bin/app.ts so prod deploys are
+   * consistently protected.
+   * @default 'dev'
+   */
+  environment?: 'dev' | 'staging' | 'prod';
 }
 
 export class WorkstationInfrastructureStack extends cdk.Stack {
@@ -66,8 +75,11 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
       terminationProtection: props?.enableTerminationProtection ?? false,
     });
 
-    // Environment-aware removal policy
-    const isProd = process.env.ENVIRONMENT === 'production' || process.env.NODE_ENV === 'production';
+    // Environment-aware removal policy. Driven by the `environment` prop (set
+    // once in bin/app.ts) so every stack agrees on what "prod" means — reading
+    // process.env here previously diverged from bin/app.ts ('prod' vs
+    // 'production'), leaving prod tables/keys/user-pool on DESTROY.
+    const isProd = props?.environment === 'prod';
     this.removalPolicy = isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY;
 
     // Create KMS key for encryption

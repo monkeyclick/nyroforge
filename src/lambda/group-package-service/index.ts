@@ -8,13 +8,69 @@ import {
 } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { corsHeaders } from '../shared/http';
-import { requireAdmin } from '../shared/auth';
+import { requireAdmin, isAdmin } from '../shared/auth';
+import { logEvent } from '../shared/logging';
 
 const dynamodb = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-west-2' });
 
 const BINDINGS_TABLE = process.env.GROUP_PACKAGE_BINDINGS_TABLE || '';
 const PACKAGES_TABLE = process.env.BOOTSTRAP_PACKAGES_TABLE || '';
 const QUEUE_TABLE = process.env.PACKAGE_QUEUE_TABLE || '';
+const WORKSTATIONS_TABLE = process.env.WORKSTATIONS_TABLE_NAME || '';
+
+/**
+ * Authorize access to a specific workstation's package queue. Returns an error
+ * response to return to the caller, or null when access is granted. Access is
+ * limited to admins, the workstation owner (userId), and users the workstation
+ * has been shared with (assignedUsers). Fails closed: any lookup problem or
+ * missing identity denies access. Without this, any authenticated user could
+ * read or re-trigger installs on another user's workstation (IDOR).
+ */
+async function requireWorkstationAccess(event: any, workstationId: string): Promise<any | null> {
+  const deny = () => ({
+    statusCode: 403,
+    headers: corsHeaders(),
+    body: JSON.stringify({ error: 'Forbidden' }),
+  });
+
+  if (isAdmin(event)) {
+    return null;
+  }
+
+  // Resolve the caller identity the same way ec2-management does when it stores
+  // workstation.userId / assignedUsers (email first, then sub, then username);
+  // comparing against the wrong claim would deny legitimate owners.
+  const claims = event.requestContext?.authorizer?.claims || {};
+  const callerId = claims.email || claims.sub || claims['cognito:username'];
+  if (!callerId || !workstationId || !WORKSTATIONS_TABLE) {
+    console.error('Cannot verify workstation ownership (missing caller id, workstation id, or table)');
+    return deny();
+  }
+
+  let workstation: any;
+  try {
+    const res = await dynamodb.send(new GetItemCommand({
+      TableName: WORKSTATIONS_TABLE,
+      Key: marshall({ PK: `WORKSTATION#${workstationId}`, SK: 'METADATA' }),
+    }));
+    workstation = res.Item ? unmarshall(res.Item) : null;
+  } catch (err) {
+    console.error('Error loading workstation for access check:', err);
+    return deny();
+  }
+
+  if (!workstation) {
+    return {
+      statusCode: 404,
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: 'Workstation not found' }),
+    };
+  }
+
+  const isOwner = workstation.userId === callerId;
+  const isShared = Array.isArray(workstation.assignedUsers) && workstation.assignedUsers.includes(callerId);
+  return isOwner || isShared ? null : deny();
+}
 
 interface GroupPackageBinding {
   PK: string; // GROUP#<groupId>
@@ -39,6 +95,7 @@ interface PackageQueueItem {
   downloadUrl: string;
   installCommand: string;
   installArgs: string;
+  expectedSha256?: string;
   status: 'pending' | 'installing' | 'completed' | 'failed';
   installOrder: number;
   required: boolean;
@@ -56,7 +113,7 @@ interface PackageQueueItem {
  * Lambda handler for group package management operations
  */
 export const handler = async (event: any) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   const httpMethod = event.httpMethod || event.requestContext?.http?.method;
   const path = event.path || event.requestContext?.http?.path || '';
@@ -76,12 +133,16 @@ export const handler = async (event: any) => {
     
     if (httpMethod === 'GET' && path.includes('/workstations/') && path.includes('/packages')) {
       const workstationId = pathParams.workstationId || extractFromPath(path, 'workstations');
+      const denied = await requireWorkstationAccess(event, workstationId);
+      if (denied) return denied;
       return await getPackageInstallationStatus(workstationId);
     }
-    
+
     if (httpMethod === 'POST' && path.includes('/workstations/') && path.includes('/packages/') && path.includes('/retry')) {
       const workstationId = pathParams.workstationId || extractFromPath(path, 'workstations');
       const packageId = pathParams.packageId || extractFromPath(path, 'packages');
+      const denied = await requireWorkstationAccess(event, workstationId);
+      if (denied) return denied;
       return await retryPackageInstallation(workstationId, packageId);
     }
     
@@ -119,11 +180,15 @@ export const handler = async (event: any) => {
     }
     
     if (httpMethod === 'POST' && path.includes('/admin/workstations/') && path.includes('/packages')) {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
       const workstationId = pathParams.workstationId || extractFromPath(path, 'workstations');
       return await addPackagesToWorkstation(workstationId, body);
     }
-    
+
     if (httpMethod === 'DELETE' && path.includes('/admin/workstations/') && path.includes('/packages/')) {
+      const denied = requireAdmin(event);
+      if (denied) return denied;
       const workstationId = pathParams.workstationId || extractFromPath(path, 'workstations');
       const packageId = pathParams.packageId || extractFromPath(path, 'packages');
       return await removeQueuedPackage(workstationId, packageId);
@@ -557,6 +622,7 @@ async function addPackagesToWorkstation(workstationId: string, data: any): Promi
         downloadUrl: packageData.downloadUrl,
         installCommand: packageData.installCommand,
         installArgs: packageData.installArgs || '',
+        expectedSha256: packageData.expectedSha256,
         status: 'pending',
         installOrder: packageData.order || 50,
         required: false,
@@ -569,7 +635,7 @@ async function addPackagesToWorkstation(workstationId: string, data: any): Promi
 
       const command = new PutItemCommand({
         TableName: QUEUE_TABLE,
-        Item: marshall(queueItem)
+        Item: marshall(queueItem, { removeUndefinedValues: true })
       });
 
       await dynamodb.send(command);

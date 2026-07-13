@@ -34,6 +34,7 @@ import {
 
 import { isAdmin, requireAdmin } from '../shared/auth';
 import { isSafeObjectKey } from '../shared/validation';
+import { logEvent } from '../shared/logging';
 
 const s3Client = new S3Client({});
 const ssmClient = new SSMClient({});
@@ -54,41 +55,49 @@ interface StorageConfig {
   region: string;
 }
 
+// SSM prefix the enterprise storage stack actually writes under (keyed by the
+// storage construct's projectName='workstation', NOT the deployment environment).
+// The previous `/${environment}/storage/...` reads never matched these.
+const STORAGE_PARAM_PREFIX = '/workstation/storage';
+
 async function getStorageConfig(): Promise<StorageConfig> {
-  const environment = process.env.ENVIRONMENT || 'dev';
   const region = process.env.AWS_REGION || 'us-east-1';
-  
-  let transferBucket = '';
+
+  // Prefer the bucket name injected by the admin stack (deterministic:
+  // `workstation-transfer-<account>`); fall back to SSM for compatibility.
+  let transferBucket = process.env.STORAGE_TRANSFER_BUCKET || '';
   let efsFileSystemId = '';
   let efsAccessPointId = '';
-  
-  try {
-    const bucketParam = await ssmClient.send(new GetParameterCommand({
-      Name: `/${environment}/storage/transfer-bucket`,
-    }));
-    transferBucket = bucketParam.Parameter?.Value || '';
-  } catch (e) {
-    console.log('Transfer bucket parameter not found');
+
+  if (!transferBucket) {
+    try {
+      const bucketParam = await ssmClient.send(new GetParameterCommand({
+        Name: `${STORAGE_PARAM_PREFIX}/s3/transfer-bucket`,
+      }));
+      transferBucket = bucketParam.Parameter?.Value || '';
+    } catch (e) {
+      console.log('Transfer bucket parameter not found');
+    }
   }
-  
+
   try {
     const efsParam = await ssmClient.send(new GetParameterCommand({
-      Name: `/${environment}/storage/efs-file-system-id`,
+      Name: `${STORAGE_PARAM_PREFIX}/efs/fileSystemId`,
     }));
     efsFileSystemId = efsParam.Parameter?.Value || '';
   } catch (e) {
     console.log('EFS file system parameter not found');
   }
-  
+
   try {
     const apParam = await ssmClient.send(new GetParameterCommand({
-      Name: `/${environment}/storage/efs-access-point-id`,
+      Name: `${STORAGE_PARAM_PREFIX}/efs/accessPointId`,
     }));
     efsAccessPointId = apParam.Parameter?.Value || '';
   } catch (e) {
     console.log('EFS access point parameter not found');
   }
-  
+
   return {
     transferBucket,
     efsFileSystemId,
@@ -576,7 +585,7 @@ async function deleteS3Bucket(bucketName: string): Promise<APIGatewayProxyResult
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  console.log('Storage service request:', JSON.stringify(event, null, 2));
+  logEvent(event, 'Storage service request');
   
   // Handle OPTIONS requests for CORS
   if (event.httpMethod === 'OPTIONS') {

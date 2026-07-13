@@ -40,6 +40,9 @@ export const CredentialManager: React.FC<CredentialManagerProps> = ({ onClose })
   const [sessionToken, setSessionToken] = useState('');
   const [region, setRegion] = useState('us-east-1');
   const [showSecrets, setShowSecrets] = useState(false);
+  // Passphrase used to encrypt (on save) and decrypt (on unlock) secret material.
+  // Kept in component state only; never persisted.
+  const [passphrase, setPassphrase] = useState('');
 
   // Load profiles on mount
   useEffect(() => {
@@ -63,15 +66,39 @@ export const CredentialManager: React.FC<CredentialManagerProps> = ({ onClose })
     setRegion('us-east-1');
     setCredentialType('accessKey');
     setShowSecrets(false);
+    setPassphrase('');
     setTestResult(null);
   };
 
   const handleSelectProfile = async (profileId: string) => {
     setSelectedProfile(profileId);
     const profile = credentialManager.getProfile(profileId);
-    if (profile) {
-      await credentialManager.setActiveProfile(profileId);
-      await setCredentials(profile.credentials);
+    if (!profile) return;
+
+    await credentialManager.setActiveProfile(profileId);
+
+    try {
+      let credentials: AWSCredentials;
+      if (credentialManager.isProfileUnlocked(profileId)) {
+        // Secret already in memory (or profile has no secret, e.g. IAM role).
+        const active = credentialManager.getActiveCredentials();
+        if (!active) throw new Error('Unable to load credentials for this profile');
+        credentials = active;
+      } else {
+        // Locked profile: decrypt its secret with the entered passphrase.
+        if (!passphrase) {
+          setTestResult({
+            success: false,
+            message: 'Enter this profile’s passphrase, then click it again to unlock.',
+          });
+          return;
+        }
+        credentials = await credentialManager.unlockProfile(profileId, passphrase);
+      }
+      await setCredentials(credentials);
+      setTestResult(null);
+    } catch (error: any) {
+      setTestResult({ success: false, message: error.message });
     }
   };
 
@@ -91,14 +118,28 @@ export const CredentialManager: React.FC<CredentialManagerProps> = ({ onClose })
       return;
     }
 
+    // A passphrase is required to encrypt secret material at rest.
+    if (credentialType === 'accessKey' && !passphrase) {
+      setTestResult({
+        success: false,
+        message: 'A passphrase is required to encrypt and save these credentials.',
+      });
+      return;
+    }
+
     try {
       if (isEditing && selectedProfile) {
-        await credentialManager.updateProfile(selectedProfile, {
-          name: profileName,
-          credentials,
-        });
+        await credentialManager.updateProfile(
+          selectedProfile,
+          { name: profileName, credentials },
+          passphrase
+        );
       } else {
-        const profile = await credentialManager.createProfile(profileName || 'Default', credentials);
+        const profile = await credentialManager.createProfile(
+          profileName || 'Default',
+          credentials,
+          passphrase
+        );
         setSelectedProfile(profile.id);
       }
 
@@ -155,16 +196,31 @@ export const CredentialManager: React.FC<CredentialManagerProps> = ({ onClose })
       sessionToken: sessionToken || undefined,
     };
 
-    const success = await setCredentials(credentials);
-    if (success) {
-      // Save as new profile if not editing
-      if (!selectedProfile) {
-        await credentialManager.createProfile(profileName || 'Default', credentials);
-        await loadProfiles();
+    // Connecting to a new profile persists it, which requires a passphrase to
+    // encrypt the secret material at rest.
+    const willSaveNewProfile = !selectedProfile;
+    if (willSaveNewProfile && credentialType === 'accessKey' && !passphrase) {
+      setTestResult({
+        success: false,
+        message: 'A passphrase is required to encrypt and save these credentials.',
+      });
+      return;
+    }
+
+    try {
+      const success = await setCredentials(credentials);
+      if (success) {
+        // Save as new profile if not editing
+        if (willSaveNewProfile) {
+          await credentialManager.createProfile(profileName || 'Default', credentials, passphrase);
+          await loadProfiles();
+        }
+        onClose();
+      } else {
+        setTestResult({ success: false, message: 'Failed to connect' });
       }
-      onClose();
-    } else {
-      setTestResult({ success: false, message: 'Failed to connect' });
+    } catch (error: any) {
+      setTestResult({ success: false, message: error.message || 'Failed to connect' });
     }
   };
 
@@ -228,6 +284,19 @@ export const CredentialManager: React.FC<CredentialManagerProps> = ({ onClose })
           {/* Form */}
           <div className="flex-1 p-4 overflow-y-auto">
             <div className="space-y-4">
+              {/* Migration notice */}
+              {selectedProfile &&
+                profiles.find((p) => p.id === selectedProfile)?.needsMigration && (
+                  <div className="p-3 rounded-lg bg-amber-50 text-amber-700 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                    <span className="text-sm">
+                      This profile needs to be re-encrypted. Re-enter the secret access key
+                      and a passphrase, then Save to secure it. Its secret is not stored on
+                      disk.
+                    </span>
+                  </div>
+                )}
+
               {/* Profile Name */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -345,6 +414,25 @@ export const CredentialManager: React.FC<CredentialManagerProps> = ({ onClose })
                     />
                     <p className="mt-1 text-xs text-gray-500">
                       Required for temporary credentials from STS AssumeRole
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      <Shield className="w-4 h-4 inline mr-1" />
+                      Encryption Passphrase
+                    </label>
+                    <input
+                      type={showSecrets ? 'text' : 'password'}
+                      value={passphrase}
+                      onChange={(e) => setPassphrase(e.target.value)}
+                      placeholder="Passphrase to encrypt / unlock this profile"
+                      className="w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 font-mono text-sm"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      Secrets are encrypted at rest with AES-GCM using this passphrase.
+                      Required to save a new profile and to unlock a saved one. It is
+                      never stored - if you forget it, re-enter the secret key to reset.
                     </p>
                   </div>
                 </>

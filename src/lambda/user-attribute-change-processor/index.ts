@@ -175,11 +175,9 @@ function hasRelevantAttributeChanges(oldUser: User, newUser: User): boolean {
     const newValue = newUser[field];
     
     if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
-      console.log('Relevant field changed', { 
-        field, 
-        oldValue, 
-        newValue 
-      });
+      // Log only which field changed and the record key — never the
+      // before/after values, which are user PII (email, name, etc.).
+      console.log('Relevant field changed', { field, userId: newUser.id });
       return true;
     }
   }

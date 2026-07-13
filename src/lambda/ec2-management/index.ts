@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda
 import { EC2Client, RunInstancesCommand, TerminateInstancesCommand, StartInstancesCommand, StopInstancesCommand, RebootInstancesCommand, DescribeInstancesCommand, DescribeImagesCommand, AuthorizeSecurityGroupIngressCommand, CreateTagsCommand, _InstanceType } from '@aws-sdk/client-ec2';
 import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand, QueryCommand, ScanCommand } from '@aws-sdk/client-dynamodb';
 import { isAdmin as isCognitoAdmin } from '../shared/auth';
+import { logEvent } from '../shared/logging';
 import { SecretsManagerClient, CreateSecretCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SSMClient, GetParameterCommand, SendCommandCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
@@ -174,6 +175,7 @@ interface BootstrapPackage {
   downloadUrl: string;
   installCommand: string;
   installArgs?: string;
+  expectedSha256?: string;
   requiresGpu?: boolean;
   supportedGpuFamilies?: string[];
   osVersions: string[];
@@ -337,10 +339,12 @@ async function canAccessWorkstation(
     return true;
   }
 
-  // Legacy DynamoDB permission system fallback
-  const result = await hasPermission(userId, 'workstations:manage-all');
-  console.log(`[canAccessWorkstation] User has manage-all permission: ${result}`);
-  return result;
+  // Cross-workstation access is limited to the owner, shared users, and Cognito
+  // admins (handled above). The legacy DynamoDB 'workstations:manage-all'
+  // fallback was removed: a stale role/group record must not keep granting
+  // access to other users' workstations after the user is removed from the
+  // Cognito workstation-admin group (Cognito groups are authoritative).
+  return false;
 }
 
 async function logAuditEvent(userId: string, action: string, resourceType: string, resourceId: string, details?: any): Promise<void> {
@@ -488,6 +492,7 @@ async function createPackageQueueItems(
         downloadUrl: pkg.downloadUrl,
         installCommand: pkg.installCommand,
         installArgs: pkg.installArgs || '',
+        expectedSha256: pkg.expectedSha256,
         status: 'pending',
         installOrder: pkg.order,
         required: pkg.isRequired,
@@ -524,7 +529,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
   console.log('Memory Limit:', context.memoryLimitInMB);
   console.log('Time Remaining:', context.getRemainingTimeInMillis(), 'ms');
   console.log('\n--- Event Details ---');
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
   // Environment variable logging removed for security (HIGH-11)
   console.log('='.repeat(80));
 
@@ -577,7 +582,6 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
     console.log('HTTP Method:', httpMethod);
     console.log('Path Parameters:', JSON.stringify(pathParameters));
     console.log('Query Parameters:', JSON.stringify(event.queryStringParameters));
-    console.log('Body:', body ? body.substring(0, 200) : 'none');
 
     // Check if user exists and is active (with fallback for backwards compatibility)
     console.log('\n--- User Verification ---');
@@ -712,7 +716,8 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
       case 'PUT':
         if (event.path?.includes('/reconcile')) {
           console.log('Route: PUT /workstations/reconcile');
-          if (!callerIsAdmin && !(await hasPermission(userId, 'workstations:manage-all'))) {
+          // Reconcile-all is admin-only via Cognito; legacy manage-all removed.
+          if (!callerIsAdmin) {
             await logAuditEvent(userId, 'DENIED_RECONCILE', 'workstations', 'all');
             return {
               statusCode: 403,
@@ -1322,7 +1327,10 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
   try {
     let queryCommand;
 
-    const hasManageAll = callerIsAdmin || await hasPermission(userId, 'workstations:manage-all');
+    // "Manage all workstations" is authoritative via the Cognito admin group
+    // only. The legacy DynamoDB manage-all lookup was removed so a stale record
+    // can't expose every user's workstations.
+    const hasManageAll = callerIsAdmin;
     console.log('User has manage-all permission:', hasManageAll);
 
     if (hasManageAll && queryParams?.userId) {

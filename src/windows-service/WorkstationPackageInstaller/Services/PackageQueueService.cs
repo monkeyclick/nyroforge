@@ -287,6 +287,7 @@ public class PackageQueueService
             PackageId = item["packageId"].S,
             PackageName = item["packageName"].S,
             DownloadUrl = item["downloadUrl"].S,
+            ExpectedSha256 = item.ContainsKey("expectedSha256") ? item["expectedSha256"].S : null,
             InstallCommand = item["installCommand"].S,
             InstallArgs = item.ContainsKey("installArgs") ? item["installArgs"].S : null,
             Status = Enum.Parse<PackageStatus>(item["status"].S, true),

@@ -1,6 +1,7 @@
 import { APIGatewayProxyHandler } from 'aws-lambda';
 import { EC2Client, DescribeImagesCommand } from '@aws-sdk/client-ec2';
 import { requireAdmin } from '../shared/auth';
+import { logEvent } from '../shared/logging';
 
 // AMI name patterns for Windows Server versions
 const AMI_PATTERNS: Record<string, string> = {
@@ -11,7 +12,7 @@ const AMI_PATTERNS: Record<string, string> = {
 };
 
 export const handler: APIGatewayProxyHandler = async (event) => {
-  console.log('AMI Validation Request:', JSON.stringify(event, null, 2));
+  logEvent(event, 'AMI Validation Request');
 
   const headers = {
     'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',

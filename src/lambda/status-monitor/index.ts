@@ -3,6 +3,7 @@ import { EC2Client, DescribeInstancesCommand, DescribeInstanceStatusCommand, Ter
 import { DynamoDBClient, ScanCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { CloudWatchClient, GetMetricStatisticsCommand } from '@aws-sdk/client-cloudwatch';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+import { logEvent } from '../shared/logging';
 
 // Initialize AWS clients
 const ec2Client = new EC2Client({});
@@ -37,7 +38,7 @@ interface InstanceStatusInfo {
 }
 
 export const handler = async (event: APIGatewayProxyEvent | ScheduledEvent, context: Context): Promise<APIGatewayProxyResult | void> => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event as APIGatewayProxyEvent);
 
   try {
     // Handle scheduled EventBridge events (for auto-termination)

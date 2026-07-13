@@ -32,10 +32,16 @@ public class Program
                 services.Configure<ServiceConfiguration>(
                     hostContext.Configuration.GetSection("ServiceConfiguration"));
                 
-                var awsConfig = hostContext.Configuration.GetSection("AWS").Get<AWSConfiguration>() 
+                var awsConfig = hostContext.Configuration.GetSection("AWS").Get<AWSConfiguration>()
                     ?? new AWSConfiguration();
-                
+
                 services.AddSingleton(awsConfig);
+
+                // Security configuration (download host allowlist + hash enforcement)
+                var securityConfig = hostContext.Configuration.GetSection("Security").Get<SecurityConfiguration>()
+                    ?? new SecurityConfiguration();
+
+                services.AddSingleton(securityConfig);
 
                 // AWS Services
                 services.AddSingleton<IAmazonDynamoDB>(sp =>

@@ -3,6 +3,7 @@ import { DynamoDBClient, PutItemCommand, GetItemCommand, ScanCommand, UpdateItem
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
 import { requireAdmin } from '../shared/auth';
+import { logEvent } from '../shared/logging';
 
 const dynamoClient = new DynamoDBClient({});
 const BOOTSTRAP_TABLE = process.env.BOOTSTRAP_PACKAGES_TABLE!;
@@ -16,6 +17,7 @@ export interface BootstrapPackage {
   downloadUrl: string;
   installCommand: string;
   installArgs?: string;
+  expectedSha256?: string; // Hex SHA-256 of the installer; verified on the workstation before execution
   requiresGpu?: boolean; // Only install on GPU instances
   supportedGpuFamilies?: string[]; // e.g., ['NVIDIA', 'AMD']
   osVersions: string[]; // Which Windows versions support this
@@ -34,7 +36,7 @@ export interface BootstrapPackage {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  console.log('Bootstrap Config Service - Event:', JSON.stringify(event, null, 2));
+  logEvent(event, 'Bootstrap Config Service - Event');
 
   const headers = {
     'Content-Type': 'application/json',
@@ -112,6 +114,7 @@ async function createPackage(data: Partial<BootstrapPackage>, headers: any): Pro
     downloadUrl: data.downloadUrl!,
     installCommand: data.installCommand!,
     installArgs: data.installArgs,
+    expectedSha256: data.expectedSha256,
     requiresGpu: data.requiresGpu || false,
     supportedGpuFamilies: data.supportedGpuFamilies || [],
     osVersions: data.osVersions || ['windows-server-2019', 'windows-server-2022', 'windows-server-2025'],
@@ -207,7 +210,7 @@ async function updatePackage(packageId: string, data: Partial<BootstrapPackage>,
   const expressionAttributeValues: Record<string, any> = { ':updatedAt': timestamp };
 
   const updateableFields = [
-    'name', 'description', 'type', 'category', 'downloadUrl', 'installCommand',
+    'name', 'description', 'type', 'category', 'downloadUrl', 'installCommand', 'expectedSha256',
     'installArgs', 'requiresGpu', 'supportedGpuFamilies', 'osVersions',
     'isRequired', 'isEnabled', 'order', 'estimatedInstallTimeMinutes', 'metadata'
   ];

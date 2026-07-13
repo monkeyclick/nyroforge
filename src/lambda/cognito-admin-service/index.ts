@@ -20,6 +20,8 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, ScanCommand, GetCommand, PutCommand, DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import { randomUUID, randomInt } from 'crypto';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
+import { isAdmin, ADMIN_GROUP } from '../shared/auth';
+import { logEvent } from '../shared/logging';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -36,7 +38,7 @@ const jwtVerifier = CognitoJwtVerifier.create({
 });
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   try {
     const { path, httpMethod } = event;
@@ -770,12 +772,11 @@ async function checkAdminPermission(event: APIGatewayProxyEvent): Promise<boolea
     // already been verified — trust the injected claims directly.
     const claims = event.requestContext.authorizer?.claims;
     if (claims) {
-      const groups = claims['cognito:groups'];
-      if (groups && (groups.includes('workstation-admin') || groups === 'workstation-admin')) {
-        return true;
-      }
-      // Claims present but user is not in the admin group.
-      return false;
+      // Exact group membership via the shared helper. The previous
+      // groups.includes('workstation-admin') was a SUBSTRING match, so a user
+      // whose only group was e.g. 'workstation-admin-readonly' (or any other
+      // superstring) escalated to full admin on this user-management service.
+      return isAdmin(event);
     }
 
     // No authorizer claims — verify the raw JWT from the Authorization header.
@@ -787,14 +788,9 @@ async function checkAdminPermission(event: APIGatewayProxyEvent): Promise<boolea
     const token = authHeader.slice(7);
     const payload = await jwtVerifier.verify(token);
     const groups = (payload as Record<string, unknown>)['cognito:groups'];
-    if (
-      Array.isArray(groups)
-        ? groups.includes('workstation-admin')
-        : groups === 'workstation-admin'
-    ) {
-      return true;
-    }
-    return false;
+    return Array.isArray(groups)
+      ? groups.includes(ADMIN_GROUP)
+      : groups === ADMIN_GROUP;
   } catch (error) {
     console.error('Error checking admin permission:', error);
     return false;

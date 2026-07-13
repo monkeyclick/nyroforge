@@ -223,18 +223,28 @@ export const useTransferStore = create<TransferState & TransferActions>()(
 
         try {
           await credentialManager.initialize();
-          
+
           const activeProfile = credentialManager.getActiveProfile();
           if (activeProfile) {
-            const credentials = activeProfile.credentials;
-            s3Service.initialize(credentials);
-            set({ 
-              credentials,
-              isConnected: true,
-            });
+            // Only auto-connect when the active profile is unlocked (i.e. its
+            // secret is available in memory). A locked profile requires the user
+            // to enter the passphrase via the Credentials dialog before use.
+            const credentials = credentialManager.getActiveCredentials();
+            if (credentials) {
+              s3Service.initialize(credentials);
+              set({
+                credentials,
+                isConnected: true,
+              });
 
-            // Load buckets
-            await get().loadBuckets();
+              // Load buckets
+              await get().loadBuckets();
+            } else {
+              set({
+                isConnected: false,
+                connectionError: 'Profile is locked. Enter its passphrase to connect.',
+              });
+            }
           }
 
           set({ initialized: true, initializing: false });
