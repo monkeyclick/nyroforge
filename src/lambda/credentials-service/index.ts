@@ -3,6 +3,7 @@ import { SecretsManagerClient, GetSecretValueCommand, CreateSecretCommand, PutSe
 import { DynamoDBClient, GetItemCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { SSMClient, SendCommandCommand, GetCommandInvocationCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+import { logEvent } from '../shared/logging';
 
 // Initialize AWS clients
 const secretsClient = new SecretsManagerClient({});
@@ -33,7 +34,7 @@ interface DomainJoinStatus {
 }
 
 export const handler = async (event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   try {
     const { httpMethod, pathParameters, requestContext } = event;

@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda
 import { DynamoDBClient, PutItemCommand, GetItemCommand, ScanCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+import { logEvent } from '../shared/logging';
 
 // Initialize AWS clients
 const dynamoClient = new DynamoDBClient({});
@@ -253,9 +254,12 @@ async function hasPermission(userId: string, permission: Permission, cognitoGrou
     console.log(`[hasPermission] User ${userId} is in Cognito admin group - granting permission`);
     return true;
   }
-  
-  const permissions = await getUserPermissions(userId);
-  return permissions.includes(permission) || permissions.includes('system:admin');
+
+  // Cognito group membership is the authoritative admin signal. The legacy
+  // DynamoDB permission fallback (getUserPermissions + 'system:admin') was
+  // removed so a stale role/group record cannot grant admin-only instance
+  // family management after the user leaves the Cognito admin group.
+  return false;
 }
 
 // Get instance family configuration
@@ -455,7 +459,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
   console.log('=== Instance Family Service Handler Started ===');
   console.log('='.repeat(80));
   console.log('Request ID:', context.awsRequestId);
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   try {
     const { httpMethod, path, body, requestContext } = event;

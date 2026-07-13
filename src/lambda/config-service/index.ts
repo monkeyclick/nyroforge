@@ -1,6 +1,7 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { EC2Client, DescribeRegionsCommand, DescribeInstanceTypesCommand, DescribeImagesCommand, _InstanceType } from '@aws-sdk/client-ec2';
 import { SSMClient, GetParameterCommand, GetParametersCommand } from '@aws-sdk/client-ssm';
+import { logEvent } from '../shared/logging';
 
 // Initialize AWS clients
 const ec2Client = new EC2Client({});
@@ -34,7 +35,7 @@ interface WindowsAMIInfo {
 }
 
 export const handler = async (event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   try {
     const { path, httpMethod } = event;

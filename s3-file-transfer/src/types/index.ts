@@ -18,10 +18,32 @@ export interface AWSCredentials {
   ssoRoleName?: string;
 }
 
+// Encrypted-at-rest secret material (AES-GCM ciphertext + PBKDF2 parameters).
+// Only this blob - never the plaintext secret - is written to persistent storage.
+export interface EncryptedPayload {
+  version: number;
+  algorithm: string; // e.g. 'AES-GCM'
+  kdf: string; // e.g. 'PBKDF2'
+  hash: string; // e.g. 'SHA-256'
+  iterations: number; // PBKDF2 iteration count
+  salt: string; // base64, random per profile
+  iv: string; // base64, random per encryption
+  ciphertext: string; // base64
+}
+
 export interface CredentialProfile {
   id: string;
   name: string;
+  // Non-secret credential fields only. secretAccessKey/sessionToken are NEVER
+  // persisted here in cleartext - at rest they live in `encryptedSecret`, and
+  // in memory only after the profile is unlocked with its passphrase.
   credentials: AWSCredentials;
+  // AES-GCM encrypted blob of { secretAccessKey, sessionToken }. Present for
+  // profiles that carry long-lived secret material (accessKey type).
+  encryptedSecret?: EncryptedPayload;
+  // True when a legacy plaintext profile - or a profile whose encrypted secret
+  // is missing - is detected in storage and must be re-entered/re-encrypted.
+  needsMigration?: boolean;
   isDefault: boolean;
   createdAt: Date;
   lastUsed?: Date;

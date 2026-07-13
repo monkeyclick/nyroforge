@@ -11,6 +11,7 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
+import { PROJECT_TAG } from './constants';
 
 export interface WorkstationApiStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
@@ -325,25 +326,36 @@ export class WorkstationApiStack extends cdk.Stack {
       ],
       resources: ['*'],
     }));
-    // EC2 creation/tagging actions — RequestTag is present when launching/tagging
+    // EC2 launch. RunInstances references the AMI, subnet, security group, ENI
+    // and key pair in a single call; none of those carry request tags, so a
+    // RequestTag condition denies the whole call. Scope to the stack region
+    // instead — the Lambda always applies the Project tag via TagSpecifications.
     functions.ec2Management.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: [
-        'ec2:RunInstances',
-        'ec2:CreateTags',
-        'ec2:ModifyInstanceAttribute',
-        'ec2:AuthorizeSecurityGroupIngress',
-      ],
+      actions: ['ec2:RunInstances'],
       resources: ['*'],
       conditions: {
         'StringEquals': {
-          'aws:RequestTag/Project': 'MediaWorkstationAutomation',
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
         }
       }
     }));
-    // EC2 instance lifecycle actions (start/stop/reboot/terminate) scoped to
-    // project-tagged instances. These actions carry no RequestTag, so they must
-    // be scoped by the instance's existing resource tag instead.
+    // Tag-on-create: allow CreateTags only as part of the RunInstances call so
+    // TagSpecifications succeed without granting blanket tag-write.
+    functions.ec2Management.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ec2:CreateTags'],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'ec2:CreateAction': 'RunInstances',
+        }
+      }
+    }));
+    // Actions on existing project-tagged resources: instance lifecycle,
+    // attribute modification, ownership re-tagging, and per-workstation ingress
+    // rules. None carry a RequestTag, so they must be scoped by the resource's
+    // existing Project tag (aws:ResourceTag, not aws:RequestTag).
     functions.ec2Management.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -351,11 +363,16 @@ export class WorkstationApiStack extends cdk.Stack {
         'ec2:StopInstances',
         'ec2:RebootInstances',
         'ec2:TerminateInstances',
+        'ec2:ModifyInstanceAttribute',
+        'ec2:AuthorizeSecurityGroupIngress',
+        'ec2:RevokeSecurityGroupIngress',
+        'ec2:CreateTags',
+        'ec2:DeleteTags',
       ],
       resources: ['*'],
       conditions: {
         'StringEquals': {
-          'aws:ResourceTag/Project': 'MediaWorkstationAutomation',
+          'aws:ResourceTag/Project': PROJECT_TAG,
         }
       }
     }));
@@ -411,7 +428,10 @@ export class WorkstationApiStack extends cdk.Stack {
       ],
       resources: ['*'],
     }));
-    // TerminateInstances scoped to project-tagged resources
+    // Auto-termination of expired workstations. TerminateInstances carries no
+    // request tags, so it must be scoped by the instance's existing Project tag
+    // (aws:ResourceTag). The previous aws:RequestTag condition never matched, so
+    // every termination was denied and expired instances ran indefinitely.
     functions.statusMonitor.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -420,7 +440,7 @@ export class WorkstationApiStack extends cdk.Stack {
       resources: ['*'],
       conditions: {
         'StringEquals': {
-          'aws:RequestTag/Project': 'MediaWorkstationAutomation',
+          'aws:ResourceTag/Project': PROJECT_TAG,
         }
       }
     }));

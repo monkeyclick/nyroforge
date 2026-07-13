@@ -9,6 +9,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import { PROJECT_TAG } from './constants';
 
 interface WorkstationAdminApiStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
@@ -158,14 +159,41 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       }
     }));
 
-    // Add EC2 mutating permissions scoped to project-tagged resources
+    // Create a new security group. A brand-new security group has no tags yet,
+    // so it cannot be scoped by aws:ResourceTag; enforce the Project tag at
+    // creation via aws:RequestTag (security-group-service applies it through
+    // TagSpecifications) so the group is manageable by the statement below.
+    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['ec2:CreateSecurityGroup'],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
+          'aws:RequestTag/Project': PROJECT_TAG,
+        }
+      }
+    }));
+    // Tag-on-create: allow CreateTags only as part of the CreateSecurityGroup
+    // call so the TagSpecifications above succeed.
+    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['ec2:CreateTags'],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'ec2:CreateAction': 'CreateSecurityGroup',
+        }
+      }
+    }));
+    // Mutating actions on existing project-tagged resources. Scoped by the
+    // resource's existing Project tag — the value must match what resources are
+    // actually tagged with (MediaWorkstationAutomation); 'NyroForge' matched
+    // nothing, so every admin SG/tag mutation was denied.
     adminLambdaRole.addToPolicy(new iam.PolicyStatement({
       actions: [
         'ec2:AuthorizeSecurityGroupIngress',
         'ec2:AuthorizeSecurityGroupEgress',
         'ec2:RevokeSecurityGroupIngress',
         'ec2:RevokeSecurityGroupEgress',
-        'ec2:CreateSecurityGroup',
         'ec2:DeleteSecurityGroup',
         'ec2:ModifySecurityGroupRules',
         'ec2:ModifyInstanceAttribute',
@@ -176,18 +204,21 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       conditions: {
         'StringEquals': {
           'aws:RequestedRegion': cdk.Stack.of(this).region,
-          'aws:ResourceTag/Project': 'NyroForge',
+          'aws:ResourceTag/Project': PROJECT_TAG,
         }
       }
     }));
 
-    // Add S3 permissions for storage management scoped to workstation buckets
+    // Add S3 permissions for storage management scoped to the transfer bucket.
+    // The bucket is named `workstation-transfer-<account>` by the storage
+    // construct; the previous `nyroforge-workstation-*` ARN matched no bucket,
+    // so every object list/get/put/delete was denied.
     adminLambdaRole.addToPolicy(new iam.PolicyStatement({
       actions: [
         's3:ListBucket',
         's3:GetBucketLocation',
       ],
-      resources: [`arn:aws:s3:::nyroforge-workstation-*`],
+      resources: [`arn:aws:s3:::workstation-transfer-*`],
     }));
     adminLambdaRole.addToPolicy(new iam.PolicyStatement({
       actions: [
@@ -195,7 +226,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
         's3:PutObject',
         's3:DeleteObject',
       ],
-      resources: [`arn:aws:s3:::nyroforge-workstation-*/*`],
+      resources: [`arn:aws:s3:::workstation-transfer-*/*`],
     }));
 
     // Add FSx and EFS permissions for storage management scoped to project-tagged resources
@@ -216,7 +247,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       resources: ['*'],
       conditions: {
         'StringEquals': {
-          'aws:ResourceTag/Project': 'NyroForge',
+          'aws:ResourceTag/Project': PROJECT_TAG,
         }
       }
     }));
@@ -357,6 +388,16 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/storage-service')),
       description: 'Handles storage management operations',
+      environment: {
+        ...commonEnv,
+        // The enterprise storage construct names the transfer bucket
+        // `${projectName}-transfer-${account}` (projectName='workstation'; see
+        // bin/app.ts and enterprise-storage-construct.ts). Pass it directly so
+        // the service no longer depends on SSM parameter paths that never
+        // matched what CDK actually wrote (`/dev/storage/transfer-bucket` read
+        // vs `/workstation/storage/s3/transfer-bucket` written).
+        STORAGE_TRANSFER_BUCKET: `workstation-transfer-${cdk.Stack.of(this).account}`,
+      },
     });
 
     // EC2 Discovery Service

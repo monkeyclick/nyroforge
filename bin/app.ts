@@ -7,6 +7,7 @@ import { WorkstationAdminApiStack } from '../lib/workstation-admin-api-stack';
 import { WorkstationFrontendStack } from '../lib/workstation-frontend-stack';
 import { WorkstationWebsiteStack } from '../lib/workstation-website-stack';
 import { EnterpriseStorageStack } from '../lib/enterprise-storage-stack';
+import { PROJECT_TAG } from '../lib/constants';
 
 const app = new cdk.App();
 
@@ -31,6 +32,9 @@ const infraStack = new WorkstationInfrastructureStack(app, 'WorkstationInfrastru
   retainVpcOnDelete: process.env.RETAIN_VPC_ON_DELETE !== 'false',
   // Enable termination protection for production environments
   enableTerminationProtection: environmentType === 'prod',
+  // Drives RETAIN-vs-DESTROY on stateful resources; must be the same enum value
+  // used for termination protection above so prod deploys are fully protected.
+  environment: environmentType,
 });
 
 // Enterprise Storage stack (EFS, FSx, S3 Transfer)
@@ -105,7 +109,9 @@ adminApiStack.addDependency(infraStack);
 frontendStack.addDependency(apiStack);
 frontendStack.addDependency(adminApiStack);
 
-// Add tags to all stacks
-cdk.Tags.of(app).add('Project', 'MediaWorkstationAutomation');
+// Add tags to all stacks. The Project tag value is the single source of truth
+// in lib/constants.ts — IAM tag-condition scoping in the API stacks depends on
+// it matching exactly.
+cdk.Tags.of(app).add('Project', PROJECT_TAG);
 cdk.Tags.of(app).add('Environment', environmentType);
 cdk.Tags.of(app).add('owner', 'MediaTeam');

@@ -31,6 +31,12 @@ public class PackageQueueItem
     public string DownloadUrl { get; set; } = string.Empty;
 
     /// <summary>
+    /// Expected SHA-256 hash (hex) of the downloaded installer, used to verify
+    /// integrity before execution. Null when the queue item does not supply one.
+    /// </summary>
+    public string? ExpectedSha256 { get; set; }
+
+    /// <summary>
     /// Installation command (e.g., msiexec, powershell, cmd)
     /// </summary>
     public string InstallCommand { get; set; } = string.Empty;

@@ -3,6 +3,7 @@ import { EC2Client, DescribeInstancesCommand, DescribeInstanceTypesCommand, Inst
 import { DynamoDBClient, PutItemCommand, GetItemCommand, ScanCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
+import { logEvent } from '../shared/logging';
 
 // Initialize AWS clients
 const ec2Client = new EC2Client({});
@@ -234,9 +235,12 @@ async function hasPermission(userId: string, permission: Permission, cognitoGrou
     console.log(`[hasPermission] User ${userId} is in Cognito admin group (${cognitoGroups.join(', ')}) - granting permission`);
     return true;
   }
-  
-  const permissions = await getUserPermissions(userId);
-  return permissions.includes(permission) || permissions.includes('system:admin');
+
+  // Cognito group membership is the authoritative admin signal. The legacy
+  // DynamoDB permission fallback (getUserPermissions + 'system:admin') was
+  // removed: this discovery service is admin-only, and a stale role/group
+  // record must not grant it after the user leaves the Cognito admin group.
+  return false;
 }
 
 async function logAuditEvent(userId: string, action: string, resourceType: string, resourceId: string, details?: any): Promise<void> {
@@ -1332,7 +1336,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
   console.log('=== EC2 Discovery Service Handler Started ===');
   console.log('='.repeat(80));
   console.log('Request ID:', context.awsRequestId);
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   try {
     const { httpMethod, path, body, requestContext, queryStringParameters } = event;

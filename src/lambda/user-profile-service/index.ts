@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
+import { logEvent } from '../shared/logging';
 
 // Initialize DynamoDB client
 const ddbClient = new DynamoDBClient({});
@@ -38,7 +39,7 @@ interface UserPreferences {
 }
 
 export const handler = async (event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   try {
     const { path, httpMethod } = event;

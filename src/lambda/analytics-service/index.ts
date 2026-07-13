@@ -1,6 +1,7 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
+import { logEvent } from '../shared/logging';
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -39,7 +40,7 @@ interface FeedbackSubmission {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  console.log('Analytics Service Event:', JSON.stringify(event, null, 2));
+  logEvent(event, 'Analytics Service Event');
 
   const headers = {
     'Content-Type': 'application/json',

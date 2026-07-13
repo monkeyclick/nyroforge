@@ -3,6 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { corsHeaders, errorResponse } from '../shared/http';
 import { requireAdmin } from '../shared/auth';
+import { logEvent } from '../shared/logging';
 
 const client = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(client);
@@ -66,7 +67,7 @@ interface GroupAuditLog {
 }
 
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   const headers = corsHeaders();
 

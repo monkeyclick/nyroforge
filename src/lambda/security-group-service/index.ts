@@ -16,6 +16,7 @@ import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
 import { isValidCidr } from '../shared/validation';
 import { errorResponse } from '../shared/http';
+import { logEvent } from '../shared/logging';
 
 // Reject rules broader than this prefix length (e.g. 0.0.0.0/0 or /7).
 const MIN_CIDR_PREFIX_LENGTH = 8;
@@ -124,7 +125,7 @@ async function logAuditEvent(userId: string, action: string, resourceType: strin
 export const handler = async (event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> => {
   console.log('='.repeat(80));
   console.log('=== Security Group Management Handler Started ===');
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
   
   try {
     const { httpMethod, pathParameters, body, requestContext } = event;
@@ -599,6 +600,17 @@ async function createSecurityGroup(request: {
       GroupName: request.groupName,
       Description: request.description,
       VpcId: VPC_ID,
+      // Tag the group at creation. The admin IAM role only authorizes SG
+      // mutations (authorize/revoke/delete/modify) on resources carrying this
+      // Project tag, and permits CreateSecurityGroup only when the tag is set on
+      // the request. This value MUST match PROJECT_TAG in lib/constants.ts.
+      TagSpecifications: [{
+        ResourceType: 'security-group',
+        Tags: [
+          { Key: 'Project', Value: 'MediaWorkstationAutomation' },
+          { Key: 'Name', Value: request.groupName },
+        ],
+      }],
     });
 
     const result = await ec2Client.send(command);

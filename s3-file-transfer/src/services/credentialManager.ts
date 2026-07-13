@@ -7,8 +7,13 @@ import { v4 as uuidv4 } from 'uuid';
 import {
   AWSCredentials,
   CredentialProfile,
-  CredentialType,
+  EncryptedPayload,
 } from '../types';
+import {
+  SecretMaterial,
+  encryptSecret,
+  decryptSecret,
+} from './cryptoService';
 
 // Configure localforage for credential storage
 const credentialStore = localforage.createInstance({
@@ -24,6 +29,10 @@ export class CredentialManager {
   private activeProfileId: string | null = null;
   private initialized: boolean = false;
 
+  // Decrypted secret material lives ONLY in memory, keyed by profile id, and
+  // only for profiles the user has unlocked this session. It is never persisted.
+  private unlockedSecrets: Map<string, SecretMaterial> = new Map();
+
   //----------------------------------------------------------------------------
   // Initialization
   //----------------------------------------------------------------------------
@@ -34,13 +43,38 @@ export class CredentialManager {
     try {
       // Load profiles from storage
       const storedProfiles = await credentialStore.getItem<CredentialProfile[]>(PROFILES_KEY);
+      let foundLegacyPlaintext = false;
+
       if (storedProfiles) {
-        storedProfiles.forEach((profile) => {
-          this.profiles.set(profile.id, {
-            ...profile,
-            createdAt: new Date(profile.createdAt),
-            lastUsed: profile.lastUsed ? new Date(profile.lastUsed) : undefined,
-          });
+        storedProfiles.forEach((raw) => {
+          // Legacy profiles stored the secret in cleartext. Detect it, strip it
+          // out of the persisted shape, but keep it in memory for this session
+          // only so the app keeps working until the user re-encrypts it.
+          const legacySecretAccessKey = raw.credentials?.secretAccessKey;
+          const legacySessionToken = raw.credentials?.sessionToken;
+          const hasLegacyPlaintext = !!(legacySecretAccessKey || legacySessionToken);
+
+          const credentials = this.stripSecrets(raw.credentials);
+          const needsMigration =
+            credentials.type === 'accessKey' && !raw.encryptedSecret;
+
+          const profile: CredentialProfile = {
+            ...raw,
+            credentials,
+            encryptedSecret: raw.encryptedSecret,
+            needsMigration: needsMigration || undefined,
+            createdAt: new Date(raw.createdAt),
+            lastUsed: raw.lastUsed ? new Date(raw.lastUsed) : undefined,
+          };
+          this.profiles.set(profile.id, profile);
+
+          if (hasLegacyPlaintext) {
+            foundLegacyPlaintext = true;
+            this.unlockedSecrets.set(profile.id, {
+              secretAccessKey: legacySecretAccessKey,
+              sessionToken: legacySessionToken,
+            });
+          }
         });
       }
 
@@ -48,6 +82,11 @@ export class CredentialManager {
       this.activeProfileId = await credentialStore.getItem<string>(ACTIVE_PROFILE_KEY);
 
       this.initialized = true;
+
+      // Immediately scrub any plaintext secrets that were on disk.
+      if (foundLegacyPlaintext) {
+        await this.saveProfiles();
+      }
     } catch (error) {
       console.error('Failed to initialize credential manager:', error);
       throw error;
@@ -55,7 +94,17 @@ export class CredentialManager {
   }
 
   private async saveProfiles(): Promise<void> {
-    const profiles = Array.from(this.profiles.values());
+    // Persist non-secret fields + the encrypted blob only. Plaintext secret
+    // material and derived state (needsMigration) are never written to disk.
+    const profiles = Array.from(this.profiles.values()).map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      credentials: this.stripSecrets(profile.credentials),
+      encryptedSecret: profile.encryptedSecret,
+      isDefault: profile.isDefault,
+      createdAt: profile.createdAt,
+      lastUsed: profile.lastUsed,
+    }));
     await credentialStore.setItem(PROFILES_KEY, profiles);
   }
 
@@ -70,9 +119,26 @@ export class CredentialManager {
   async createProfile(
     name: string,
     credentials: AWSCredentials,
+    passphrase?: string,
     isDefault: boolean = false
   ): Promise<CredentialProfile> {
     await this.initialize();
+
+    const sanitized = this.sanitizeCredentials(credentials);
+    const secret: SecretMaterial = {
+      secretAccessKey: sanitized.secretAccessKey,
+      sessionToken: sanitized.sessionToken,
+    };
+    const hasSecret = !!(secret.secretAccessKey || secret.sessionToken);
+
+    // Encrypt secret material at rest; a passphrase is mandatory when present.
+    let encryptedSecret: EncryptedPayload | undefined;
+    if (hasSecret) {
+      if (!passphrase) {
+        throw new Error('A passphrase is required to encrypt secret credentials');
+      }
+      encryptedSecret = await encryptSecret(secret, passphrase);
+    }
 
     // If this is the first profile or set as default, clear other defaults
     if (isDefault || this.profiles.size === 0) {
@@ -81,20 +147,29 @@ export class CredentialManager {
       });
     }
 
+    const id = uuidv4();
     const profile: CredentialProfile = {
-      id: uuidv4(),
+      id,
       name,
-      credentials: this.sanitizeCredentials(credentials),
+      credentials: this.stripSecrets(sanitized),
+      encryptedSecret,
       isDefault: isDefault || this.profiles.size === 0,
       createdAt: new Date(),
     };
 
-    this.profiles.set(profile.id, profile);
+    this.profiles.set(id, profile);
+
+    // Cache the decrypted secret in memory so the current session can use it
+    // immediately without re-prompting for the passphrase.
+    if (hasSecret) {
+      this.unlockedSecrets.set(id, secret);
+    }
+
     await this.saveProfiles();
 
     // Set as active if it's the first profile
     if (this.profiles.size === 1) {
-      await this.setActiveProfile(profile.id);
+      await this.setActiveProfile(id);
     }
 
     return profile;
@@ -102,7 +177,8 @@ export class CredentialManager {
 
   async updateProfile(
     id: string,
-    updates: Partial<Omit<CredentialProfile, 'id' | 'createdAt'>>
+    updates: Partial<Omit<CredentialProfile, 'id' | 'createdAt'>>,
+    passphrase?: string
   ): Promise<CredentialProfile | null> {
     await this.initialize();
 
@@ -116,12 +192,41 @@ export class CredentialManager {
       });
     }
 
+    let credentials = profile.credentials;
+    let encryptedSecret = profile.encryptedSecret;
+    let needsMigration = profile.needsMigration;
+
+    if (updates.credentials) {
+      const sanitized = this.sanitizeCredentials(updates.credentials);
+      const secret: SecretMaterial = {
+        secretAccessKey: sanitized.secretAccessKey,
+        sessionToken: sanitized.sessionToken,
+      };
+      const hasSecret = !!(secret.secretAccessKey || secret.sessionToken);
+
+      if (hasSecret) {
+        if (!passphrase) {
+          throw new Error('A passphrase is required to encrypt secret credentials');
+        }
+        encryptedSecret = await encryptSecret(secret, passphrase);
+        this.unlockedSecrets.set(id, secret);
+      } else {
+        // Credentials replaced with something that has no secret (e.g. iamRole).
+        encryptedSecret = undefined;
+        this.unlockedSecrets.delete(id);
+      }
+
+      credentials = this.stripSecrets(sanitized);
+      needsMigration =
+        credentials.type === 'accessKey' && !encryptedSecret ? true : undefined;
+    }
+
     const updatedProfile: CredentialProfile = {
       ...profile,
       ...updates,
-      credentials: updates.credentials
-        ? this.sanitizeCredentials(updates.credentials)
-        : profile.credentials,
+      credentials,
+      encryptedSecret,
+      needsMigration,
     };
 
     this.profiles.set(id, updatedProfile);
@@ -137,6 +242,7 @@ export class CredentialManager {
 
     const profile = this.profiles.get(id)!;
     this.profiles.delete(id);
+    this.unlockedSecrets.delete(id);
 
     // If deleted profile was default, set another as default
     if (profile.isDefault && this.profiles.size > 0) {
@@ -200,18 +306,81 @@ export class CredentialManager {
     return this.profiles.get(this.activeProfileId);
   }
 
+  // Returns fully usable credentials (including decrypted secret material) for
+  // the active profile, but ONLY if it is unlocked. Returns undefined when a
+  // secret-bearing profile is still locked - the caller must unlockProfile first.
   getActiveCredentials(): AWSCredentials | undefined {
-    return this.getActiveProfile()?.credentials;
+    const profile = this.getActiveProfile();
+    if (!profile) return undefined;
+    if (this.requiresUnlock(profile) && !this.isProfileUnlocked(profile.id)) {
+      return undefined;
+    }
+    return this.composeCredentials(profile);
+  }
+
+  //----------------------------------------------------------------------------
+  // Unlock / Lock (secret material is decrypted into memory only)
+  //----------------------------------------------------------------------------
+
+  // Decrypt a profile's secret material with its passphrase and cache it in
+  // memory for this session. Returns fully usable credentials for the AWS SDK.
+  // Throws if the passphrase is incorrect.
+  async unlockProfile(id: string, passphrase: string): Promise<AWSCredentials> {
+    await this.initialize();
+
+    const profile = this.profiles.get(id);
+    if (!profile) {
+      throw new Error('Profile not found');
+    }
+
+    if (profile.encryptedSecret) {
+      const secret = await decryptSecret(profile.encryptedSecret, passphrase);
+      this.unlockedSecrets.set(id, secret);
+    }
+    // Profiles with no encrypted secret (iamRole, or a legacy secret already in
+    // memory) need no decryption - they are effectively already usable.
+
+    return this.composeCredentials(profile);
+  }
+
+  // Whether a profile's secret material is currently available in memory (or the
+  // profile carries no secret to unlock, e.g. iamRole).
+  isProfileUnlocked(id: string): boolean {
+    const profile = this.profiles.get(id);
+    if (!profile) return false;
+    if (!this.requiresUnlock(profile)) return true;
+    return this.unlockedSecrets.has(id);
+  }
+
+  // Clear a single profile's decrypted secret from memory.
+  lockProfile(id: string): void {
+    this.unlockedSecrets.delete(id);
+  }
+
+  // Clear all decrypted secrets from memory (e.g. on sign-out / tab hidden).
+  lock(): void {
+    this.unlockedSecrets.clear();
+  }
+
+  private requiresUnlock(profile: CredentialProfile): boolean {
+    // Only secret-bearing profiles need an unlock step.
+    return profile.credentials.type === 'accessKey';
   }
 
   //----------------------------------------------------------------------------
   // Credential Validation
   //----------------------------------------------------------------------------
 
-  validateCredentials(credentials: AWSCredentials): {
+  validateCredentials(
+    credentials: AWSCredentials,
+    opts: { requireSecret?: boolean } = {}
+  ): {
     valid: boolean;
     errors: string[];
   } {
+    // When secret material is stored encrypted (e.g. on import), the plaintext
+    // secret is legitimately absent and must not fail validation.
+    const requireSecret = opts.requireSecret !== false;
     const errors: string[] = [];
 
     // Check region
@@ -230,7 +399,7 @@ export class CredentialManager {
           errors.push('Invalid Access Key ID format');
         }
 
-        if (!credentials.secretAccessKey) {
+        if (requireSecret && !credentials.secretAccessKey) {
           errors.push('Secret Access Key is required');
         }
         break;
@@ -326,6 +495,27 @@ export class CredentialManager {
     };
   }
 
+  // Return a copy with all secret material removed. Used for anything that is
+  // persisted, exported, or handed back through the read APIs.
+  private stripSecrets(credentials: AWSCredentials): AWSCredentials {
+    const copy: AWSCredentials = { ...credentials };
+    delete copy.secretAccessKey;
+    delete copy.sessionToken;
+    return copy;
+  }
+
+  // Merge a profile's non-secret fields with its in-memory (unlocked) secret to
+  // produce credentials usable by the AWS SDK.
+  private composeCredentials(profile: CredentialProfile): AWSCredentials {
+    const secret = this.unlockedSecrets.get(profile.id);
+    if (!secret) return { ...profile.credentials };
+    return {
+      ...profile.credentials,
+      secretAccessKey: secret.secretAccessKey,
+      sessionToken: secret.sessionToken,
+    };
+  }
+
   getRegions(): { value: string; label: string; group: string }[] {
     return [
       // US
@@ -374,18 +564,20 @@ export class CredentialManager {
   // Export/Import
   //----------------------------------------------------------------------------
 
-  async exportProfiles(includeSecrets: boolean = false): Promise<string> {
+  // Exports profiles for backup. Secret material is NEVER exported in plaintext:
+  // only the encrypted blob (safe to back up, useless without the passphrase) is
+  // included. There is intentionally no option to export decrypted secrets.
+  async exportProfiles(): Promise<string> {
     await this.initialize();
 
     const profiles = this.getAllProfiles().map((profile) => ({
-      ...profile,
-      credentials: includeSecrets
-        ? profile.credentials
-        : {
-            ...profile.credentials,
-            secretAccessKey: undefined,
-            sessionToken: undefined,
-          },
+      id: profile.id,
+      name: profile.name,
+      credentials: this.stripSecrets(profile.credentials),
+      encryptedSecret: profile.encryptedSecret,
+      isDefault: profile.isDefault,
+      createdAt: profile.createdAt,
+      lastUsed: profile.lastUsed,
     }));
 
     return JSON.stringify(profiles, null, 2);
@@ -405,19 +597,32 @@ export class CredentialManager {
 
       if (mode === 'replace') {
         this.profiles.clear();
+        this.unlockedSecrets.clear();
       }
 
       for (const profile of profiles) {
-        const validation = this.validateCredentials(profile.credentials);
+        // Imported secrets are only trusted in encrypted form; the plaintext
+        // secret (if any legacy export contains it) is dropped, not persisted.
+        const validation = this.validateCredentials(profile.credentials, {
+          requireSecret: false,
+        });
         if (!validation.valid) {
           errors.push(`Profile "${profile.name}": ${validation.errors.join(', ')}`);
           continue;
         }
 
+        const credentials = this.stripSecrets(profile.credentials);
+        const encryptedSecret = profile.encryptedSecret;
+        const needsMigration =
+          credentials.type === 'accessKey' && !encryptedSecret ? true : undefined;
+
         // Generate new ID to avoid conflicts
         const newProfile: CredentialProfile = {
           ...profile,
           id: uuidv4(),
+          credentials,
+          encryptedSecret,
+          needsMigration,
           createdAt: new Date(),
           lastUsed: undefined,
         };
@@ -440,6 +645,7 @@ export class CredentialManager {
 
   async clearAllData(): Promise<void> {
     this.profiles.clear();
+    this.unlockedSecrets.clear();
     this.activeProfileId = null;
     await credentialStore.clear();
     this.initialized = false;

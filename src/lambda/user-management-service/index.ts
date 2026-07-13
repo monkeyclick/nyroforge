@@ -14,6 +14,7 @@ import {
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { randomUUID, randomBytes } from 'crypto';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
+import { logEvent } from '../shared/logging';
 
 // Initialize clients
 const ddbClient = new DynamoDBClient({});
@@ -216,7 +217,7 @@ interface GroupAuditLog {
 }
 
 export const handler = async (event: APIGatewayProxyEvent, context: Context): Promise<APIGatewayProxyResult> => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  logEvent(event);
 
   try {
     const { path, httpMethod } = event;

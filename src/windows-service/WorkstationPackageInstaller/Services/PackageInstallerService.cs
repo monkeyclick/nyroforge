@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using WorkstationPackageInstaller.Models;
 
@@ -14,17 +15,20 @@ public class PackageInstallerService
     private readonly ILogger<PackageInstallerService> _logger;
     private readonly CloudWatchLogsService _cloudWatchLogs;
     private readonly ServiceConfiguration _config;
+    private readonly SecurityConfiguration _securityConfig;
     private readonly HttpClient _httpClient;
 
     public PackageInstallerService(
         ILogger<PackageInstallerService> logger,
         CloudWatchLogsService cloudWatchLogs,
         IOptions<ServiceConfiguration> configuration,
+        SecurityConfiguration securityConfig,
         IHttpClientFactory httpClientFactory)
     {
         _logger = logger;
         _cloudWatchLogs = cloudWatchLogs;
         _config = configuration.Value;
+        _securityConfig = securityConfig;
         _httpClient = httpClientFactory.CreateClient();
         _httpClient.Timeout = TimeSpan.FromMinutes(_config.InstallTimeoutMinutes);
     }
@@ -124,11 +128,14 @@ public class PackageInstallerService
         string tempDir,
         CancellationToken cancellationToken)
     {
+        // Security: reject disallowed URLs/hosts before making any network call
+        ValidateDownloadUrl(package);
+
+        var fileName = GetFileNameFromUrl(package.DownloadUrl);
+        var installerPath = Path.Combine(tempDir, fileName);
+
         try
         {
-            var fileName = GetFileNameFromUrl(package.DownloadUrl);
-            var installerPath = Path.Combine(tempDir, fileName);
-
             _logger.LogInformation("Downloading {FileName} from {Url}", fileName, package.DownloadUrl);
 
             using var response = await _httpClient.GetAsync(package.DownloadUrl, cancellationToken);
@@ -163,13 +170,142 @@ public class PackageInstallerService
                 "Downloaded {FileName} ({Size} bytes)",
                 fileName,
                 totalBytesRead);
-
-            return installerPath;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error downloading installer for {PackageName}", package.PackageName);
             throw new InvalidOperationException($"Failed to download installer: {ex.Message}", ex);
+        }
+
+        // Security: verify SHA-256 integrity before the installer is handed off for execution
+        await VerifyInstallerIntegrityAsync(package, installerPath, cancellationToken);
+
+        return installerPath;
+    }
+
+    /// <summary>
+    /// Validate the download URL against the security policy (HTTPS + host allowlist)
+    /// before any network request is made.
+    /// </summary>
+    private void ValidateDownloadUrl(PackageQueueItem package)
+    {
+        var url = package.DownloadUrl;
+
+        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            throw new InvalidOperationException(
+                $"Package '{package.PackageName}' has an invalid or missing download URL.");
+        }
+
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Package '{package.PackageName}' download URL must use HTTPS (was '{uri.Scheme}').");
+        }
+
+        var allowedHosts = _securityConfig.AllowedDownloadHosts ?? Array.Empty<string>();
+        if (!allowedHosts.Any(pattern => IsHostAllowed(uri.Host, pattern)))
+        {
+            _cloudWatchLogs.LogInstallation(
+                package.PackageName,
+                $"Download host '{uri.Host}' is not in the allowlist",
+                LogLevel.Error);
+            throw new InvalidOperationException(
+                $"Package '{package.PackageName}' download host '{uri.Host}' is not in the allowed hosts list. Refusing to download.");
+        }
+    }
+
+    /// <summary>
+    /// Match a host against an allowlist pattern. A leading "*." matches the apex
+    /// domain and any subdomain (e.g. "*.s3.amazonaws.com"); otherwise an exact,
+    /// case-insensitive host match is required.
+    /// </summary>
+    private static bool IsHostAllowed(string host, string pattern)
+    {
+        if (string.IsNullOrWhiteSpace(pattern))
+        {
+            return false;
+        }
+
+        if (pattern.StartsWith("*.", StringComparison.Ordinal))
+        {
+            var suffix = pattern.Substring(2);
+            return host.Equals(suffix, StringComparison.OrdinalIgnoreCase)
+                || host.EndsWith("." + suffix, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return host.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Verify the SHA-256 integrity of a downloaded installer. On mismatch, or when
+    /// a hash is required but absent, the installer file is deleted and an exception
+    /// is thrown so the installer is never executed.
+    /// </summary>
+    private async Task VerifyInstallerIntegrityAsync(
+        PackageQueueItem package,
+        string installerPath,
+        CancellationToken cancellationToken)
+    {
+        var expectedHash = package.ExpectedSha256?.Trim();
+
+        if (string.IsNullOrEmpty(expectedHash))
+        {
+            if (_securityConfig.RequirePackageHash)
+            {
+                DeleteInstallerFile(installerPath);
+                throw new InvalidOperationException(
+                    $"Package '{package.PackageName}' has no expected SHA-256 hash and Security:RequirePackageHash is enabled. Refusing to install.");
+            }
+
+            _logger.LogWarning(
+                "No expected SHA-256 hash for {PackageName}; skipping integrity verification (RequirePackageHash=false)",
+                package.PackageName);
+            _cloudWatchLogs.LogInstallation(
+                package.PackageName,
+                "No hash provided; integrity verification skipped (RequirePackageHash=false)",
+                LogLevel.Warning);
+            return;
+        }
+
+        string actualHash;
+        using (var sha256 = SHA256.Create())
+        using (var stream = new FileStream(installerPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            var hashBytes = await sha256.ComputeHashAsync(stream, cancellationToken);
+            actualHash = Convert.ToHexString(hashBytes);
+        }
+
+        if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+        {
+            DeleteInstallerFile(installerPath);
+            _cloudWatchLogs.LogInstallation(
+                package.PackageName,
+                "SHA-256 integrity check FAILED - hash mismatch; installer deleted",
+                LogLevel.Error);
+            throw new InvalidOperationException(
+                $"SHA-256 mismatch for package '{package.PackageName}'. Expected '{expectedHash}', computed '{actualHash}'. Installer deleted; not executing.");
+        }
+
+        _logger.LogInformation("SHA-256 integrity verified for {PackageName}", package.PackageName);
+        _cloudWatchLogs.LogInstallation(package.PackageName, "SHA-256 integrity check passed");
+    }
+
+    /// <summary>
+    /// Delete a downloaded installer file, logging (but not throwing) on failure.
+    /// </summary>
+    private void DeleteInstallerFile(string installerPath)
+    {
+        try
+        {
+            if (File.Exists(installerPath))
+            {
+                File.Delete(installerPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete installer file at {Path}", installerPath);
         }
     }
 
@@ -324,4 +460,27 @@ public class InstallationResult
     public bool Success { get; set; }
     public string? ErrorMessage { get; set; }
     public int DurationSeconds { get; set; }
+}
+
+/// <summary>
+/// Security configuration for package downloads and integrity verification
+/// </summary>
+public class SecurityConfiguration
+{
+    /// <summary>
+    /// When true, packages without an expected SHA-256 hash are refused (fail-closed).
+    /// Set to false only to grandfather legacy hash-less packages.
+    /// </summary>
+    public bool RequirePackageHash { get; set; } = true;
+
+    /// <summary>
+    /// Hosts permitted for installer downloads. A leading "*." matches the apex
+    /// domain and any subdomain. HTTPS is always required regardless of this list.
+    /// </summary>
+    public string[] AllowedDownloadHosts { get; set; } =
+    {
+        "*.s3.us-west-2.amazonaws.com",
+        "*.s3.amazonaws.com",
+        "*.cloudfront.net"
+    };
 }
