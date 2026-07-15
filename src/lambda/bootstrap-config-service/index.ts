@@ -1,9 +1,11 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { DynamoDBClient, PutItemCommand, GetItemCommand, ScanCommand, UpdateItemCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
 import { requireAdmin } from '../shared/auth';
 import { logEvent } from '../shared/logging';
+import { corsHeaders } from '../shared/http';
+import { scanAllItems } from '../shared/dynamo';
 
 const dynamoClient = new DynamoDBClient({});
 const BOOTSTRAP_TABLE = process.env.BOOTSTRAP_PACKAGES_TABLE!;
@@ -38,12 +40,7 @@ export interface BootstrapPackage {
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   logEvent(event, 'Bootstrap Config Service - Event');
 
-  const headers = {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-  };
+  const headers = corsHeaders();
 
   try {
     const { httpMethod, pathParameters, body } = event;
@@ -65,13 +62,32 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
           return await listPackages(headers);
         }
 
-      case 'POST':
-        const createData = JSON.parse(body || '{}');
+      case 'POST': {
+        let createData: any;
+        try {
+          createData = JSON.parse(body || '{}');
+        } catch {
+          return {
+            statusCode: 400,
+            headers,
+            body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+          };
+        }
         return await createPackage(createData, headers);
+      }
 
       case 'PUT':
         if (pathParameters?.packageId) {
-          const updateData = JSON.parse(body || '{}');
+          let updateData: any;
+          try {
+            updateData = JSON.parse(body || '{}');
+          } catch {
+            return {
+              statusCode: 400,
+              headers,
+              body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+            };
+          }
           return await updatePackage(pathParameters.packageId, updateData, headers);
         }
         break;
@@ -94,14 +110,27 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       statusCode: 500,
       headers,
       body: JSON.stringify({
-        message: 'Internal server error',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Internal server error'
       }),
     };
   }
 };
 
 async function createPackage(data: Partial<BootstrapPackage>, headers: any): Promise<APIGatewayProxyResult> {
+  // These fields are asserted non-null below (`data.field!`); without this
+  // check a missing field silently stores `undefined` instead of failing.
+  const requiredFields: (keyof BootstrapPackage)[] = [
+    'name', 'description', 'type', 'category', 'downloadUrl', 'installCommand',
+  ];
+  const missingField = requiredFields.find((field) => !data[field]);
+  if (missingField) {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ message: `Missing required field: ${missingField}` }),
+    };
+  }
+
   const packageId = `pkg-${uuidv4()}`;
   const timestamp = new Date().toISOString();
 
@@ -173,13 +202,13 @@ async function getPackage(packageId: string, headers: any): Promise<APIGatewayPr
 }
 
 async function listPackages(headers: any): Promise<APIGatewayProxyResult> {
-  const result = await dynamoClient.send(new ScanCommand({
+  const items = await scanAllItems(dynamoClient, {
     TableName: BOOTSTRAP_TABLE,
-  }));
+  });
 
-  const packages = (result.Items || [])
+  const packages = items
     .map(item => {
-      const pkg = unmarshall(item) as any;
+      const pkg = item as any;
       // Convert string booleans back to actual booleans
       pkg.isRequired = pkg.isRequired === 'true' || pkg.isRequired === true;
       pkg.isEnabled = pkg.isEnabled === 'true' || pkg.isEnabled === true;
@@ -238,13 +267,25 @@ async function updatePackage(packageId: string, data: Partial<BootstrapPackage>,
   updateExpressions.push('#updatedAt = :updatedAt');
   expressionAttributeNames['#updatedAt'] = 'updatedAt';
 
-  await dynamoClient.send(new UpdateItemCommand({
-    TableName: BOOTSTRAP_TABLE,
-    Key: marshall({ packageId }),
-    UpdateExpression: `SET ${updateExpressions.join(', ')}`,
-    ExpressionAttributeNames: expressionAttributeNames,
-    ExpressionAttributeValues: marshall(expressionAttributeValues),
-  }));
+  try {
+    await dynamoClient.send(new UpdateItemCommand({
+      TableName: BOOTSTRAP_TABLE,
+      Key: marshall({ packageId }),
+      UpdateExpression: `SET ${updateExpressions.join(', ')}`,
+      ConditionExpression: 'attribute_exists(packageId)',
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: marshall(expressionAttributeValues),
+    }));
+  } catch (error) {
+    if (error instanceof Error && error.name === 'ConditionalCheckFailedException') {
+      return {
+        statusCode: 404,
+        headers,
+        body: JSON.stringify({ message: 'Package not found' }),
+      };
+    }
+    throw error;
+  }
 
   return await getPackage(packageId, headers);
 }

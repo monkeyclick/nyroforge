@@ -61,7 +61,9 @@ wait_for_deletion() {
 STACKS=(
     "WorkstationWebsite"
     "WorkstationFrontend"
+    "WorkstationAdminApi"
     "WorkstationApi"
+    "WorkstationStorage"
     "WorkstationInfrastructure"
 )
 
@@ -115,7 +117,7 @@ echo "========================================="
 echo "Building Lambda functions with enhanced logging..."
 npm run build
 
-# Verify Lambda builds
+# Verify Lambda builds (keep in sync with scripts/build-lambdas.js)
 LAMBDA_FUNCTIONS=(
     "ec2-management"
     "status-monitor"
@@ -124,6 +126,19 @@ LAMBDA_FUNCTIONS=(
     "credentials-service"
     "user-profile-service"
     "user-management-service"
+    "group-management-service"
+    "security-group-service"
+    "cognito-admin-service"
+    "ami-validation-service"
+    "instance-type-service"
+    "bootstrap-config-service"
+    "analytics-service"
+    "user-attribute-change-processor"
+    "group-membership-reconciliation"
+    "group-package-service"
+    "storage-service"
+    "ec2-discovery-service"
+    "instance-family-service"
 )
 
 echo ""
@@ -160,7 +175,17 @@ echo "✅ Infrastructure stack deployed"
 
 echo ""
 echo "========================================="
-echo "Step 7: Deploying API Stack"
+echo "Step 7: Deploying Storage Stack"
+echo "========================================="
+
+echo "Deploying WorkstationStorage..."
+npx cdk deploy WorkstationStorage --require-approval never
+
+echo "✅ Storage stack deployed"
+
+echo ""
+echo "========================================="
+echo "Step 8: Deploying API Stack"
 echo "========================================="
 
 echo "Deploying WorkstationApi..."
@@ -170,7 +195,17 @@ echo "✅ API stack deployed"
 
 echo ""
 echo "========================================="
-echo "Step 8: Deploying Frontend Stack"
+echo "Step 9: Deploying Admin API Stack"
+echo "========================================="
+
+echo "Deploying WorkstationAdminApi..."
+npx cdk deploy WorkstationAdminApi --require-approval never
+
+echo "✅ Admin API stack deployed"
+
+echo ""
+echo "========================================="
+echo "Step 10: Deploying Frontend Stack"
 echo "========================================="
 
 echo "Deploying WorkstationFrontend..."
@@ -180,7 +215,7 @@ echo "✅ Frontend stack deployed"
 
 echo ""
 echo "========================================="
-echo "Step 9: Deploying Website Stack"
+echo "Step 11: Deploying Website Stack"
 echo "========================================="
 
 echo "Deploying WorkstationWebsite..."
@@ -190,7 +225,7 @@ echo "✅ Website stack deployed"
 
 echo ""
 echo "========================================="
-echo "Step 10: Initializing Admin System"
+echo "Step 12: Initializing Admin System"
 echo "========================================="
 
 echo "Running admin system initialization..."
@@ -204,7 +239,7 @@ fi
 
 echo ""
 echo "========================================="
-echo "Step 11: Getting Stack Outputs"
+echo "Step 13: Getting Stack Outputs"
 echo "========================================="
 
 echo ""

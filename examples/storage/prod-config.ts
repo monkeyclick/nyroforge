@@ -116,7 +116,10 @@ export const prodStorageConfig: Partial<EnterpriseStorageProps> = {
     throughputCapacity: 1024, // MB/s
     deploymentType: 'MULTI_AZ_1',
     storageType: 'SSD',
-    fsxAdminPassword: 'ChangeThisSecurePassword!123', // Use Secrets Manager in production
+    // Example only — pull this from Secrets Manager in a real deployment, e.g.
+    // cdk.SecretValue.secretsManager('fsx/admin-password'). unsafePlainText is
+    // used here purely to keep this file self-contained and type-checkable.
+    fsxAdminPassword: cdk.SecretValue.unsafePlainText('ChangeThisSecurePassword!123'),
     diskIops: {
       mode: 'USER_PROVISIONED',
       iops: 20000,
@@ -131,7 +134,8 @@ export const prodStorageConfig: Partial<EnterpriseStorageProps> = {
       'production': {
         name: 'svm-production',
         rootVolumeSecurityStyle: 'UNIX',
-        svmAdminPassword: 'SvmSecurePassword!456',
+        // Example only — see the fsxAdminPassword comment above.
+        svmAdminPassword: cdk.SecretValue.unsafePlainText('SvmSecurePassword!456'),
         // For SMB support, add Active Directory configuration:
         // activeDirectory: {
         //   type: 'self_managed',
@@ -146,7 +150,8 @@ export const prodStorageConfig: Partial<EnterpriseStorageProps> = {
       'development': {
         name: 'svm-development',
         rootVolumeSecurityStyle: 'UNIX',
-        svmAdminPassword: 'SvmDevPassword!789',
+        // Example only — see the fsxAdminPassword comment above.
+        svmAdminPassword: cdk.SecretValue.unsafePlainText('SvmDevPassword!789'),
       },
     },
     volumes: {

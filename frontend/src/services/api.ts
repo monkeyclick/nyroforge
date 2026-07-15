@@ -30,7 +30,8 @@ import {
   UserInvitation,
   Permission
 } from '../types/auth';
-import { fetchAuthSession } from 'aws-amplify/auth';
+import { fetchAuthSession, signOut } from 'aws-amplify/auth';
+import { useAuthStore } from '../stores/authStore';
 
 class ApiClient {
   private baseUrl: string;
@@ -191,6 +192,7 @@ class ApiClient {
       return this.request<T>(endpoint, options, useAdminApi, true);
     }
     if (response.status === 401) {
+      await this.handleSessionExpired();
       throw new Error('Your session has expired. Please sign in again.');
     }
 
@@ -245,6 +247,27 @@ class ApiClient {
       console.error('Failed to parse JSON response:', error);
       console.error('Response text:', responseText.substring(0, 500));
       throw new Error(`Failed to parse JSON response from ${url}. Response starts with: "${responseText.substring(0, 50)}..."`);
+    }
+  }
+
+  /**
+   * The refresh-and-retry already failed, so the session is truly gone.
+   * Clear local auth state, sign out of Amplify, and send the user to the
+   * login page — otherwise every panel just surfaces opaque request errors
+   * until the user figures out they need to log in again.
+   */
+  private sessionExpiryHandled = false;
+  private async handleSessionExpired(): Promise<void> {
+    if (this.sessionExpiryHandled) return;
+    this.sessionExpiryHandled = true;
+    try {
+      useAuthStore.getState().logout();
+      await signOut();
+    } catch (error) {
+      console.error('Error during forced logout:', error);
+    }
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+      window.location.href = '/login';
     }
   }
 
@@ -858,6 +881,10 @@ class ApiClient {
       headers: authHeaders,
     });
 
+    if (response.status === 401) {
+      await this.handleSessionExpired();
+      throw new Error('Your session has expired. Please sign in again.');
+    }
     if (!response.ok) {
       throw new Error('Failed to export users');
     }

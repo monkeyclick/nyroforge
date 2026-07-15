@@ -1,15 +1,13 @@
 import * as cdk from 'aws-cdk-lib';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as kms from 'aws-cdk-lib/aws-kms';
-import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
-import * as path from 'path';
 import { PROJECT_TAG } from './constants';
+import { ServiceLambda } from './service-lambda';
 
 interface WorkstationAdminApiStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
@@ -45,231 +43,50 @@ export class WorkstationAdminApiStack extends cdk.Stack {
 
     const { vpc, tables, userPool, kmsKey } = props;
 
-    // Lambda execution role for admin services
-    const adminLambdaRole = new iam.Role(this, 'AdminLambdaRole', {
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
-      ],
-    });
+    /**
+     * Create a dedicated execution role for a single admin service Lambda.
+     *
+     * Every admin function previously shared one `adminLambdaRole` ("god
+     * role") with every permission any of the 11 functions needed — meaning
+     * e.g. cognito-admin-service (which only touches Roles + AuditLogs) could
+     * also delete security groups, delete EFS/FSx filesystems, and read/write
+     * every other DynamoDB table. Giving each function its own role lets
+     * IAM/CloudFormation actually enforce least privilege: callers below
+     * attach only the specific grants each function's handler code uses.
+     */
+    const createFunctionRole = (functionId: string): iam.Role => {
+      const role = new iam.Role(this, `${functionId}Role`, {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+        ],
+      });
+      role.addToPolicy(new iam.PolicyStatement({
+        actions: [
+          'logs:CreateLogGroup',
+          'logs:CreateLogStream',
+          'logs:PutLogEvents',
+        ],
+        resources: ['*'],
+      }));
+      return role;
+    };
 
-    // Add CloudWatch Logs permissions
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'logs:CreateLogGroup',
-        'logs:CreateLogStream',
-        'logs:PutLogEvents',
-      ],
-      resources: ['*'],
-    }));
+    // KMS decrypt for a function that touches at least one CMK-encrypted
+    // DynamoDB table. Uses an explicit PolicyStatement (rather than
+    // kmsKey.grantDecrypt(), which also adds kms:DescribeKey) so each role
+    // gets exactly the two actions the shared role granted today.
+    const grantKmsDecrypt = (fn: ServiceLambda): void => {
+      fn.addToRolePolicy(new iam.PolicyStatement({
+        actions: [
+          'kms:Decrypt',
+          'kms:GenerateDataKey',
+        ],
+        resources: [kmsKey.keyArn],
+      }));
+    };
 
-    // Add DynamoDB permissions
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-        'dynamodb:DeleteItem',
-        'dynamodb:Query',
-        'dynamodb:Scan',
-        'dynamodb:BatchGetItem',
-        'dynamodb:BatchWriteItem',
-      ],
-      resources: [
-        tables.workstations.tableArn,
-        `${tables.workstations.tableArn}/index/*`,
-        tables.userProfiles.tableArn,
-        `${tables.userProfiles.tableArn}/index/*`,
-        tables.users.tableArn,
-        `${tables.users.tableArn}/index/*`,
-        tables.roles.tableArn,
-        `${tables.roles.tableArn}/index/*`,
-        tables.groups.tableArn,
-        `${tables.groups.tableArn}/index/*`,
-        tables.groupMemberships.tableArn,
-        `${tables.groupMemberships.tableArn}/index/*`,
-        tables.groupAuditLogs.tableArn,
-        `${tables.groupAuditLogs.tableArn}/index/*`,
-        tables.auditLogs.tableArn,
-        `${tables.auditLogs.tableArn}/index/*`,
-        tables.bootstrapPackages.tableArn,
-        `${tables.bootstrapPackages.tableArn}/index/*`,
-        tables.analytics.tableArn,
-        `${tables.analytics.tableArn}/index/*`,
-        tables.groupPackageBindings.tableArn,
-        `${tables.groupPackageBindings.tableArn}/index/*`,
-        // New tables for user deletion and password management
-        tables.deletedUsers.tableArn,
-        `${tables.deletedUsers.tableArn}/index/*`,
-        tables.passwordResetRecords.tableArn,
-        `${tables.passwordResetRecords.tableArn}/index/*`,
-        tables.passwordPolicy.tableArn,
-        `${tables.passwordPolicy.tableArn}/index/*`,
-      ],
-    }));
-
-    // Add SES permissions for sending notification emails
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'ses:SendEmail',
-        'ses:SendRawEmail',
-        'ses:SendTemplatedEmail',
-      ],
-      resources: ['*'], // SES doesn't support resource-level permissions for most operations
-    }));
-
-    // Add Cognito permissions for user management
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'cognito-idp:AdminCreateUser',
-        'cognito-idp:AdminDeleteUser',
-        'cognito-idp:AdminDisableUser',
-        'cognito-idp:AdminEnableUser',
-        'cognito-idp:AdminGetUser',
-        'cognito-idp:AdminListGroupsForUser',
-        'cognito-idp:AdminAddUserToGroup',
-        'cognito-idp:AdminRemoveUserFromGroup',
-        'cognito-idp:AdminUpdateUserAttributes',
-        'cognito-idp:AdminSetUserPassword',
-        'cognito-idp:ListUsers',
-        'cognito-idp:ListUsersInGroup',
-        'cognito-idp:ListGroups',
-        'cognito-idp:CreateGroup',
-        'cognito-idp:DeleteGroup',
-        'cognito-idp:GetGroup',
-        'cognito-idp:UpdateGroup',
-      ],
-      resources: [userPool.userPoolArn],
-    }));
-
-    // Add EC2 read-only permissions (Describe actions do not support resource-level restrictions)
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'ec2:DescribeSecurityGroups',
-        'ec2:DescribeSecurityGroupRules',
-        'ec2:DescribeInstances',
-        'ec2:DescribeInstanceTypes',
-        'ec2:DescribeImages',
-      ],
-      resources: ['*'],
-      conditions: {
-        'StringEquals': {
-          'aws:RequestedRegion': cdk.Stack.of(this).region
-        }
-      }
-    }));
-
-    // Create a new security group. A brand-new security group has no tags yet,
-    // so it cannot be scoped by aws:ResourceTag; enforce the Project tag at
-    // creation via aws:RequestTag (security-group-service applies it through
-    // TagSpecifications) so the group is manageable by the statement below.
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['ec2:CreateSecurityGroup'],
-      resources: ['*'],
-      conditions: {
-        'StringEquals': {
-          'aws:RequestedRegion': cdk.Stack.of(this).region,
-          'aws:RequestTag/Project': PROJECT_TAG,
-        }
-      }
-    }));
-    // Tag-on-create: allow CreateTags only as part of the CreateSecurityGroup
-    // call so the TagSpecifications above succeed.
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['ec2:CreateTags'],
-      resources: ['*'],
-      conditions: {
-        'StringEquals': {
-          'ec2:CreateAction': 'CreateSecurityGroup',
-        }
-      }
-    }));
-    // Mutating actions on existing project-tagged resources. Scoped by the
-    // resource's existing Project tag — the value must match what resources are
-    // actually tagged with (MediaWorkstationAutomation); 'NyroForge' matched
-    // nothing, so every admin SG/tag mutation was denied.
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'ec2:AuthorizeSecurityGroupIngress',
-        'ec2:AuthorizeSecurityGroupEgress',
-        'ec2:RevokeSecurityGroupIngress',
-        'ec2:RevokeSecurityGroupEgress',
-        'ec2:DeleteSecurityGroup',
-        'ec2:ModifySecurityGroupRules',
-        'ec2:ModifyInstanceAttribute',
-        'ec2:CreateTags',
-        'ec2:DeleteTags',
-      ],
-      resources: ['*'],
-      conditions: {
-        'StringEquals': {
-          'aws:RequestedRegion': cdk.Stack.of(this).region,
-          'aws:ResourceTag/Project': PROJECT_TAG,
-        }
-      }
-    }));
-
-    // Add S3 permissions for storage management scoped to the transfer bucket.
-    // The bucket is named `workstation-transfer-<account>` by the storage
-    // construct; the previous `nyroforge-workstation-*` ARN matched no bucket,
-    // so every object list/get/put/delete was denied.
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        's3:ListBucket',
-        's3:GetBucketLocation',
-      ],
-      resources: [`arn:aws:s3:::workstation-transfer-*`],
-    }));
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        's3:GetObject',
-        's3:PutObject',
-        's3:DeleteObject',
-      ],
-      resources: [`arn:aws:s3:::workstation-transfer-*/*`],
-    }));
-
-    // Add FSx and EFS permissions for storage management scoped to project-tagged resources
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'fsx:DescribeFileSystems',
-        'elasticfilesystem:DescribeFileSystems',
-        'elasticfilesystem:DescribeMountTargets',
-      ],
-      resources: ['*'],
-    }));
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'fsx:DeleteFileSystem',
-        'elasticfilesystem:DeleteFileSystem',
-        'elasticfilesystem:DeleteMountTarget',
-      ],
-      resources: ['*'],
-      conditions: {
-        'StringEquals': {
-          'aws:ResourceTag/Project': PROJECT_TAG,
-        }
-      }
-    }));
-
-    // Add SSM permissions for instance family configuration
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'ssm:GetParameter',
-        'ssm:PutParameter',
-        'ssm:DeleteParameter',
-      ],
-      resources: [`arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/workstation/*`],
-    }));
-
-    // Add KMS permissions
-    adminLambdaRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'kms:Decrypt',
-        'kms:GenerateDataKey',
-      ],
-      resources: [kmsKey.keyArn],
-    }));
+    const ssmWorkstationParameterArn = `arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/workstation/*`;
 
     // Common Lambda environment variables
     const commonEnv = {
@@ -300,94 +117,258 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       VPC_ID: vpc.vpcId,
     };
 
-    // Lambda function defaults
+    // Lambda function defaults. NOTE: no `role` here — each function below
+    // gets its own dedicated role passed directly, not a shared default.
     const lambdaDefaults = {
-      runtime: lambda.Runtime.NODEJS_20_X,
-      logRetention: logs.RetentionDays.ONE_MONTH,
       timeout: cdk.Duration.seconds(30),
       memorySize: 256,
-      role: adminLambdaRole,
       environment: commonEnv,
     };
 
     // ============================================
     // Lambda Functions for Admin APIs
+    // Each function gets its own iam.Role with only the grants its handler
+    // code actually uses (verified against src/lambda/<service>/index.ts).
     // ============================================
 
-    // Cognito Admin Service
-    const cognitoAdminServiceFunction = new lambda.Function(this, 'CognitoAdminService', {
+    // --- Cognito Admin Service ---
+    // Only real consumer of Cognito group/user administration actions across
+    // the admin API; DynamoDB access limited to Roles (RW) and AuditLogs
+    // (read-only — listAuditLogs only ever Scans, never writes).
+    const cognitoAdminServiceRole = createFunctionRole('CognitoAdminService');
+    const cognitoAdminServiceFunction = new ServiceLambda(this, 'CognitoAdminService', {
       ...lambdaDefaults,
       functionName: 'workstation-cognito-admin-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/cognito-admin-service')),
+      serviceDir: 'cognito-admin-service',
       description: 'Handles Cognito user and group administration',
+      role: cognitoAdminServiceRole,
     });
+    tables.roles.grantReadWriteData(cognitoAdminServiceFunction);
+    tables.auditLogs.grantReadData(cognitoAdminServiceFunction);
+    grantKmsDecrypt(cognitoAdminServiceFunction);
+    cognitoAdminServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminDeleteUser',
+        'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminEnableUser',
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminListGroupsForUser',
+        'cognito-idp:AdminAddUserToGroup',
+        'cognito-idp:AdminRemoveUserFromGroup',
+        'cognito-idp:AdminUpdateUserAttributes',
+        'cognito-idp:AdminSetUserPassword',
+        'cognito-idp:ListUsers',
+        'cognito-idp:ListUsersInGroup',
+        'cognito-idp:ListGroups',
+        'cognito-idp:CreateGroup',
+        'cognito-idp:DeleteGroup',
+        'cognito-idp:GetGroup',
+        'cognito-idp:UpdateGroup',
+      ],
+      resources: [userPool.userPoolArn],
+    }));
 
-    // Group Management Service
-    const groupManagementServiceFunction = new lambda.Function(this, 'GroupManagementService', {
+    // --- Group Management Service ---
+    // Owns Groups/GroupAuditLogs/GroupMemberships; only ever reads Users
+    // (Scan in evaluateGroupRules), never writes it.
+    const groupManagementServiceRole = createFunctionRole('GroupManagementService');
+    const groupManagementServiceFunction = new ServiceLambda(this, 'GroupManagementService', {
       ...lambdaDefaults,
       functionName: 'workstation-group-management-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/group-management-service')),
+      serviceDir: 'group-management-service',
       description: 'Handles group management operations',
+      role: groupManagementServiceRole,
     });
+    tables.groups.grantReadWriteData(groupManagementServiceFunction);
+    tables.groupAuditLogs.grantReadWriteData(groupManagementServiceFunction);
+    tables.groupMemberships.grantReadWriteData(groupManagementServiceFunction);
+    tables.users.grantReadData(groupManagementServiceFunction);
+    grantKmsDecrypt(groupManagementServiceFunction);
 
-    // Security Group Service
-    const securityGroupServiceFunction = new lambda.Function(this, 'SecurityGroupService', {
+    // --- Security Group Service ---
+    // DynamoDB: Workstations (RW — Scan + UpdateItem to attach an SG),
+    // AuditLogs (write path for logAuditEvent), Users (read-only permission
+    // lookups). EC2 Describe is limited to DescribeSecurityGroups/Rules and
+    // DescribeInstances — DescribeInstanceTypes/DescribeImages are NOT used
+    // by this handler (verified: not imported). The "mutating" statement is
+    // narrowed to the four actions actually called (Authorize/Revoke
+    // *Ingress*, DeleteSecurityGroup, ModifyInstanceAttribute) — the Egress
+    // variants, ModifySecurityGroupRules, and standalone CreateTags/DeleteTags
+    // are not imported/used by this handler.
+    const securityGroupServiceRole = createFunctionRole('SecurityGroupService');
+    const securityGroupServiceFunction = new ServiceLambda(this, 'SecurityGroupService', {
       ...lambdaDefaults,
       functionName: 'workstation-security-group-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/security-group-service')),
+      serviceDir: 'security-group-service',
       description: 'Handles security group management',
+      role: securityGroupServiceRole,
       environment: {
         ...commonEnv,
         VPC_ID: vpc.vpcId,
       },
     });
+    tables.workstations.grantReadWriteData(securityGroupServiceFunction);
+    tables.auditLogs.grantReadWriteData(securityGroupServiceFunction);
+    tables.users.grantReadData(securityGroupServiceFunction);
+    grantKmsDecrypt(securityGroupServiceFunction);
+    securityGroupServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:DescribeSecurityGroups',
+        'ec2:DescribeSecurityGroupRules',
+        'ec2:DescribeInstances',
+      ],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
+        }
+      }
+    }));
+    // Create a new security group. A brand-new security group has no tags
+    // yet, so it cannot be scoped by aws:ResourceTag; enforce the Project tag
+    // at creation via aws:RequestTag (applied through TagSpecifications) so
+    // the group is manageable by the statement below.
+    securityGroupServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:CreateSecurityGroup'],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
+          'aws:RequestTag/Project': PROJECT_TAG,
+        }
+      }
+    }));
+    // Tag-on-create: CreateSecurityGroup's TagSpecifications requires
+    // ec2:CreateTags too; scope it to only fire alongside that call.
+    securityGroupServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:CreateTags'],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'ec2:CreateAction': 'CreateSecurityGroup',
+        }
+      }
+    }));
+    // Mutating actions on existing project-tagged resources.
+    securityGroupServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:AuthorizeSecurityGroupIngress',
+        'ec2:RevokeSecurityGroupIngress',
+        'ec2:DeleteSecurityGroup',
+        'ec2:ModifyInstanceAttribute',
+      ],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
+          'aws:ResourceTag/Project': PROJECT_TAG,
+        }
+      }
+    }));
 
-    // AMI Validation Service
-    const amiValidationServiceFunction = new lambda.Function(this, 'AmiValidationService', {
+    // --- AMI Validation Service ---
+    // No DynamoDB access at all. Only calls ec2:DescribeImages.
+    const amiValidationServiceRole = createFunctionRole('AmiValidationService');
+    const amiValidationServiceFunction = new ServiceLambda(this, 'AmiValidationService', {
       ...lambdaDefaults,
       functionName: 'workstation-ami-validation-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/ami-validation-service')),
+      serviceDir: 'ami-validation-service',
       description: 'Validates AMI IDs and retrieves AMI information',
+      role: amiValidationServiceRole,
     });
+    amiValidationServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeImages'],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
+        }
+      }
+    }));
 
-    // Instance Type Service
-    const instanceTypeServiceFunction = new lambda.Function(this, 'InstanceTypeService', {
+    // --- Instance Type Service ---
+    // No DynamoDB access. Only ec2:DescribeInstanceTypes (DescribeImages is
+    // not called by this handler). SSM statement copied as-is from the
+    // shared role (Get/Put/Delete on /workstation/*) even though this
+    // handler only exercises Get/Put — Delete is kept to match the existing
+    // grantable statement rather than splitting a single policy mid-action.
+    // No SecureString/KMS-encrypted params are involved (the parameter this
+    // handler writes is a plain String type), so no KMS grant is needed.
+    const instanceTypeServiceRole = createFunctionRole('InstanceTypeService');
+    const instanceTypeServiceFunction = new ServiceLambda(this, 'InstanceTypeService', {
       ...lambdaDefaults,
       functionName: 'workstation-instance-type-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/instance-type-service')),
+      serviceDir: 'instance-type-service',
       description: 'Manages allowed instance types',
+      role: instanceTypeServiceRole,
     });
+    instanceTypeServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeInstanceTypes'],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
+        }
+      }
+    }));
+    instanceTypeServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ssm:GetParameter',
+        'ssm:PutParameter',
+        'ssm:DeleteParameter',
+      ],
+      resources: [ssmWorkstationParameterArn],
+    }));
 
-    // Bootstrap Config Service
-    const bootstrapConfigServiceFunction = new lambda.Function(this, 'BootstrapConfigService', {
+    // --- Bootstrap Config Service ---
+    // Only ever touches the BootstrapPackages table.
+    const bootstrapConfigServiceRole = createFunctionRole('BootstrapConfigService');
+    const bootstrapConfigServiceFunction = new ServiceLambda(this, 'BootstrapConfigService', {
       ...lambdaDefaults,
       functionName: 'workstation-bootstrap-config-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/bootstrap-config-service')),
+      serviceDir: 'bootstrap-config-service',
       description: 'Manages bootstrap package configurations',
+      role: bootstrapConfigServiceRole,
     });
+    tables.bootstrapPackages.grantReadWriteData(bootstrapConfigServiceFunction);
+    grantKmsDecrypt(bootstrapConfigServiceFunction);
 
-    // Group Package Service
-    const groupPackageServiceFunction = new lambda.Function(this, 'GroupPackageService', {
+    // --- Group Package Service ---
+    // BootstrapPackages and Workstations are only ever read (GetItem) by
+    // this handler; GroupPackageBindings and PackageQueue are read-written.
+    const groupPackageServiceRole = createFunctionRole('GroupPackageService');
+    const groupPackageServiceFunction = new ServiceLambda(this, 'GroupPackageService', {
       ...lambdaDefaults,
       functionName: 'workstation-group-package-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/group-package-service')),
+      serviceDir: 'group-package-service',
       description: 'Manages group-specific package assignments',
+      role: groupPackageServiceRole,
     });
+    tables.bootstrapPackages.grantReadData(groupPackageServiceFunction);
+    tables.groupPackageBindings.grantReadWriteData(groupPackageServiceFunction);
+    tables.packageQueue.grantReadWriteData(groupPackageServiceFunction);
+    tables.workstations.grantReadData(groupPackageServiceFunction);
+    grantKmsDecrypt(groupPackageServiceFunction);
 
-    // Storage Service
-    const storageServiceFunction = new lambda.Function(this, 'StorageService', {
+    // --- Storage Service ---
+    // No DynamoDB access. S3 and FSx/EFS statements copied as-is from the
+    // shared role. This handler's getStorageConfig() unconditionally reads
+    // SSM parameters under /workstation/storage/* for the EFS file system
+    // and access point IDs (falling back to SSM for the transfer bucket
+    // name too), so it needs the same /workstation/* SSM statement as
+    // instance-type-service/instance-family-service — the original grant
+    // matrix omitted this, but the handler cannot fetch its own config
+    // without it. Those SSM parameters are plain String type (see
+    // lib/enterprise-storage-construct.ts / enterprise-storage-stack.ts:
+    // ssm.StringParameter, not SecureString), so no KMS grant is needed.
+    const storageServiceRole = createFunctionRole('StorageService');
+    const storageServiceFunction = new ServiceLambda(this, 'StorageService', {
       ...lambdaDefaults,
       functionName: 'workstation-storage-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/storage-service')),
+      serviceDir: 'storage-service',
       description: 'Handles storage management operations',
+      role: storageServiceRole,
       environment: {
         ...commonEnv,
         // The enterprise storage construct names the transfer bucket
@@ -399,34 +380,193 @@ export class WorkstationAdminApiStack extends cdk.Stack {
         STORAGE_TRANSFER_BUCKET: `workstation-transfer-${cdk.Stack.of(this).account}`,
       },
     });
+    storageServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        's3:ListBucket',
+        's3:GetBucketLocation',
+      ],
+      resources: [`arn:aws:s3:::workstation-transfer-*`],
+    }));
+    storageServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        's3:GetObject',
+        's3:PutObject',
+        's3:DeleteObject',
+      ],
+      resources: [`arn:aws:s3:::workstation-transfer-*/*`],
+    }));
+    storageServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'fsx:DescribeFileSystems',
+        'elasticfilesystem:DescribeFileSystems',
+        'elasticfilesystem:DescribeMountTargets',
+      ],
+      resources: ['*'],
+    }));
+    storageServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'fsx:DeleteFileSystem',
+        'elasticfilesystem:DeleteFileSystem',
+        'elasticfilesystem:DeleteMountTarget',
+      ],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:ResourceTag/Project': PROJECT_TAG,
+        }
+      }
+    }));
+    storageServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ssm:GetParameter',
+        'ssm:PutParameter',
+        'ssm:DeleteParameter',
+      ],
+      resources: [ssmWorkstationParameterArn],
+    }));
 
-    // EC2 Discovery Service
-    const ec2DiscoveryServiceFunction = new lambda.Function(this, 'Ec2DiscoveryService', {
+    // --- EC2 Discovery Service ---
+    // DynamoDB: AuditLogs (RW), Workstations (RW — imports discovered
+    // instances as new workstation records / tracks excluded instances),
+    // Groups/Roles/Users are read-only permission lookups. EC2: this
+    // handler calls DescribeInstances AND DescribeInstanceTypes (not
+    // DescribeSecurityGroups, despite that being the matrix's example), plus
+    // standalone ec2:CreateTags/DeleteTags when importing/removing an
+    // instance from management scope — neither of those two tag actions
+    // was called out in the original grant matrix, but both are exercised
+    // by this handler (see createTagsCommand/deleteTagsCommand usage).
+    const ec2DiscoveryServiceRole = createFunctionRole('Ec2DiscoveryService');
+    const ec2DiscoveryServiceFunction = new ServiceLambda(this, 'Ec2DiscoveryService', {
       ...lambdaDefaults,
       functionName: 'workstation-ec2-discovery-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/ec2-discovery-service')),
+      serviceDir: 'ec2-discovery-service',
       description: 'Discovers and imports existing EC2 instances',
+      role: ec2DiscoveryServiceRole,
     });
+    tables.auditLogs.grantReadWriteData(ec2DiscoveryServiceFunction);
+    tables.groups.grantReadData(ec2DiscoveryServiceFunction);
+    tables.roles.grantReadData(ec2DiscoveryServiceFunction);
+    tables.users.grantReadData(ec2DiscoveryServiceFunction);
+    tables.workstations.grantReadWriteData(ec2DiscoveryServiceFunction);
+    grantKmsDecrypt(ec2DiscoveryServiceFunction);
+    ec2DiscoveryServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:DescribeInstances',
+        'ec2:DescribeInstanceTypes',
+      ],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
+        }
+      }
+    }));
+    ec2DiscoveryServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:CreateTags',
+        'ec2:DeleteTags',
+      ],
+      resources: ['*'],
+      conditions: {
+        'StringEquals': {
+          'aws:RequestedRegion': cdk.Stack.of(this).region,
+          'aws:ResourceTag/Project': PROJECT_TAG,
+        }
+      }
+    }));
 
-    // Instance Family Service
-    const instanceFamilyServiceFunction = new lambda.Function(this, 'InstanceFamilyService', {
+    // --- Instance Family Service ---
+    // Groups/Roles/Users are read-only (shared admin-permission-check
+    // helper). Workstations is read-WRITE, not read-only as the original
+    // matrix assumed: saveInstanceFamilyConfig() stores the instance-family
+    // allowlist as an item in the Workstations table (PutItem with
+    // PK=CONFIG#INSTANCE_FAMILIES). SSM statement mirrors instance-type-service.
+    const instanceFamilyServiceRole = createFunctionRole('InstanceFamilyService');
+    const instanceFamilyServiceFunction = new ServiceLambda(this, 'InstanceFamilyService', {
       ...lambdaDefaults,
       functionName: 'workstation-instance-family-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/instance-family-service')),
+      serviceDir: 'instance-family-service',
       description: 'Manages allowed EC2 instance families for deployments',
+      role: instanceFamilyServiceRole,
     });
+    tables.groups.grantReadData(instanceFamilyServiceFunction);
+    tables.roles.grantReadData(instanceFamilyServiceFunction);
+    tables.users.grantReadData(instanceFamilyServiceFunction);
+    tables.workstations.grantReadWriteData(instanceFamilyServiceFunction);
+    grantKmsDecrypt(instanceFamilyServiceFunction);
+    instanceFamilyServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ssm:GetParameter',
+        'ssm:PutParameter',
+        'ssm:DeleteParameter',
+      ],
+      resources: [ssmWorkstationParameterArn],
+    }));
 
-    // User Management Service (user deletion and password management)
-    const userManagementServiceFunction = new lambda.Function(this, 'UserManagementService', {
+    // --- User Management Service (user deletion and password management) ---
+    // DynamoDB grants below are narrower than the original matrix in three
+    // places, verified against src/lambda/user-management-service/index.ts:
+    //  - GroupMemberships needs RW, not read-only: hardDeleteUser() reads a
+    //    deleted user's memberships (Query via getUserGroups) and deletes
+    //    each one as part of cleanup.
+    //  - PasswordPolicy is read-only: the only DynamoDB call against this
+    //    table anywhere in the file is a GetItem (getPasswordPolicy); there
+    //    is no write path in this handler at all.
+    //  - PasswordResetRecords is write-only: every call against this table
+    //    is a PutItem (setUserPassword/generateUserPassword); nothing in
+    //    this handler ever reads it back.
+    // Feedback is omitted entirely: it's declared (FEEDBACK_TABLE) but never
+    // referenced anywhere else in the file, AND it was never part of the
+    // original shared adminLambdaRole's DynamoDB resource list either — so
+    // granting it here would be a net-new permission, not a narrowing.
+    // Analytics, BootstrapPackages, Groups, and GroupAuditLogs are also
+    // unreferenced by this handler beyond their env-var declaration, but are
+    // kept (matching the original matrix) because they WERE present in the
+    // shared role's resource list; dropping them is optional least-privilege
+    // hardening for a later pass, not required to preserve today's behavior.
+    // Cognito actions are limited to what's imported/called in this file:
+    // AdminUpdateUserAttributes is NOT imported here (that belongs solely to
+    // cognito-admin-service) and is therefore omitted; AdminListGroupsForUser
+    // IS used (by the last-admin check) and is added even though the
+    // original matrix didn't list it. SES is limited to ses:SendEmail — the
+    // only SES command this handler imports/calls.
+    const userManagementServiceRole = createFunctionRole('UserManagementService');
+    const userManagementServiceFunction = new ServiceLambda(this, 'UserManagementService', {
       ...lambdaDefaults,
       functionName: 'workstation-user-management-service',
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../dist/lambda/user-management-service')),
+      serviceDir: 'user-management-service',
       description: 'Handles user deletion (soft/hard) and password management operations',
       timeout: cdk.Duration.seconds(60), // Longer timeout for deletion operations
+      role: userManagementServiceRole,
     });
+    tables.analytics.grantReadWriteData(userManagementServiceFunction);
+    tables.auditLogs.grantReadWriteData(userManagementServiceFunction);
+    tables.bootstrapPackages.grantReadData(userManagementServiceFunction);
+    tables.deletedUsers.grantReadWriteData(userManagementServiceFunction);
+    tables.groups.grantReadData(userManagementServiceFunction);
+    tables.groupAuditLogs.grantReadWriteData(userManagementServiceFunction);
+    tables.groupMemberships.grantReadWriteData(userManagementServiceFunction);
+    tables.passwordPolicy.grantReadData(userManagementServiceFunction);
+    tables.passwordResetRecords.grantWriteData(userManagementServiceFunction);
+    tables.roles.grantReadData(userManagementServiceFunction);
+    tables.users.grantReadWriteData(userManagementServiceFunction);
+    grantKmsDecrypt(userManagementServiceFunction);
+    userManagementServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminDeleteUser',
+        'cognito-idp:AdminDisableUser',
+        'cognito-idp:AdminEnableUser',
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminListGroupsForUser',
+        'cognito-idp:AdminSetUserPassword',
+        'cognito-idp:ListUsers',
+      ],
+      resources: [userPool.userPoolArn],
+    }));
+    userManagementServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ses:SendEmail'],
+      resources: ['*'], // SES doesn't support resource-level permissions for most operations
+    }));
 
     // ============================================
     // API Gateway

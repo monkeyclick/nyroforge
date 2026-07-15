@@ -1,8 +1,10 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
-import { DynamoDBClient, PutItemCommand, GetItemCommand, ScanCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { SSMClient, PutParameterCommand, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { logEvent } from '../shared/logging';
+import { corsHeaders } from '../shared/http';
+import { getGroups, ADMIN_GROUP } from '../shared/auth';
 
 // Initialize AWS clients
 const dynamoClient = new DynamoDBClient({});
@@ -15,12 +17,7 @@ const ROLES_TABLE = process.env.ROLES_TABLE!;
 const GROUPS_TABLE = process.env.GROUPS_TABLE!;
 
 // CORS headers
-const CORS_HEADERS = {
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-  'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-};
+const CORS_HEADERS = corsHeaders();
 
 // Types
 type Permission =
@@ -250,7 +247,7 @@ async function getUserPermissions(userId: string): Promise<Permission[]> {
 
 async function hasPermission(userId: string, permission: Permission, cognitoGroups?: string[]): Promise<boolean> {
   // If user is in Cognito admin group (either 'admin' or 'workstation-admin'), they have all permissions
-  if (cognitoGroups && (cognitoGroups.includes('admin') || cognitoGroups.includes('workstation-admin'))) {
+  if (cognitoGroups && (cognitoGroups.includes('admin') || cognitoGroups.includes(ADMIN_GROUP))) {
     console.log(`[hasPermission] User ${userId} is in Cognito admin group - granting permission`);
     return true;
   }
@@ -368,7 +365,6 @@ async function saveInstanceFamilyConfig(
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to save instance family configuration',
-        error: error instanceof Error ? error.message : 'Unknown error',
       }),
     };
   }
@@ -420,7 +416,6 @@ async function getAllowedInstanceTypes(): Promise<APIGatewayProxyResult> {
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to get instance family configuration',
-        error: error instanceof Error ? error.message : 'Unknown error',
       }),
     };
   }
@@ -468,20 +463,8 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
                    requestContext.authorizer?.claims?.['cognito:username'] ||
                    'unknown';
 
-    // Extract Cognito groups from JWT claims
-    const cognitoGroupsClaim = requestContext.authorizer?.claims?.['cognito:groups'];
-    let cognitoGroups: string[] = [];
-    if (cognitoGroupsClaim) {
-      if (typeof cognitoGroupsClaim === 'string') {
-        try {
-          cognitoGroups = JSON.parse(cognitoGroupsClaim);
-        } catch {
-          cognitoGroups = cognitoGroupsClaim.split(',').map(g => g.trim());
-        }
-      } else if (Array.isArray(cognitoGroupsClaim)) {
-        cognitoGroups = cognitoGroupsClaim;
-      }
-    }
+    // Extract Cognito groups from JWT claims (shared, handles array/CSV/single-value claims)
+    const cognitoGroups = getGroups(event);
 
     console.log('UserId:', userId);
     console.log('Cognito Groups:', cognitoGroups);
@@ -504,7 +487,16 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
     }
 
     if (httpMethod === 'POST') {
-      const request = JSON.parse(body || '{}') as SaveConfigRequest;
+      let request: SaveConfigRequest;
+      try {
+        request = JSON.parse(body || '{}') as SaveConfigRequest;
+      } catch {
+        return {
+          statusCode: 400,
+          headers: CORS_HEADERS,
+          body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+        };
+      }
       return await saveInstanceFamilyConfig(request, userId);
     }
 
@@ -524,8 +516,6 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Internal server error',
-        error: error instanceof Error ? error.message : 'Unknown error',
-        requestId: context.awsRequestId,
       }),
     };
   }

@@ -33,6 +33,7 @@ import {
 } from '@aws-sdk/client-fsx';
 
 import { isAdmin, requireAdmin } from '../shared/auth';
+import { corsHeaders } from '../shared/http';
 import { isSafeObjectKey } from '../shared/validation';
 import { logEvent } from '../shared/logging';
 
@@ -40,13 +41,6 @@ const s3Client = new S3Client({});
 const ssmClient = new SSMClient({});
 const efsClient = new EFSClient({});
 const fsxClient = new FSxClient({});
-
-const CORS_HEADERS = {
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Amz-Date,X-Api-Key,X-Amz-Security-Token',
-  'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
-};
 
 interface StorageConfig {
   transferBucket: string;
@@ -108,57 +102,74 @@ async function getStorageConfig(): Promise<StorageConfig> {
 
 async function listObjects(bucketName: string, prefix: string = ''): Promise<APIGatewayProxyResult> {
   try {
-    const command = new ListObjectsV2Command({
-      Bucket: bucketName,
-      Prefix: prefix,
-      Delimiter: '/',
-    });
-    
-    const response = await s3Client.send(command);
-    
+    // This listing backs a UI, not bulk export: cap the accumulated keys at
+    // 5000 so a huge/malicious prefix can't make the Lambda page through an
+    // unbounded bucket (memory/time). Still follow ContinuationToken so a
+    // bucket smaller than the cap isn't truncated to just the first page.
+    const MAX_KEYS = 5000;
+
     const objects: any[] = [];
     let totalSize = 0;
-    
-    // Add folders (common prefixes)
-    if (response.CommonPrefixes) {
-      for (const prefix of response.CommonPrefixes) {
-        objects.push({
-          key: prefix.Prefix,
-          size: 0,
-          lastModified: null,
-          isFolder: true,
-        });
+    let continuationToken: string | undefined;
+    do {
+      const response = await s3Client.send(new ListObjectsV2Command({
+        Bucket: bucketName,
+        Prefix: prefix,
+        Delimiter: '/',
+        ContinuationToken: continuationToken,
+      }));
+
+      // Add folders (common prefixes)
+      if (response.CommonPrefixes) {
+        for (const commonPrefix of response.CommonPrefixes) {
+          if (objects.length >= MAX_KEYS) break;
+          objects.push({
+            key: commonPrefix.Prefix,
+            size: 0,
+            lastModified: null,
+            isFolder: true,
+          });
+        }
       }
-    }
-    
-    // Add files
-    if (response.Contents) {
-      for (const obj of response.Contents) {
-        // Skip the prefix itself if it appears
-        if (obj.Key === prefix) continue;
-        
-        objects.push({
-          key: obj.Key,
-          size: obj.Size || 0,
-          lastModified: obj.LastModified?.toISOString(),
-          storageClass: obj.StorageClass,
-          isFolder: false,
-        });
-        totalSize += obj.Size || 0;
+
+      // Add files
+      if (response.Contents) {
+        for (const obj of response.Contents) {
+          // Skip the prefix itself if it appears
+          if (obj.Key === prefix) continue;
+          if (objects.length >= MAX_KEYS) break;
+
+          objects.push({
+            key: obj.Key,
+            size: obj.Size || 0,
+            lastModified: obj.LastModified?.toISOString(),
+            storageClass: obj.StorageClass,
+            isFolder: false,
+          });
+          totalSize += obj.Size || 0;
+        }
       }
-    }
-    
-    // Get total object count
+
+      continuationToken = response.IsTruncated ? response.NextContinuationToken : undefined;
+    } while (continuationToken && objects.length < MAX_KEYS);
+
+    // Get total object count (paginated: a single call's KeyCount only
+    // covers that page, so following NextContinuationToken avoids
+    // under-reporting totalObjects on a bucket with more than one page).
     let totalObjects = 0;
-    const countCommand = new ListObjectsV2Command({
-      Bucket: bucketName,
-    });
-    const countResponse = await s3Client.send(countCommand);
-    totalObjects = countResponse.KeyCount || 0;
-    
+    let countContinuationToken: string | undefined;
+    do {
+      const countResponse = await s3Client.send(new ListObjectsV2Command({
+        Bucket: bucketName,
+        ContinuationToken: countContinuationToken,
+      }));
+      totalObjects += countResponse.KeyCount || 0;
+      countContinuationToken = countResponse.IsTruncated ? countResponse.NextContinuationToken : undefined;
+    } while (countContinuationToken);
+
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({
         objects,
         stats: {
@@ -172,7 +183,7 @@ async function listObjects(bucketName: string, prefix: string = ''): Promise<API
     console.error('Error listing objects:', error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Failed to list objects' }),
     };
   }
@@ -189,14 +200,14 @@ async function getDownloadUrl(bucketName: string, key: string): Promise<APIGatew
     
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ url }),
     };
   } catch (error) {
     console.error('Error generating download URL:', error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Failed to generate download URL' }),
     };
   }
@@ -214,14 +225,14 @@ async function getUploadUrl(bucketName: string, key: string, contentType: string
     
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ url }),
     };
   } catch (error) {
     console.error('Error generating upload URL:', error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Failed to generate upload URL' }),
     };
   }
@@ -240,14 +251,14 @@ async function deleteObjects(bucketName: string, keys: string[]): Promise<APIGat
     
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ message: `Successfully deleted ${keys.length} objects` }),
     };
   } catch (error) {
     console.error('Error deleting objects:', error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Failed to delete objects' }),
     };
   }
@@ -336,14 +347,14 @@ async function listFileSystems(): Promise<APIGatewayProxyResult> {
     
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ fileSystems }),
     };
   } catch (error) {
     console.error('Error listing file systems:', error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Failed to list file systems' }),
     };
   }
@@ -402,7 +413,7 @@ async function deleteEfsFileSystem(fileSystemId: string): Promise<APIGatewayProx
     
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({
         message: `EFS file system ${fileSystemId} deletion initiated`,
         note: 'Mount targets and access points have been deleted. File system deletion may take a few minutes to complete.',
@@ -415,7 +426,7 @@ async function deleteEfsFileSystem(fileSystemId: string): Promise<APIGatewayProx
     if (error.name === 'FileSystemInUse') {
       return {
         statusCode: 400,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(),
         body: JSON.stringify({
           error: 'File system is still in use. Mount targets may still be deleting. Please wait a few minutes and try again.'
         }),
@@ -424,7 +435,7 @@ async function deleteEfsFileSystem(fileSystemId: string): Promise<APIGatewayProx
     
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Failed to delete EFS file system' }),
     };
   }
@@ -498,7 +509,7 @@ async function deleteFsxFileSystem(fileSystemId: string, fileSystemType: string)
     
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({
         message: `FSx file system ${fileSystemId} deletion initiated`,
         note: 'File system deletion may take 10-30 minutes to complete.',
@@ -508,7 +519,7 @@ async function deleteFsxFileSystem(fileSystemId: string, fileSystemType: string)
     console.error('Error deleting FSx:', error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Failed to delete FSx file system' }),
     };
   }
@@ -569,7 +580,7 @@ async function deleteS3Bucket(bucketName: string): Promise<APIGatewayProxyResult
     
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({
         message: `S3 bucket ${bucketName} has been deleted`,
       }),
@@ -578,7 +589,7 @@ async function deleteS3Bucket(bucketName: string): Promise<APIGatewayProxyResult
     console.error('Error deleting S3 bucket:', error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Failed to delete S3 bucket' }),
     };
   }
@@ -591,7 +602,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
   if (event.httpMethod === 'OPTIONS') {
     return {
       statusCode: 200,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: '',
     };
   }
@@ -605,7 +616,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     if (!claims || !claims.sub) {
       return {
         statusCode: 401,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(),
         body: JSON.stringify({ error: 'Unauthorized - authentication required' })
       };
     }
@@ -628,7 +639,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 
       return {
         statusCode: 200,
-        headers: CORS_HEADERS,
+        headers: corsHeaders(),
         body: JSON.stringify({
           ...config,
           efsStatus,
@@ -641,7 +652,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (!config.transferBucket) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Transfer bucket not configured' }),
         };
       }
@@ -650,7 +661,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (requestedPrefix && !isSafeObjectKey(requestedPrefix)) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Invalid prefix' }),
         };
       }
@@ -669,7 +680,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (!config.transferBucket) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Transfer bucket not configured' }),
         };
       }
@@ -678,21 +689,21 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (!key) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Missing key parameter' }),
         };
       }
       if (!isSafeObjectKey(key)) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Invalid key' }),
         };
       }
       if (!admin && !key.startsWith(userPrefix)) {
         return {
           statusCode: 403,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Forbidden: key outside your storage prefix' }),
         };
       }
@@ -705,32 +716,41 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (!config.transferBucket) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Transfer bucket not configured' }),
         };
       }
       
-      const body = JSON.parse(event.body || '{}');
+      let body: any;
+      try {
+        body = JSON.parse(event.body || '{}');
+      } catch {
+        return {
+          statusCode: 400,
+          headers: corsHeaders(),
+          body: JSON.stringify({ error: 'Request body is not valid JSON' }),
+        };
+      }
       const { key, contentType } = body;
 
       if (!key) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Missing key parameter' }),
         };
       }
       if (!isSafeObjectKey(key)) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Invalid key' }),
         };
       }
       if (!admin && !key.startsWith(userPrefix)) {
         return {
           statusCode: 403,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Forbidden: key outside your storage prefix' }),
         };
       }
@@ -743,32 +763,41 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (!config.transferBucket) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Transfer bucket not configured' }),
         };
       }
       
-      const body = JSON.parse(event.body || '{}');
+      let body: any;
+      try {
+        body = JSON.parse(event.body || '{}');
+      } catch {
+        return {
+          statusCode: 400,
+          headers: corsHeaders(),
+          body: JSON.stringify({ error: 'Request body is not valid JSON' }),
+        };
+      }
       const { keys } = body;
       
       if (!keys || !Array.isArray(keys) || keys.length === 0) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Missing or empty keys array' }),
         };
       }
       if (!keys.every((k: unknown) => typeof k === 'string' && isSafeObjectKey(k))) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Invalid key in keys array' }),
         };
       }
       if (!admin && !keys.every((k: string) => k.startsWith(userPrefix))) {
         return {
           statusCode: 403,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Forbidden: key outside your storage prefix' }),
         };
       }
@@ -789,13 +818,22 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       const denied = requireAdmin(event);
       if (denied) return denied;
 
-      const body = JSON.parse(event.body || '{}');
+      let body: any;
+      try {
+        body = JSON.parse(event.body || '{}');
+      } catch {
+        return {
+          statusCode: 400,
+          headers: corsHeaders(),
+          body: JSON.stringify({ error: 'Request body is not valid JSON' }),
+        };
+      }
       const { fileSystemId, fileSystemType } = body;
       
       if (!fileSystemId) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Missing fileSystemId parameter' }),
         };
       }
@@ -803,7 +841,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       if (!fileSystemType) {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: 'Missing fileSystemType parameter (efs, fsx-windows, fsx-lustre, fsx-ontap, fsx-openzfs, s3)' }),
         };
       }
@@ -818,7 +856,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       } else {
         return {
           statusCode: 400,
-          headers: CORS_HEADERS,
+          headers: corsHeaders(),
           body: JSON.stringify({ error: `Unknown file system type: ${fileSystemType}` }),
         };
       }
@@ -826,7 +864,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     
     return {
       statusCode: 404,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({ error: 'Not found' }),
     };
     
@@ -834,7 +872,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     console.error('Internal error:', error);
     return {
       statusCode: 500,
-      headers: CORS_HEADERS,
+      headers: corsHeaders(),
       body: JSON.stringify({
         error: 'An internal error occurred. Please try again later.',
       }),

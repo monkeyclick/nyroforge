@@ -22,6 +22,7 @@ import { randomUUID, randomInt } from 'crypto';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { isAdmin, ADMIN_GROUP } from '../shared/auth';
 import { logEvent } from '../shared/logging';
+import { docScanAll } from '../shared/dynamo';
 
 const ddbClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(ddbClient);
@@ -496,8 +497,8 @@ async function updateUser(username: string, event: APIGatewayProxyEvent): Promis
 // DynamoDB-backed role management (roles are stored in UserRoles table)
 async function listRoles(): Promise<APIGatewayProxyResult> {
   try {
-    const result = await docClient.send(new ScanCommand({ TableName: ROLES_TABLE }));
-    return createSuccessResponse({ roles: result.Items || [] });
+    const roles = await docScanAll(docClient, { TableName: ROLES_TABLE });
+    return createSuccessResponse({ roles });
   } catch (error) {
     console.error('Error listing roles:', error);
     return createErrorResponse(500, 'Failed to list roles', error);
@@ -710,14 +711,22 @@ async function removeFromGroup(username: string, groupName: string): Promise<API
 
 async function listGroups(): Promise<APIGatewayProxyResult> {
   try {
-    const response = await cognitoClient.send(new ListGroupsCommand({
-      UserPoolId: USER_POOL_ID,
-      Limit: 60
-    }));
+    // ListGroups returns at most 60 per page — follow NextToken so pools
+    // with more groups don't silently truncate.
+    const groups: any[] = [];
+    let nextToken: string | undefined;
+    let pages = 0;
+    do {
+      const response = await cognitoClient.send(new ListGroupsCommand({
+        UserPoolId: USER_POOL_ID,
+        Limit: 60,
+        NextToken: nextToken,
+      }));
+      groups.push(...(response.Groups || []));
+      nextToken = response.NextToken;
+    } while (nextToken && ++pages < 10);
 
-    return createSuccessResponse({
-      groups: response.Groups || []
-    });
+    return createSuccessResponse({ groups });
 
   } catch (error) {
     return mapCognitoError(error, 'Failed to list groups');
@@ -811,6 +820,11 @@ function createSuccessResponse(data: any): APIGatewayProxyResult {
 }
 
 function createErrorResponse(statusCode: number, message: string, error?: any): APIGatewayProxyResult {
+  // The underlying error is logged server-side only — echoing error.message
+  // to the client leaks table names, ARNs, and other internals.
+  if (error !== undefined) {
+    console.error(message, error);
+  }
   return {
     statusCode,
     headers: {
@@ -819,9 +833,6 @@ function createErrorResponse(statusCode: number, message: string, error?: any): 
       'Access-Control-Allow-Headers': 'Content-Type,Authorization',
       'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
     },
-    body: JSON.stringify({
-      message,
-      error: error instanceof Error ? error.message : error !== undefined ? String(error) : undefined
-    }),
+    body: JSON.stringify({ message }),
   };
 }

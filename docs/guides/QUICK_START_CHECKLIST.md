@@ -133,7 +133,7 @@ Use this checklist to ensure a smooth deployment. Print or save this for referen
 ### Admin User Setup
 - [ ] Admin user created
   ```bash
-  USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructureStack.UserPoolId')
+  USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructure.UserPoolId')
   aws cognito-idp admin-create-user \
     --user-pool-id $USER_POOL_ID \
     --username admin@yourcompany.com \
@@ -204,7 +204,7 @@ Use this checklist to ensure a smooth deployment. Print or save this for referen
 ### Access Frontend
 - [ ] Website URL opened in browser
   ```bash
-  WEBSITE_URL=$(cat cdk-outputs.json | jq -r '.WorkstationWebsiteStack.WebsiteUrl')
+  WEBSITE_URL=$(cat cdk-outputs.json | jq -r '.WorkstationWebsite.WebsiteUrl')
   echo $WEBSITE_URL
   # Open URL in browser
   ```
@@ -361,14 +361,14 @@ cdk deploy --all --verbose
 
 # Check CloudFormation events
 aws cloudformation describe-stack-events \
-  --stack-name WorkstationInfrastructureStack \
+  --stack-name WorkstationInfrastructure \
   --max-items 20
 ```
 
 ### Cannot Login
 ```bash
 # Verify user exists
-USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructureStack.UserPoolId')
+USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructure.UserPoolId')
 aws cognito-idp admin-get-user \
   --user-pool-id $USER_POOL_ID \
   --username admin@yourcompany.com

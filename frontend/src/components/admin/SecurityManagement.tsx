@@ -1,6 +1,22 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import toast from 'react-hot-toast';
 import { apiClient } from '@/services/api';
+
+const CIDR_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/;
+
+function isValidCidr(cidr: string): boolean {
+  const match = cidr.match(CIDR_RE);
+  if (!match) return false;
+  const octets = match.slice(1, 5).map(Number);
+  if (octets.some((o) => o > 255)) return false;
+  const mask = Number(match[5]);
+  return mask >= 0 && mask <= 32;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'An unexpected error occurred';
+}
 
 interface SecurityGroup {
   groupId: string;
@@ -72,18 +88,18 @@ export default function SecurityManagement() {
   const [fromPort, setFromPort] = useState('');
   const [toPort, setToPort] = useState('');
   const [protocol, setProtocol] = useState('tcp');
-  const [cidrIp, setCidrIp] = useState('0.0.0.0/0');
+  const [cidrIp, setCidrIp] = useState('');
   const [ruleDescription, setRuleDescription] = useState('');
 
   // Fetch security groups
-  const { data: securityGroupsData, isLoading: loadingGroups } = useQuery({
+  const { data: securityGroupsData, isLoading: loadingGroups, isError: groupsError } = useQuery({
     queryKey: ['security-groups'],
     queryFn: () => apiClient.getSecurityGroups(),
     refetchInterval: 30000,
   });
 
   // Fetch selected group details
-  const { data: groupDetails, isLoading: loadingDetails } = useQuery({
+  const { data: groupDetails, isLoading: loadingDetails, isError: detailsError } = useQuery({
     queryKey: ['security-group', selectedGroup?.groupId],
     queryFn: () => apiClient.getSecurityGroup(selectedGroup!.groupId),
     enabled: !!selectedGroup,
@@ -96,7 +112,7 @@ export default function SecurityManagement() {
   });
 
   // Fetch workstations for selected group
-  const { data: groupWorkstationsData, isLoading: loadingWorkstations } = useQuery({
+  const { data: groupWorkstationsData, isLoading: loadingWorkstations, isError: workstationsError } = useQuery({
     queryKey: ['security-group-workstations', selectedGroup?.groupId],
     queryFn: () => apiClient.getWorkstationsForSecurityGroup(selectedGroup!.groupId),
     enabled: !!selectedGroup,
@@ -110,13 +126,17 @@ export default function SecurityManagement() {
 
   // Create security group mutation
   const createGroup = useMutation({
-    mutationFn: (data: { groupName: string; description: string }) => 
+    mutationFn: (data: { groupName: string; description: string }) =>
       apiClient.createSecurityGroup(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security-groups'] });
       setShowCreateModal(false);
       setNewGroupName('');
       setNewGroupDescription('');
+      toast.success('Security group created');
+    },
+    onError: (error) => {
+      toast.error(`Failed to create security group: ${errorMessage(error)}`);
     },
   });
 
@@ -126,6 +146,10 @@ export default function SecurityManagement() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security-groups'] });
       setSelectedGroup(null);
+      toast.success('Security group deleted');
+    },
+    onError: (error) => {
+      toast.error(`Failed to delete security group: ${errorMessage(error)}`);
     },
   });
 
@@ -136,6 +160,10 @@ export default function SecurityManagement() {
       queryClient.invalidateQueries({ queryKey: ['security-group', selectedGroup?.groupId] });
       setShowAddRuleModal(false);
       resetRuleForm();
+      toast.success('Rule added');
+    },
+    onError: (error) => {
+      toast.error(`Failed to add rule: ${errorMessage(error)}`);
     },
   });
 
@@ -144,6 +172,10 @@ export default function SecurityManagement() {
     mutationFn: (data: any) => apiClient.removeSecurityGroupRule(data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security-group', selectedGroup?.groupId] });
+      toast.success('Rule removed');
+    },
+    onError: (error) => {
+      toast.error(`Failed to remove rule: ${errorMessage(error)}`);
     },
   });
 
@@ -156,6 +188,10 @@ export default function SecurityManagement() {
       queryClient.invalidateQueries({ queryKey: ['workstations'] });
       setShowAssignModal(false);
       setSelectedWorkstationId('');
+      toast.success('Security group attached to workstation');
+    },
+    onError: (error) => {
+      toast.error(`Failed to attach security group: ${errorMessage(error)}`);
     },
   });
 
@@ -166,17 +202,34 @@ export default function SecurityManagement() {
     setFromPort('');
     setToPort('');
     setProtocol('tcp');
-    setCidrIp('0.0.0.0/0');
+    setCidrIp('');
     setRuleDescription('');
   };
 
   const handleAddRule = () => {
     if (!selectedGroup) return;
 
+    if (!cidrIp.trim()) {
+      toast.error('Please enter a source CIDR (e.g. your office IP as x.x.x.x/32)');
+      return;
+    }
+    if (!isValidCidr(cidrIp.trim())) {
+      toast.error('Invalid CIDR format — expected x.x.x.x/nn (e.g. 203.0.113.5/32)');
+      return;
+    }
+    if (
+      cidrIp.trim() === '0.0.0.0/0' &&
+      !confirm(
+        'Source 0.0.0.0/0 opens this port to the ENTIRE internet. Are you sure?'
+      )
+    ) {
+      return;
+    }
+
     let ruleData: any = {
       groupId: selectedGroup.groupId,
       protocol: protocol,
-      cidrIp: cidrIp,
+      cidrIp: cidrIp.trim(),
       description: ruleDescription,
     };
 
@@ -188,7 +241,7 @@ export default function SecurityManagement() {
       ruleData.fromPort = parseInt(fromPort);
       ruleData.toPort = parseInt(toPort);
     } else {
-      alert('Please fill in all required fields');
+      toast.error('Please fill in all required fields');
       return;
     }
 
@@ -197,13 +250,19 @@ export default function SecurityManagement() {
 
   const handleRemoveRule = (rule: any) => {
     if (!selectedGroup) return;
-    
+
     if (!confirm('Are you sure you want to remove this rule?')) return;
+
+    const ruleCidr = rule.ipRanges?.[0]?.cidrIp;
+    if (!ruleCidr) {
+      toast.error('This rule has no IPv4 CIDR source and cannot be removed here');
+      return;
+    }
 
     const ruleData: any = {
       groupId: selectedGroup.groupId,
       protocol: rule.ipProtocol,
-      cidrIp: rule.ipRanges?.[0]?.cidrIp || '0.0.0.0/0',
+      cidrIp: ruleCidr,
     };
 
     if (rule.fromPort && rule.toPort) {
@@ -220,7 +279,7 @@ export default function SecurityManagement() {
 
   const handleAssignToWorkstation = () => {
     if (!selectedGroup || !selectedWorkstationId) {
-      alert('Please select a workstation');
+      toast.error('Please select a workstation');
       return;
     }
 
@@ -230,16 +289,18 @@ export default function SecurityManagement() {
     });
   };
 
+  // Quick-add pre-fills the Add Rule form for the chosen service instead of
+  // immediately opening the port to 0.0.0.0/0 — the admin still has to supply
+  // the source CIDR explicitly.
   const handleQuickAddPort = (portName: string) => {
     if (!selectedGroup) return;
-    
-    addRule.mutate({
-      groupId: selectedGroup.groupId,
-      applicationName: portName,
-      protocol: 'tcp',
-      cidrIp: '0.0.0.0/0',
-      description: `Quick add ${portName.toUpperCase()}`,
-    });
+
+    resetRuleForm();
+    setRuleType('application');
+    setSelectedApplication(portName);
+    setProtocol('tcp');
+    setRuleDescription(`Quick add ${portName.toUpperCase()}`);
+    setShowAddRuleModal(true);
   };
 
   const securityGroups = securityGroupsData?.securityGroups || [];
@@ -279,6 +340,10 @@ export default function SecurityManagement() {
         <div className="p-4">
           {loadingGroups ? (
             <div className="text-center py-8 text-gray-500">Loading security groups...</div>
+          ) : groupsError ? (
+            <div className="text-center py-8 text-red-600">
+              Failed to load security groups. Please try again.
+            </div>
           ) : securityGroups.length === 0 ? (
             <div className="text-center py-8 text-gray-500">No security groups found</div>
           ) : (
@@ -379,6 +444,10 @@ export default function SecurityManagement() {
           <div className="p-4">
             {loadingDetails ? (
               <div className="text-center py-8 text-gray-500">Loading rules...</div>
+            ) : detailsError ? (
+              <div className="text-center py-8 text-red-600">
+                Failed to load security group rules. Please try again.
+              </div>
             ) : groupDetails ? (
               <div className="space-y-4">
                 {/* Quick Actions for Remote Access */}
@@ -978,10 +1047,11 @@ export default function SecurityManagement() {
                   value={cidrIp}
                   onChange={(e) => setCidrIp(e.target.value)}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                  placeholder="0.0.0.0/0"
+                  placeholder="e.g., 203.0.113.5/32"
                 />
                 <p className="mt-1 text-xs text-gray-500">
-                  Use 0.0.0.0/0 for all sources or specify IP range (e.g., 192.168.1.0/24)
+                  Specify the source IP range, e.g. a single IP as x.x.x.x/32 or a subnet
+                  as 192.168.1.0/24. Avoid 0.0.0.0/0 — it opens the port to the entire internet.
                 </p>
               </div>
 
@@ -1111,6 +1181,10 @@ export default function SecurityManagement() {
             <div className="p-6">
               {loadingWorkstations ? (
                 <div className="text-center py-8 text-gray-500">Loading workstations...</div>
+              ) : workstationsError ? (
+                <div className="text-center py-8 text-red-600">
+                  Failed to load workstations for this group. Please try again.
+                </div>
               ) : groupWorkstations.length === 0 ? (
                 <div className="text-center py-8 text-gray-500">
                   No workstations are using this security group

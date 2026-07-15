@@ -1,14 +1,14 @@
-import { 
-  DynamoDBClient, 
-  QueryCommand, 
-  PutItemCommand, 
-  UpdateItemCommand, 
+import {
+  DynamoDBClient,
+  PutItemCommand,
+  UpdateItemCommand,
   DeleteItemCommand,
   GetItemCommand
 } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { corsHeaders } from '../shared/http';
 import { requireAdmin, isAdmin } from '../shared/auth';
+import { queryAllItems } from '../shared/dynamo';
 import { logEvent } from '../shared/logging';
 
 const dynamodb = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-west-2' });
@@ -118,10 +118,25 @@ export const handler = async (event: any) => {
   const httpMethod = event.httpMethod || event.requestContext?.http?.method;
   const path = event.path || event.requestContext?.http?.path || '';
   const pathParams = event.pathParameters || {};
-  const body = event.body ? JSON.parse(event.body) : {};
   const queryParams = event.queryStringParameters || {};
 
   try {
+    // Parse the body inside the try block: a malformed body must yield a
+    // clean 400 (with CORS headers), not an unhandled exception that API
+    // Gateway turns into a CORS-less 502.
+    let body: any = {};
+    if (event.body) {
+      try {
+        body = JSON.parse(event.body);
+      } catch {
+        return {
+          statusCode: 400,
+          headers: corsHeaders(),
+          body: JSON.stringify({ error: 'Request body is not valid JSON' })
+        };
+      }
+    }
+
     // Extract user info from authorizer context
     const userEmail = event.requestContext?.authorizer?.claims?.email || 'system';
     const userId = event.requestContext?.authorizer?.claims?.sub || 'system';
@@ -228,9 +243,10 @@ async function getUserGroupPackages(event: any): Promise<any> {
 
     const allPackages: any[] = [];
 
-    // Query each group for packages
+    // Query each group for packages (paginated: a single Query page is
+    // capped at 1 MB, so follow LastEvaluatedKey via the shared helper)
     for (const groupId of userGroups) {
-      const command = new QueryCommand({
+      const packages = await queryAllItems(dynamodb, {
         TableName: BINDINGS_TABLE,
         KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
         ExpressionAttributeValues: marshall({
@@ -239,23 +255,17 @@ async function getUserGroupPackages(event: any): Promise<any> {
         })
       });
 
-      const result = await dynamodb.send(command);
-      
-      if (result.Items) {
-        const packages = result.Items.map(item => unmarshall(item));
-        
-        // Filter for auto-install packages (autoInstall is stored as string)
-        const autoInstallPackages = packages.filter((pkg: any) => pkg.autoInstall === 'true' || pkg.autoInstall === true);
-        
-        allPackages.push(...autoInstallPackages.map((pkg: any) => ({
-          packageId: pkg.packageId,
-          packageName: pkg.packageName,
-          isMandatory: pkg.isMandatory || false,
-          autoInstall: pkg.autoInstall,
-          installOrder: pkg.installOrder,
-          groupName: groupId
-        })));
-      }
+      // Filter for auto-install packages (autoInstall is stored as string)
+      const autoInstallPackages = packages.filter((pkg: any) => pkg.autoInstall === 'true' || pkg.autoInstall === true);
+
+      allPackages.push(...autoInstallPackages.map((pkg: any) => ({
+        packageId: pkg.packageId,
+        packageName: pkg.packageName,
+        isMandatory: pkg.isMandatory || false,
+        autoInstall: pkg.autoInstall,
+        installOrder: pkg.installOrder,
+        groupName: groupId
+      })));
     }
 
     // Remove duplicates (if package is in multiple groups, keep the one with lowest install order)
@@ -289,7 +299,8 @@ async function getUserGroupPackages(event: any): Promise<any> {
  */
 async function getPackageInstallationStatus(workstationId: string): Promise<any> {
   try {
-    const command = new QueryCommand({
+    // Paginated query: follow LastEvaluatedKey so large queues are not truncated.
+    const packages = await queryAllItems(dynamodb, {
       TableName: QUEUE_TABLE,
       KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
       ExpressionAttributeValues: marshall({
@@ -297,9 +308,6 @@ async function getPackageInstallationStatus(workstationId: string): Promise<any>
         ':sk': 'PACKAGE#'
       })
     });
-
-    const result = await dynamodb.send(command);
-    const packages = result.Items ? result.Items.map(item => unmarshall(item)) : [];
 
     // Calculate summary
     const summary = {
@@ -380,7 +388,8 @@ async function retryPackageInstallation(workstationId: string, packageId: string
  */
 async function getGroupPackages(groupId: string): Promise<any> {
   try {
-    const command = new QueryCommand({
+    // Paginated query: follow LastEvaluatedKey so large groups are not truncated.
+    const packages = await queryAllItems(dynamodb, {
       TableName: BINDINGS_TABLE,
       KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
       ExpressionAttributeValues: marshall({
@@ -388,9 +397,6 @@ async function getGroupPackages(groupId: string): Promise<any> {
         ':sk': 'PACKAGE#'
       })
     });
-
-    const result = await dynamodb.send(command);
-    const packages = result.Items ? result.Items.map(item => unmarshall(item)) : [];
 
     return {
       statusCode: 200,
@@ -457,10 +463,23 @@ async function addPackageToGroup(groupId: string, data: any, userEmail: string):
 
     const command = new PutItemCommand({
       TableName: BINDINGS_TABLE,
-      Item: marshall(binding)
+      Item: marshall(binding),
+      // Don't silently overwrite an existing binding (PK+SK already present).
+      ConditionExpression: 'attribute_not_exists(PK)'
     });
 
-    await dynamodb.send(command);
+    try {
+      await dynamodb.send(command);
+    } catch (err: any) {
+      if (err?.name === 'ConditionalCheckFailedException') {
+        return {
+          statusCode: 409,
+          headers: corsHeaders(),
+          body: JSON.stringify({ error: 'Package is already assigned to this group' })
+        };
+      }
+      throw err;
+    }
 
     return {
       statusCode: 201,
@@ -523,12 +542,26 @@ async function updateGroupPackage(groupId: string, packageId: string, data: any,
         SK: `PACKAGE#${packageId}`
       }),
       UpdateExpression: `SET ${updates.join(', ')}`,
+      // Update must not upsert a phantom binding for a nonexistent pairing.
+      ConditionExpression: 'attribute_exists(PK)',
       ExpressionAttributeNames: attributeNames,
       ExpressionAttributeValues: marshall(attributeValues),
       ReturnValues: 'ALL_NEW'
     });
 
-    const result = await dynamodb.send(command);
+    let result;
+    try {
+      result = await dynamodb.send(command);
+    } catch (err: any) {
+      if (err?.name === 'ConditionalCheckFailedException') {
+        return {
+          statusCode: 404,
+          headers: corsHeaders(),
+          body: JSON.stringify({ error: 'Package binding not found' })
+        };
+      }
+      throw err;
+    }
 
     return {
       statusCode: 200,

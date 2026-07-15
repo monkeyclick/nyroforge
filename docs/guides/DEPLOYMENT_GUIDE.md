@@ -206,40 +206,42 @@ cdk bootstrap aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION
 cdk list
 
 # Expected output:
-# WorkstationInfrastructureStack
-# WorkstationApiStack
-# WorkstationWebsiteStack
+# WorkstationInfrastructure
+# WorkstationApi
+# WorkstationWebsite
 ```
 
 ### Step 6: Deploy Infrastructure
 
 ```bash
 # Synthesize CloudFormation template (optional - for review)
-cdk synth WorkstationInfrastructureStack > infrastructure-template.yaml
+cdk synth WorkstationInfrastructure > infrastructure-template.yaml
 
 # Deploy all stacks
 cdk deploy --all --require-approval never
 
 # OR deploy one stack at a time:
-cdk deploy WorkstationInfrastructureStack
-cdk deploy WorkstationApiStack
-cdk deploy WorkstationWebsiteStack
+cdk deploy WorkstationInfrastructure
+cdk deploy WorkstationStorage
+cdk deploy WorkstationApi
+cdk deploy WorkstationAdminApi
+cdk deploy WorkstationWebsite
 ```
 
 **Deployment time:** 15-25 minutes
 
 **Expected outputs:**
 ```
-WorkstationInfrastructureStack outputs:
+WorkstationInfrastructure outputs:
   VpcId: vpc-xxxxx
   UserPoolId: us-west-2_xxxxx
   UserPoolClientId: xxxxx
 
-WorkstationApiStack outputs:
+WorkstationApi outputs:
   ApiEndpoint: https://xxxxx.execute-api.us-west-2.amazonaws.com/api
   ApiId: xxxxx
 
-WorkstationWebsiteStack outputs:
+WorkstationWebsite outputs:
   WebsiteUrl: https://xxxxx.cloudfront.net
   DistributionId: xxxxx
   BucketName: workstation-ui-xxxxx
@@ -263,7 +265,7 @@ cat cdk-outputs.json
 
 ```bash
 # Get User Pool ID from outputs
-USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructureStack.UserPoolId')
+USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructure.UserPoolId')
 
 # Create admin user
 aws cognito-idp admin-create-user \
@@ -350,9 +352,9 @@ aws ssm put-parameter \
 
 ```bash
 # Get API endpoint
-API_ENDPOINT=$(cat cdk-outputs.json | jq -r '.WorkstationApiStack.ApiEndpoint')
-USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructureStack.UserPoolId')
-USER_POOL_CLIENT_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructureStack.UserPoolClientId')
+API_ENDPOINT=$(cat cdk-outputs.json | jq -r '.WorkstationApi.ApiEndpoint')
+USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructure.UserPoolId')
+USER_POOL_CLIENT_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructure.UserPoolClientId')
 
 # Update frontend/.env.local
 cat > frontend/.env.local << EOF
@@ -457,7 +459,7 @@ aws ec2 authorize-security-group-ingress \
 
 ```bash
 # Get CloudFront URL
-WEBSITE_URL=$(cat cdk-outputs.json | jq -r '.WorkstationWebsiteStack.WebsiteUrl')
+WEBSITE_URL=$(cat cdk-outputs.json | jq -r '.WorkstationWebsite.WebsiteUrl')
 echo "Website URL: $WEBSITE_URL"
 
 # Open in browser
@@ -486,7 +488,7 @@ xdg-open $WEBSITE_URL  # Linux
 7. Click "Launch"
 
 # Via API:
-API_ENDPOINT=$(cat cdk-outputs.json | jq -r '.WorkstationApiStack.ApiEndpoint')
+API_ENDPOINT=$(cat cdk-outputs.json | jq -r '.WorkstationApi.ApiEndpoint')
 
 # Get JWT token first (from browser developer tools after login)
 JWT_TOKEN="your-jwt-token"
@@ -575,7 +577,7 @@ cdk bootstrap
 aws cognito-idp list-user-pools --max-results 10
 
 # Check CDK outputs
-cat cdk-outputs.json | jq -r '.WorkstationInfrastructureStack'
+cat cdk-outputs.json | jq -r '.WorkstationInfrastructure'
 ```
 
 ---
@@ -607,13 +609,13 @@ aws service-quotas request-service-quota-increase \
 **Solution:**
 ```bash
 # Verify Cognito configuration
-USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructureStack.UserPoolId')
+USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructure.UserPoolId')
 
 aws cognito-idp describe-user-pool --user-pool-id $USER_POOL_ID
 
 # Check API Gateway authorizer
 aws apigateway get-authorizers \
-  --rest-api-id $(cat cdk-outputs.json | jq -r '.WorkstationApiStack.ApiId')
+  --rest-api-id $(cat cdk-outputs.json | jq -r '.WorkstationApi.ApiId')
 ```
 
 ---
@@ -790,7 +792,7 @@ After successful deployment:
 |----------|-------------|
 | VPC | WorkstationVPC |
 | User Pool | workstation-users |
-| API Gateway | WorkstationAPI |
+| API Gateway | Media Workstation Management API (stack: WorkstationApi) |
 | S3 Bucket | workstation-ui-{account}-{region} |
 | DynamoDB Table | Workstations |
 

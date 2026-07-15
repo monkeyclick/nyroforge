@@ -4,6 +4,9 @@ import { DynamoDBClient, PutItemCommand, GetItemCommand, ScanCommand, QueryComma
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
 import { logEvent } from '../shared/logging';
+import { corsHeaders } from '../shared/http';
+import { scanAllItems } from '../shared/dynamo';
+import { describeInstancesByFilters, describeInstancesByIds } from '../shared/ec2';
 
 // Initialize AWS clients
 const ec2Client = new EC2Client({});
@@ -159,12 +162,7 @@ const INSTANCE_FAMILIES: Record<string, { name: string; description: string; typ
 };
 
 // CORS headers
-const CORS_HEADERS = {
-  'Content-Type': 'application/json',
-  'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-  'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-  'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-};
+const CORS_HEADERS = corsHeaders();
 
 // Permission checking functions
 async function getUserPermissions(userId: string): Promise<Permission[]> {
@@ -269,18 +267,17 @@ async function logAuditEvent(userId: string, action: string, resourceType: strin
 // Get managed instance IDs from DynamoDB
 async function getManagedInstanceIds(): Promise<Map<string, { workstationId: string; userId: string }>> {
   try {
-    const scanResult = await dynamoClient.send(new ScanCommand({
+    const items = await scanAllItems(dynamoClient, {
       TableName: WORKSTATIONS_TABLE,
       FilterExpression: 'begins_with(PK, :pk)',
       ExpressionAttributeValues: marshall({
         ':pk': 'WORKSTATION#',
       }),
       ProjectionExpression: 'instanceId, PK, userId',
-    }));
+    });
 
     const instanceMap = new Map<string, { workstationId: string; userId: string }>();
-    (scanResult.Items || []).forEach(item => {
-      const record = unmarshall(item);
+    items.forEach(record => {
       if (record.instanceId) {
         const workstationId = record.PK?.replace('WORKSTATION#', '') || '';
         instanceMap.set(record.instanceId, {
@@ -300,17 +297,16 @@ async function getManagedInstanceIds(): Promise<Map<string, { workstationId: str
 // Get excluded instance IDs from DynamoDB
 async function getExcludedInstances(): Promise<Map<string, ExcludedInstance>> {
   try {
-    const scanResult = await dynamoClient.send(new ScanCommand({
+    const items = await scanAllItems(dynamoClient, {
       TableName: WORKSTATIONS_TABLE,
       FilterExpression: 'begins_with(PK, :pk)',
       ExpressionAttributeValues: marshall({
         ':pk': 'EXCLUDED#',
       }),
-    }));
+    });
 
     const excludedMap = new Map<string, ExcludedInstance>();
-    (scanResult.Items || []).forEach(item => {
-      const record = unmarshall(item);
+    items.forEach(record => {
       const instanceId = record.PK?.replace('EXCLUDED#', '') || '';
       if (instanceId) {
         excludedMap.set(instanceId, {
@@ -469,14 +465,8 @@ async function discoverInstances(request: DiscoverRequest, userId: string): Prom
     const excludedInstances = await getExcludedInstances();
     console.log(`Found ${managedInstances.size} managed instances, ${excludedInstances.size} excluded instances`);
 
-    // Describe EC2 instances
-    const describeCommand = new DescribeInstancesCommand({
-      Filters: ec2Filters,
-      MaxResults: 1000, // Get more results to handle pagination
-    });
-
-    const ec2Result = await ec2Client.send(describeCommand);
-    const instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
+    // Describe EC2 instances (follows NextToken to cover fleets beyond one page)
+    const instances = await describeInstancesByFilters(ec2Client, ec2Filters);
 
     console.log(`Found ${instances.length} EC2 instances matching filters`);
 
@@ -546,7 +536,7 @@ async function discoverInstances(request: DiscoverRequest, userId: string): Prom
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to discover instances',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: 'An internal error occurred while discovering instances.',
       }),
     };
   }
@@ -570,14 +560,8 @@ async function getInstanceScopeStatus(request: ScopeStatusRequest, userId: strin
     const excludedInstances = await getExcludedInstances();
     console.log(`Found ${managedInstances.size} managed instances, ${excludedInstances.size} excluded instances`);
 
-    // Describe EC2 instances
-    const describeCommand = new DescribeInstancesCommand({
-      Filters: ec2Filters,
-      MaxResults: 1000,
-    });
-
-    const ec2Result = await ec2Client.send(describeCommand);
-    const instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
+    // Describe EC2 instances (follows NextToken to cover fleets beyond one page)
+    const instances = await describeInstancesByFilters(ec2Client, ec2Filters);
 
     console.log(`Found ${instances.length} EC2 instances`);
 
@@ -656,7 +640,7 @@ async function getInstanceScopeStatus(request: ScopeStatusRequest, userId: strin
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to get instance scope status',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: 'An internal error occurred while getting instance scope status.',
       }),
     };
   }
@@ -713,7 +697,7 @@ async function setInstanceScope(request: ScopeRequest, userId: string): Promise<
         results.push({
           instanceId,
           status: 'error',
-          error: err instanceof Error ? err.message : 'Unknown error',
+          error: 'Failed to set scope for this instance. See server logs for details.',
         });
       }
     }
@@ -751,7 +735,7 @@ async function setInstanceScope(request: ScopeRequest, userId: string): Promise<
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to set instance scope',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: 'An internal error occurred while setting instance scope.',
       }),
     };
   }
@@ -760,13 +744,10 @@ async function setInstanceScope(request: ScopeRequest, userId: string): Promise<
 // Helper function to import a single instance
 async function importSingleInstance(instanceId: string, ownerUserId: string, importedBy: string): Promise<{ instanceId: string; status: string; workstationId?: string; error?: string }> {
   try {
-    // Get instance details
-    const describeCommand = new DescribeInstancesCommand({
-      InstanceIds: [instanceId],
-    });
-
-    const ec2Result = await ec2Client.send(describeCommand);
-    const ec2Instance = ec2Result.Reservations?.[0]?.Instances?.[0];
+    // Get instance details. Using an instance-id filter (via describeInstancesByIds)
+    // rather than InstanceIds means a nonexistent instance yields an empty result
+    // instead of an EC2 API error, so the not-found check below handles it cleanly.
+    const [ec2Instance] = await describeInstancesByIds(ec2Client, [instanceId]);
 
     if (!ec2Instance) {
       return { instanceId, status: 'error', error: 'Instance not found' };
@@ -860,7 +841,7 @@ async function importSingleInstance(instanceId: string, ownerUserId: string, imp
     return { instanceId, status: 'imported', workstationId };
   } catch (error) {
     console.error(`Error importing instance ${instanceId}:`, error);
-    return { instanceId, status: 'error', error: error instanceof Error ? error.message : 'Unknown error' };
+    return { instanceId, status: 'error', error: 'Failed to import this instance. See server logs for details.' };
   }
 }
 
@@ -916,7 +897,7 @@ async function removeFromManagement(instanceIds: string[], userId: string): Prom
         results.push({
           instanceId,
           status: 'error',
-          error: err instanceof Error ? err.message : 'Unknown error',
+          error: 'Failed to remove this instance from management. See server logs for details.',
         });
       }
     }
@@ -953,7 +934,7 @@ async function removeFromManagement(instanceIds: string[], userId: string): Prom
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to remove instances from management',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: 'An internal error occurred while removing instances from management.',
       }),
     };
   }
@@ -983,16 +964,11 @@ async function getNameSuggestions(prefix: string): Promise<APIGatewayProxyResult
   console.log('Prefix:', prefix);
 
   try {
-    // Get instances with matching names
-    const describeCommand = new DescribeInstancesCommand({
-      Filters: [
-        { Name: 'instance-state-name', Values: ['running', 'stopped', 'pending', 'stopping'] },
-      ],
-      MaxResults: 500,
-    });
-
-    const ec2Result = await ec2Client.send(describeCommand);
-    const instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
+    // Get instances with matching names (follows NextToken to cover fleets
+    // beyond one page)
+    const instances = await describeInstancesByFilters(ec2Client, [
+      { Name: 'instance-state-name', Values: ['running', 'stopped', 'pending', 'stopping'] },
+    ]);
 
     // Get managed instance IDs
     const managedInstanceIds = await getManagedInstanceIds();
@@ -1028,7 +1004,7 @@ async function getNameSuggestions(prefix: string): Promise<APIGatewayProxyResult
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to get name suggestions',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: 'An internal error occurred while getting name suggestions.',
       }),
     };
   }
@@ -1068,7 +1044,7 @@ async function getTypeSuggestions(prefix: string): Promise<APIGatewayProxyResult
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to get type suggestions',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: 'An internal error occurred while getting type suggestions.',
       }),
     };
   }
@@ -1236,7 +1212,7 @@ async function importInstances(request: ImportRequest, userId: string): Promise<
           instanceId,
           workstationId: '',
           status: 'error',
-          error: importError instanceof Error ? importError.message : 'Unknown error',
+          error: 'Failed to import this instance. See server logs for details.',
         });
       }
     }
@@ -1273,7 +1249,7 @@ async function importInstances(request: ImportRequest, userId: string): Promise<
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Failed to import instances',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: 'An internal error occurred while importing instances.',
       }),
     };
   }
@@ -1401,18 +1377,29 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
     }
 
     if (httpMethod === 'POST') {
+      let parsedBody: any;
+      if (path.includes('/scope/set') || path.includes('/scope/remove') || path.includes('/discover') || path.includes('/import')) {
+        try {
+          parsedBody = JSON.parse(body || '{}');
+        } catch (parseError) {
+          console.error('❌ Malformed JSON in request body:', parseError);
+          return {
+            statusCode: 400,
+            headers: CORS_HEADERS,
+            body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+          };
+        }
+      }
+
       if (path.includes('/scope/set')) {
-        const request = JSON.parse(body || '{}') as ScopeRequest;
-        return await setInstanceScope(request, userId);
+        return await setInstanceScope(parsedBody as ScopeRequest, userId);
       } else if (path.includes('/scope/remove')) {
-        const { instanceIds } = JSON.parse(body || '{}');
+        const { instanceIds } = parsedBody;
         return await removeFromManagement(instanceIds, userId);
       } else if (path.includes('/discover')) {
-        const request = JSON.parse(body || '{}') as DiscoverRequest;
-        return await discoverInstances(request, userId);
+        return await discoverInstances(parsedBody as DiscoverRequest, userId);
       } else if (path.includes('/import')) {
-        const request = JSON.parse(body || '{}') as ImportRequest;
-        return await importInstances(request, userId);
+        return await importInstances(parsedBody as ImportRequest, userId);
       }
     }
 
@@ -1432,8 +1419,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
       headers: CORS_HEADERS,
       body: JSON.stringify({
         message: 'Internal server error',
-        error: error instanceof Error ? error.message : 'Unknown error',
-        requestId: context.awsRequestId,
+        error: 'An internal error occurred. Please try again later.',
       }),
     };
   }

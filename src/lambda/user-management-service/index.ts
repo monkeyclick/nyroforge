@@ -9,12 +9,16 @@ import {
   AdminSetUserPasswordCommand,
   AdminGetUserCommand,
   AdminListGroupsForUserCommand,
-  ListUsersCommand
+  ListUsersCommand,
+  GroupType,
+  AttributeType
 } from '@aws-sdk/client-cognito-identity-provider';
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { randomUUID, randomBytes } from 'crypto';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { logEvent } from '../shared/logging';
+import { corsHeaders } from '../shared/http';
+import { docScanAll, docQueryAll } from '../shared/dynamo';
 
 // Initialize clients
 const ddbClient = new DynamoDBClient({});
@@ -487,13 +491,25 @@ async function getUsers(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRes
   const groupId = params.groupId;
 
   try {
-    // Get user data from DynamoDB (simplified without Cognito for now)
-    const scanCommand = new ScanCommand({
-      TableName: USERS_TABLE,
-    });
-    
-    const userDataResult = await docClient.send(scanCommand);
-    let users: EnhancedUser[] = (userDataResult.Items || []).map(item => ({
+    // Get user data from DynamoDB (simplified without Cognito for now).
+    // When filtering by status, query the StatusIndex GSI instead of scanning
+    // the whole table; both paths follow LastEvaluatedKey across every page.
+    let items: Record<string, any>[];
+    if (status) {
+      items = await docQueryAll(docClient, {
+        TableName: USERS_TABLE,
+        IndexName: 'StatusIndex',
+        KeyConditionExpression: '#status = :status',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':status': status },
+      });
+    } else {
+      items = await docScanAll(docClient, {
+        TableName: USERS_TABLE,
+      });
+    }
+
+    let users: EnhancedUser[] = items.map(item => ({
       id: item.id,
       email: item.email,
       name: item.name,
@@ -510,10 +526,7 @@ async function getUsers(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRes
       createdBy: item.createdBy,
     }));
 
-    // Apply filters
-    if (status) {
-      users = users.filter((user: EnhancedUser) => user.status === status);
-    }
+    // Apply remaining filters in-memory (status is already handled above)
     if (search) {
       const searchLower = search.toLowerCase();
       users = users.filter((user: EnhancedUser) =>
@@ -552,7 +565,8 @@ async function getUsers(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRes
 
 async function createUser(event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { email, name, phone, roleIds = [], groupIds = [], sendInvitation = true, attributes = {} } = body;
 
     if (!email || !name) {
@@ -605,14 +619,12 @@ async function createUser(event: APIGatewayProxyEvent, currentUserId: string): P
 // Role operations
 async function getRoles(): Promise<APIGatewayProxyResult> {
   try {
-    const scanCommand = new ScanCommand({
+    const roles = await docScanAll(docClient, {
       TableName: ROLES_TABLE,
     });
-    
-    const result = await docClient.send(scanCommand);
-    
+
     return createSuccessResponse({
-      roles: result.Items || [],
+      roles,
     });
 
   } catch (error) {
@@ -623,7 +635,8 @@ async function getRoles(): Promise<APIGatewayProxyResult> {
 
 async function createRole(event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { name, description, permissions = [] } = body;
 
     if (!name || !description) {
@@ -662,14 +675,12 @@ async function createRole(event: APIGatewayProxyEvent, currentUserId: string): P
 // Group operations
 async function getGroups(): Promise<APIGatewayProxyResult> {
   try {
-    const scanCommand = new ScanCommand({
+    const groups = await docScanAll(docClient, {
       TableName: GROUPS_TABLE,
     });
-    
-    const result = await docClient.send(scanCommand);
-    
+
     return createSuccessResponse({
-      groups: result.Items || [],
+      groups,
     });
 
   } catch (error) {
@@ -680,7 +691,8 @@ async function getGroups(): Promise<APIGatewayProxyResult> {
 
 async function createGroup(event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { name, description, roleIds = [], isDefault = false, tags = {} } = body;
 
     if (!name || !description) {
@@ -782,7 +794,7 @@ async function removeGroupMembershipRecord(
 
 async function getGroupMembers(groupId: string): Promise<GroupMembership[]> {
   try {
-    const queryCommand = new QueryCommand({
+    const items = await docQueryAll(docClient, {
       TableName: GROUP_MEMBERSHIPS_TABLE,
       IndexName: 'GroupMembersIndex',
       KeyConditionExpression: 'groupId = :groupId',
@@ -791,8 +803,7 @@ async function getGroupMembers(groupId: string): Promise<GroupMembership[]> {
       },
     });
 
-    const result = await docClient.send(queryCommand);
-    return (result.Items || []) as GroupMembership[];
+    return items as GroupMembership[];
   } catch (error) {
     console.error('Error getting group members:', error);
     return [];
@@ -801,7 +812,7 @@ async function getGroupMembers(groupId: string): Promise<GroupMembership[]> {
 
 async function getUserGroups(userId: string): Promise<GroupMembership[]> {
   try {
-    const queryCommand = new QueryCommand({
+    const items = await docQueryAll(docClient, {
       TableName: GROUP_MEMBERSHIPS_TABLE,
       IndexName: 'UserGroupsIndex',
       KeyConditionExpression: 'userId = :userId',
@@ -810,8 +821,7 @@ async function getUserGroups(userId: string): Promise<GroupMembership[]> {
       },
     });
 
-    const result = await docClient.send(queryCommand);
-    return (result.Items || []) as GroupMembership[];
+    return items as GroupMembership[];
   } catch (error) {
     console.error('Error getting user groups:', error);
     return [];
@@ -850,22 +860,31 @@ async function getGroupAuditLogs(groupId: string, event: APIGatewayProxyEvent): 
     const params = event.queryStringParameters || {};
     const limit = parseInt(params.limit || '50');
 
-    const queryCommand = new QueryCommand({
-      TableName: GROUP_AUDIT_LOGS_TABLE,
-      IndexName: 'GroupActivityIndex',
-      KeyConditionExpression: 'groupId = :groupId',
-      ExpressionAttributeValues: {
-        ':groupId': groupId,
-      },
-      Limit: limit,
-      ScanIndexForward: false, // Most recent first
-    });
-
-    const result = await docClient.send(queryCommand);
+    // Paginate via LastEvaluatedKey, but stop accumulating once we have
+    // `limit` items — a single page's Limit may return fewer than requested
+    // if the page is truncated for size before hitting the item cap.
+    const logs: Record<string, any>[] = [];
+    let lastKey: Record<string, any> | undefined;
+    let pages = 0;
+    do {
+      const result = await docClient.send(new QueryCommand({
+        TableName: GROUP_AUDIT_LOGS_TABLE,
+        IndexName: 'GroupActivityIndex',
+        KeyConditionExpression: 'groupId = :groupId',
+        ExpressionAttributeValues: {
+          ':groupId': groupId,
+        },
+        Limit: limit - logs.length,
+        ScanIndexForward: false, // Most recent first
+        ExclusiveStartKey: lastKey,
+      }));
+      logs.push(...(result.Items || []));
+      lastKey = result.LastEvaluatedKey;
+    } while (lastKey && logs.length < limit && ++pages < 100);
 
     return createSuccessResponse({
-      logs: result.Items || [],
-      total: result.Count || 0,
+      logs,
+      total: logs.length,
     });
   } catch (error) {
     console.error('Error getting group audit logs:', error);
@@ -908,20 +927,28 @@ async function getAuditLogs(event: APIGatewayProxyEvent): Promise<APIGatewayProx
   const limit = parseInt(params.limit || '50');
 
   try {
-    const scanCommand = new ScanCommand({
-      TableName: AUDIT_TABLE,
-      Limit: limit,
-    });
-    
-    const result = await docClient.send(scanCommand);
-    
+    // Accumulate pages via LastEvaluatedKey until we reach the caller's
+    // requested limit or exhaust the table.
+    const logs: Record<string, any>[] = [];
+    let lastKey: Record<string, any> | undefined;
+    let pages = 0;
+    do {
+      const result = await docClient.send(new ScanCommand({
+        TableName: AUDIT_TABLE,
+        Limit: limit - logs.length,
+        ExclusiveStartKey: lastKey,
+      }));
+      logs.push(...(result.Items || []));
+      lastKey = result.LastEvaluatedKey;
+    } while (lastKey && logs.length < limit && ++pages < 100);
+
     return createSuccessResponse({
-      logs: result.Items || [],
+      logs,
       pagination: {
-        total: result.Count || 0,
+        total: logs.length,
         page,
         limit,
-        pages: Math.ceil((result.Count || 0) / limit),
+        pages: Math.ceil(logs.length / limit),
       },
     });
 
@@ -1056,29 +1083,40 @@ function createSuccessResponse(data: any): APIGatewayProxyResult {
   return {
     statusCode: 200,
     headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-      'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+      ...corsHeaders(),
     },
     body: JSON.stringify(data),
   };
 }
 
 function createErrorResponse(statusCode: number, message: string, error?: any): APIGatewayProxyResult {
+  // Never echo the underlying error back to the client - log it server-side
+  // only, and return the public message under the `message` key (the
+  // frontend reads `errorData.message || errorData.error`).
+  if (error !== undefined) {
+    console.error(message, error);
+  }
   return {
     statusCode,
     headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-      'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+      ...corsHeaders(),
     },
-    body: JSON.stringify({
-      message,
-      error: error instanceof Error ? error.message : error
-    }),
+    body: JSON.stringify({ message }),
   };
+}
+
+// Parses the request body as JSON, returning either the parsed body or a
+// ready-made 400 response when the body is malformed. Callers should
+// early-return `response` when it is set.
+function parseBody(event: APIGatewayProxyEvent): { body: any; response?: APIGatewayProxyResult } {
+  try {
+    return { body: JSON.parse(event.body || '{}') };
+  } catch {
+    return {
+      body: undefined,
+      response: createErrorResponse(400, 'Request body is not valid JSON'),
+    };
+  }
 }
 
 // User operation implementations
@@ -1105,7 +1143,8 @@ async function getUserById(userId: string): Promise<APIGatewayProxyResult> {
 
 async function updateUser(userId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { name, phone, roleIds, groupIds, directPermissions, attributes, preferences } = body;
 
     // Get existing user
@@ -1132,10 +1171,18 @@ async function updateUser(userId: string, event: APIGatewayProxyEvent, currentUs
     if (preferences !== undefined) user.preferences = { ...user.preferences, ...preferences };
     user.updatedAt = now;
 
-    await docClient.send(new PutCommand({
-      TableName: USERS_TABLE,
-      Item: user,
-    }));
+    try {
+      await docClient.send(new PutCommand({
+        TableName: USERS_TABLE,
+        Item: user,
+        ConditionExpression: 'attribute_exists(id)',
+      }));
+    } catch (conditionError: any) {
+      if (conditionError.name === 'ConditionalCheckFailedException') {
+        return createErrorResponse(404, 'User not found');
+      }
+      throw conditionError;
+    }
 
     await logAuditEvent(currentUserId, 'UPDATE_USER', 'user', userId, { updates: body });
 
@@ -1163,10 +1210,18 @@ async function suspendUser(userId: string, currentUserId: string): Promise<APIGa
     user.status = 'suspended';
     user.updatedAt = new Date().toISOString();
 
-    await docClient.send(new PutCommand({
-      TableName: USERS_TABLE,
-      Item: user,
-    }));
+    try {
+      await docClient.send(new PutCommand({
+        TableName: USERS_TABLE,
+        Item: user,
+        ConditionExpression: 'attribute_exists(id)',
+      }));
+    } catch (conditionError: any) {
+      if (conditionError.name === 'ConditionalCheckFailedException') {
+        return createErrorResponse(404, 'User not found');
+      }
+      throw conditionError;
+    }
 
     await logAuditEvent(currentUserId, 'SUSPEND_USER', 'user', userId, { previousStatus: result.Item.status });
 
@@ -1194,10 +1249,18 @@ async function activateUser(userId: string, currentUserId: string): Promise<APIG
     user.status = 'active';
     user.updatedAt = new Date().toISOString();
 
-    await docClient.send(new PutCommand({
-      TableName: USERS_TABLE,
-      Item: user,
-    }));
+    try {
+      await docClient.send(new PutCommand({
+        TableName: USERS_TABLE,
+        Item: user,
+        ConditionExpression: 'attribute_exists(id)',
+      }));
+    } catch (conditionError: any) {
+      if (conditionError.name === 'ConditionalCheckFailedException') {
+        return createErrorResponse(404, 'User not found');
+      }
+      throw conditionError;
+    }
 
     await logAuditEvent(currentUserId, 'ACTIVATE_USER', 'user', userId, { previousStatus: result.Item.status });
 
@@ -1265,7 +1328,8 @@ async function getRoleById(roleId: string): Promise<APIGatewayProxyResult> {
 
 async function updateRole(roleId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { name, description, permissions } = body;
 
     const getCommand = new GetCommand({
@@ -1292,10 +1356,18 @@ async function updateRole(roleId: string, event: APIGatewayProxyEvent, currentUs
     if (permissions !== undefined) role.permissions = permissions;
     role.updatedAt = now;
 
-    await docClient.send(new PutCommand({
-      TableName: ROLES_TABLE,
-      Item: role,
-    }));
+    try {
+      await docClient.send(new PutCommand({
+        TableName: ROLES_TABLE,
+        Item: role,
+        ConditionExpression: 'attribute_exists(id)',
+      }));
+    } catch (conditionError: any) {
+      if (conditionError.name === 'ConditionalCheckFailedException') {
+        return createErrorResponse(404, 'Role not found');
+      }
+      throw conditionError;
+    }
 
     await logAuditEvent(currentUserId, 'UPDATE_ROLE', 'role', roleId, { updates: body });
 
@@ -1369,7 +1441,8 @@ async function getGroupById(groupId: string): Promise<APIGatewayProxyResult> {
 
 async function updateGroup(groupId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { name, description, roleIds, tags, parentGroupId } = body;
 
     const getCommand = new GetCommand({
@@ -1409,10 +1482,18 @@ async function updateGroup(groupId: string, event: APIGatewayProxyEvent, current
     
     group.updatedAt = now;
 
-    await docClient.send(new PutCommand({
-      TableName: GROUPS_TABLE,
-      Item: group,
-    }));
+    try {
+      await docClient.send(new PutCommand({
+        TableName: GROUPS_TABLE,
+        Item: group,
+        ConditionExpression: 'attribute_exists(id)',
+      }));
+    } catch (conditionError: any) {
+      if (conditionError.name === 'ConditionalCheckFailedException') {
+        return createErrorResponse(404, 'Group not found');
+      }
+      throw conditionError;
+    }
 
     await logAuditEvent(currentUserId, 'UPDATE_GROUP', 'group', groupId, { updates: body, previousState });
     await logGroupAuditEvent(groupId, 'updated', currentUserId, { updates: body });
@@ -1463,7 +1544,8 @@ async function deleteGroup(groupId: string, currentUserId: string): Promise<APIG
 
 async function addUserToGroup(groupId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { userId, membershipType = 'static', expiresAt } = body;
 
     if (!userId) {
@@ -1558,24 +1640,26 @@ async function findUserForDeletion(userId: string): Promise<{
     console.warn('Error looking up user by ID:', error);
   }
   
-  // If the userId looks like an email, try to find by email in DynamoDB
+  // If the userId looks like an email, try to find by email in DynamoDB via
+  // the EmailIndex GSI (PK=email) instead of scanning the whole table.
   if (userId.includes('@')) {
     try {
-      const scanResult = await docClient.send(new ScanCommand({
+      const queryResult = await docClient.send(new QueryCommand({
         TableName: USERS_TABLE,
-        FilterExpression: 'email = :email',
+        IndexName: 'EmailIndex',
+        KeyConditionExpression: 'email = :email',
         ExpressionAttributeValues: {
           ':email': userId,
         },
         Limit: 1,
       }));
 
-      if (scanResult.Items && scanResult.Items.length > 0) {
+      if (queryResult.Items && queryResult.Items.length > 0) {
         console.log('Found user by email in DynamoDB');
-        return { user: scanResult.Items[0] as EnhancedUser, source: 'dynamodb' };
+        return { user: queryResult.Items[0] as EnhancedUser, source: 'dynamodb' };
       }
     } catch (error) {
-      console.warn('Error scanning for user by email:', error);
+      console.warn('Error querying for user by email:', error);
     }
   }
 
@@ -1613,15 +1697,15 @@ async function findUserForDeletion(userId: string): Promise<{
             UserPoolId: USER_POOL_ID,
             Username: cognitoUsername,
           }));
-          cognitoGroups = (groupsResult.Groups || []).map(g => g.GroupName || '').filter(Boolean);
+          cognitoGroups = (groupsResult.Groups || []).map((g: GroupType) => g.GroupName || '').filter(Boolean);
         } catch (groupError) {
           console.warn('Failed to get Cognito groups:', groupError);
         }
 
         // Create a synthetic EnhancedUser from Cognito data
-        const email = cognitoUser.UserAttributes?.find(a => a.Name === 'email')?.Value || cognitoUsername;
-        const givenName = cognitoUser.UserAttributes?.find(a => a.Name === 'given_name')?.Value || '';
-        const familyName = cognitoUser.UserAttributes?.find(a => a.Name === 'family_name')?.Value || '';
+        const email = cognitoUser.UserAttributes?.find((a: AttributeType) => a.Name === 'email')?.Value || cognitoUsername;
+        const givenName = cognitoUser.UserAttributes?.find((a: AttributeType) => a.Name === 'given_name')?.Value || '';
+        const familyName = cognitoUser.UserAttributes?.find((a: AttributeType) => a.Name === 'family_name')?.Value || '';
         const name = `${givenName} ${familyName}`.trim() || email.split('@')[0];
         
         // Check if user is admin (in workstation-admin group)
@@ -1669,18 +1753,26 @@ async function getDeletionPreview(userId: string, currentUserId: string): Promis
     // Get group memberships from DynamoDB
     const groupMemberships = source === 'dynamodb' ? await getUserGroups(user.id) : [];
 
-    // Get audit log count for this user
+    // Get audit log count for this user. The OR condition on the filter
+    // isn't indexable, so this stays a Scan - but it must follow
+    // LastEvaluatedKey and accumulate Count across every page.
     let auditLogCount = 0;
     try {
-      const auditScanResult = await docClient.send(new ScanCommand({
-        TableName: AUDIT_TABLE,
-        FilterExpression: 'userId = :userId OR resourceId = :userId',
-        ExpressionAttributeValues: {
-          ':userId': user.id,
-        },
-        Select: 'COUNT',
-      }));
-      auditLogCount = auditScanResult.Count || 0;
+      let lastKey: Record<string, any> | undefined;
+      let pages = 0;
+      do {
+        const auditScanResult = await docClient.send(new ScanCommand({
+          TableName: AUDIT_TABLE,
+          FilterExpression: 'userId = :userId OR resourceId = :userId',
+          ExpressionAttributeValues: {
+            ':userId': user.id,
+          },
+          Select: 'COUNT',
+          ExclusiveStartKey: lastKey,
+        }));
+        auditLogCount += auditScanResult.Count || 0;
+        lastKey = auditScanResult.LastEvaluatedKey;
+      } while (lastKey && ++pages < 100);
     } catch (error) {
       console.warn('Error getting audit logs:', error);
     }
@@ -1695,15 +1787,15 @@ async function getDeletionPreview(userId: string, currentUserId: string): Promis
     if (isAdmin) {
       // Check DynamoDB admins
       try {
-        const usersResult = await docClient.send(new ScanCommand({
+        const usersItems = await docScanAll(docClient, {
           TableName: USERS_TABLE,
           FilterExpression: 'contains(roleIds, :admin) OR contains(directPermissions, :fullAccess)',
           ExpressionAttributeValues: {
             ':admin': 'admin',
             ':fullAccess': 'admin:full-access',
           },
-        }));
-        adminCount = (usersResult.Items || []).filter(u => u.status === 'active').length;
+        });
+        adminCount = usersItems.filter((u: Record<string, any>) => u.status === 'active').length;
       } catch (error) {
         console.warn('Error counting admins:', error);
       }
@@ -1809,7 +1901,8 @@ async function getCurrentUserEmail(userId: string): Promise<string | null> {
 // Soft delete user - disable account but preserve data
 async function softDeleteUser(userId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { reason, notes, notifyUser = false, retentionDays = 90 } = body;
 
     // Validate not deleting self
@@ -1835,7 +1928,7 @@ async function softDeleteUser(userId: string, event: APIGatewayProxyEvent, curre
                     user.directPermissions?.includes('admin:full-access');
     
     if (isAdmin) {
-      const usersResult = await docClient.send(new ScanCommand({
+      const usersItems = await docScanAll(docClient, {
         TableName: USERS_TABLE,
         FilterExpression: '(contains(roleIds, :admin) OR contains(directPermissions, :fullAccess)) AND #status = :active',
         ExpressionAttributeNames: {
@@ -1846,9 +1939,9 @@ async function softDeleteUser(userId: string, event: APIGatewayProxyEvent, curre
           ':fullAccess': 'admin:full-access',
           ':active': 'active',
         },
-      }));
-      
-      const activeAdmins = (usersResult.Items || []).filter(u => u.id !== userId);
+      });
+
+      const activeAdmins = usersItems.filter((u: Record<string, any>) => u.id !== userId);
       if (activeAdmins.length === 0) {
         return createErrorResponse(400, 'Cannot delete the last administrator', { code: 'LAST_ADMIN' });
       }
@@ -1900,10 +1993,18 @@ async function softDeleteUser(userId: string, event: APIGatewayProxyEvent, curre
       user.deletionReason = reason;
       user.updatedAt = now;
 
-      await docClient.send(new PutCommand({
-        TableName: USERS_TABLE,
-        Item: user,
-      }));
+      try {
+        await docClient.send(new PutCommand({
+          TableName: USERS_TABLE,
+          Item: user,
+          ConditionExpression: 'attribute_exists(id)',
+        }));
+      } catch (conditionError: any) {
+        if (conditionError.name === 'ConditionalCheckFailedException') {
+          return createErrorResponse(404, 'User not found');
+        }
+        throw conditionError;
+      }
     }
 
     // Disable user in Cognito
@@ -1981,7 +2082,8 @@ async function softDeleteUser(userId: string, event: APIGatewayProxyEvent, curre
 // Hard delete user - permanently remove all data
 async function hardDeleteUser(userId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { confirmationEmail, reason, acknowledgements } = body;
 
     // Validate acknowledgements
@@ -2014,7 +2116,7 @@ async function hardDeleteUser(userId: string, event: APIGatewayProxyEvent, curre
     
     if (isAdmin) {
       // Count DynamoDB admins
-      const usersResult = await docClient.send(new ScanCommand({
+      const usersItems = await docScanAll(docClient, {
         TableName: USERS_TABLE,
         FilterExpression: '(contains(roleIds, :admin) OR contains(directPermissions, :fullAccess)) AND #status = :active',
         ExpressionAttributeNames: {
@@ -2025,9 +2127,9 @@ async function hardDeleteUser(userId: string, event: APIGatewayProxyEvent, curre
           ':fullAccess': 'admin:full-access',
           ':active': 'active',
         },
-      }));
-      
-      const activeAdmins = (usersResult.Items || []).filter(u => u.id !== userId && u.email !== userId);
+      });
+
+      const activeAdmins = usersItems.filter((u: Record<string, any>) => u.id !== userId && u.email !== userId);
       // If Cognito-only admin with no DynamoDB admins, allow only if there are other Cognito admins
       if (activeAdmins.length === 0 && source === 'cognito') {
         // TODO: Could check Cognito workstation-admin group for other admins
@@ -2125,7 +2227,8 @@ async function hardDeleteUser(userId: string, event: APIGatewayProxyEvent, curre
 // Restore soft-deleted user
 async function restoreUser(userId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const { restoreGroupMemberships = true, notifyUser = true } = body;
 
     // Get user data
@@ -2167,10 +2270,18 @@ async function restoreUser(userId: string, event: APIGatewayProxyEvent, currentU
     user.deletionReason = undefined;
     user.updatedAt = now;
 
-    await docClient.send(new PutCommand({
-      TableName: USERS_TABLE,
-      Item: user,
-    }));
+    try {
+      await docClient.send(new PutCommand({
+        TableName: USERS_TABLE,
+        Item: user,
+        ConditionExpression: 'attribute_exists(id)',
+      }));
+    } catch (conditionError: any) {
+      if (conditionError.name === 'ConditionalCheckFailedException') {
+        return createErrorResponse(404, 'User not found');
+      }
+      throw conditionError;
+    }
 
     // Enable user in Cognito
     let cognitoEnabled = false;
@@ -2247,7 +2358,8 @@ async function restoreUser(userId: string, event: APIGatewayProxyEvent, currentU
 // Set user password
 async function setUserPassword(userId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const {
       password,
       forceChangeOnLogin = true,
@@ -2295,11 +2407,7 @@ async function setUserPassword(userId: string, event: APIGatewayProxyEvent, curr
         Permanent: !temporary,
       }));
     } catch (cognitoError: any) {
-      console.error('Failed to set Cognito password:', cognitoError);
-      return createErrorResponse(500, 'Failed to update password in authentication system', {
-        code: 'COGNITO_ERROR',
-        error: cognitoError.message
-      });
+      return createErrorResponse(500, 'Failed to update password in authentication system', cognitoError);
     }
 
     const now = new Date().toISOString();
@@ -2394,7 +2502,8 @@ async function setUserPassword(userId: string, event: APIGatewayProxyEvent, curr
 // Generate temporary password for user
 async function generateUserPassword(userId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
   try {
-    const body = JSON.parse(event.body || '{}');
+    const { body, response: invalidBody } = parseBody(event);
+    if (invalidBody) return invalidBody;
     const {
       expiresIn = '24h',
       length = 16,
@@ -2428,11 +2537,7 @@ async function generateUserPassword(userId: string, event: APIGatewayProxyEvent,
         Permanent: false, // Temporary password
       }));
     } catch (cognitoError: any) {
-      console.error('Failed to set Cognito password:', cognitoError);
-      return createErrorResponse(500, 'Failed to update password in authentication system', {
-        code: 'COGNITO_ERROR',
-        error: cognitoError.message
-      });
+      return createErrorResponse(500, 'Failed to update password in authentication system', cognitoError);
     }
 
     const now = new Date().toISOString();

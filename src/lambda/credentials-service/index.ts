@@ -3,6 +3,8 @@ import { SecretsManagerClient, GetSecretValueCommand, CreateSecretCommand, PutSe
 import { DynamoDBClient, GetItemCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { SSMClient, SendCommandCommand, GetCommandInvocationCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+import { corsHeaders } from '../shared/http';
+import { isAdmin } from '../shared/auth';
 import { logEvent } from '../shared/logging';
 
 // Initialize AWS clients
@@ -39,18 +41,15 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
   try {
     const { httpMethod, pathParameters, requestContext } = event;
     const userId = requestContext.authorizer?.claims?.email || 'unknown';
-    const userGroups = requestContext.authorizer?.claims?.['cognito:groups']?.split(',') || [];
-    const isAdmin = userGroups.includes('workstation-admin');
+    // Cognito authorizer claims may arrive as an array, a comma-joined
+    // string, or a single group name — getGroups()/isAdmin() handle all
+    // three; a bare `.split(',')` throws when the claim is an array.
+    const isAdminUser = isAdmin(event);
 
     if (!pathParameters?.workstationId) {
       return {
         statusCode: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-          'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
-        },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Workstation ID required' }),
       };
     }
@@ -59,31 +58,36 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
 
     switch (httpMethod) {
       case 'GET':
-        return await getWorkstationCredentials(workstationId, userId, isAdmin);
-      
-      case 'POST':
+        return await getWorkstationCredentials(workstationId, userId, isAdminUser);
+
+      case 'POST': {
         // Trigger domain join or credential reset
-        const action = JSON.parse(event.body || '{}').action;
+        let action: string | undefined;
+        try {
+          action = JSON.parse(event.body || '{}').action;
+        } catch {
+          return {
+            statusCode: 400,
+            headers: corsHeaders(),
+            body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+          };
+        }
         if (action === 'domain-join') {
-          return await initiateDomainJoin(workstationId, userId, isAdmin);
+          return await initiateDomainJoin(workstationId, userId, isAdminUser);
         } else if (action === 'reset-password') {
-          return await resetLocalAdminPassword(workstationId, userId, isAdmin);
+          return await resetLocalAdminPassword(workstationId, userId, isAdminUser);
         }
         break;
-      
+      }
+
       case 'DELETE':
         // Revoke/delete credentials
-        return await revokeCredentials(workstationId, userId, isAdmin);
+        return await revokeCredentials(workstationId, userId, isAdminUser);
     }
 
     return {
       statusCode: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
-      },
+      headers: corsHeaders(),
       body: JSON.stringify({ message: 'Invalid request' }),
     };
 
@@ -91,16 +95,8 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
     console.error('Error:', error);
     return {
       statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Internal server error',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
+      headers: corsHeaders(),
+      body: JSON.stringify({ message: 'Internal server error' }),
     };
   }
 };
@@ -121,12 +117,7 @@ async function getWorkstationCredentials(workstationId: string, userId: string, 
     if (!result.Item) {
       return {
         statusCode: 404,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-          'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
-        },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Workstation not found' }),
       };
     }
@@ -137,12 +128,7 @@ async function getWorkstationCredentials(workstationId: string, userId: string, 
     if (!isAdmin && workstation.userId !== userId) {
       return {
         statusCode: 403,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-          'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
-        },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Access denied' }),
       };
     }
@@ -151,12 +137,7 @@ async function getWorkstationCredentials(workstationId: string, userId: string, 
     if (workstation.status !== 'running') {
       return {
         statusCode: 400,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-          'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
-        },
+        headers: corsHeaders(),
         body: JSON.stringify({
           message: 'Workstation must be running to retrieve credentials',
           status: workstation.status
@@ -177,13 +158,7 @@ async function getWorkstationCredentials(workstationId: string, userId: string, 
 
     return {
       statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
-      },
+      headers: { ...corsHeaders(), 'Cache-Control': 'no-cache, no-store, must-revalidate' },
       body: JSON.stringify(credentialsResponse),
     };
 
@@ -191,16 +166,8 @@ async function getWorkstationCredentials(workstationId: string, userId: string, 
     console.error('Error getting credentials:', error);
     return {
       statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Failed to get credentials',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
+      headers: corsHeaders(),
+      body: JSON.stringify({ message: 'Failed to get credentials' }),
     };
   }
 }
@@ -276,7 +243,7 @@ async function initiateDomainJoin(workstationId: string, userId: string, isAdmin
     if (!result.Item) {
       return {
         statusCode: 404,
-        headers: { 'Content-Type': 'application/json' },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Workstation not found' }),
       };
     }
@@ -287,7 +254,7 @@ async function initiateDomainJoin(workstationId: string, userId: string, isAdmin
     if (!isAdmin && workstation.userId !== userId) {
       return {
         statusCode: 403,
-        headers: { 'Content-Type': 'application/json' },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Access denied' }),
       };
     }
@@ -296,7 +263,7 @@ async function initiateDomainJoin(workstationId: string, userId: string, isAdmin
     if (workstation.authMethod !== 'domain') {
       return {
         statusCode: 400,
-        headers: { 'Content-Type': 'application/json' },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Workstation not configured for domain join' }),
       };
     }
@@ -317,7 +284,10 @@ async function initiateDomainJoin(workstationId: string, userId: string, isAdmin
     const commandResult = await ssmClient.send(sendCommandRequest);
     const commandId = commandResult.Command?.CommandId;
 
-    // Update workstation status
+    // Update workstation status. The conditional guards against the
+    // workstation record disappearing between the GetItem above and this
+    // update: without it, a concurrent delete would let this silently
+    // recreate a phantom item.
     const updateCommand = new UpdateItemCommand({
       TableName: WORKSTATIONS_TABLE,
       Key: marshall({
@@ -325,6 +295,7 @@ async function initiateDomainJoin(workstationId: string, userId: string, isAdmin
         SK: 'METADATA',
       }),
       UpdateExpression: 'SET domainJoinStatus = :status, domainJoinCommandId = :commandId, updatedAt = :timestamp',
+      ConditionExpression: 'attribute_exists(PK)',
       ExpressionAttributeValues: marshall({
         ':status': 'in-progress',
         ':commandId': commandId,
@@ -332,11 +303,22 @@ async function initiateDomainJoin(workstationId: string, userId: string, isAdmin
       }),
     });
 
-    await dynamoClient.send(updateCommand);
+    try {
+      await dynamoClient.send(updateCommand);
+    } catch (updateError: any) {
+      if (updateError?.name === 'ConditionalCheckFailedException') {
+        return {
+          statusCode: 404,
+          headers: corsHeaders(),
+          body: JSON.stringify({ message: 'Workstation not found' }),
+        };
+      }
+      throw updateError;
+    }
 
     return {
       statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: corsHeaders(),
       body: JSON.stringify({
         message: 'Domain join initiated',
         commandId,
@@ -348,11 +330,8 @@ async function initiateDomainJoin(workstationId: string, userId: string, isAdmin
     console.error('Error initiating domain join:', error);
     return {
       statusCode: 500,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        message: 'Failed to initiate domain join',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
+      headers: corsHeaders(),
+      body: JSON.stringify({ message: 'Failed to initiate domain join' }),
     };
   }
 }
@@ -373,7 +352,7 @@ async function resetLocalAdminPassword(workstationId: string, userId: string, is
     if (!result.Item) {
       return {
         statusCode: 404,
-        headers: { 'Content-Type': 'application/json' },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Workstation not found' }),
       };
     }
@@ -384,7 +363,7 @@ async function resetLocalAdminPassword(workstationId: string, userId: string, is
     if (!isAdmin && workstation.userId !== userId) {
       return {
         statusCode: 403,
-        headers: { 'Content-Type': 'application/json' },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Access denied' }),
       };
     }
@@ -393,7 +372,7 @@ async function resetLocalAdminPassword(workstationId: string, userId: string, is
     if (workstation.authMethod !== 'local') {
       return {
         statusCode: 400,
-        headers: { 'Content-Type': 'application/json' },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Workstation not configured for local authentication' }),
       };
     }
@@ -433,7 +412,7 @@ async function resetLocalAdminPassword(workstationId: string, userId: string, is
 
     return {
       statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: corsHeaders(),
       body: JSON.stringify({
         message: 'Password reset initiated',
         commandId: commandResult.Command?.CommandId,
@@ -445,11 +424,8 @@ async function resetLocalAdminPassword(workstationId: string, userId: string, is
     console.error('Error resetting password:', error);
     return {
       statusCode: 500,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        message: 'Failed to reset password',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
+      headers: corsHeaders(),
+      body: JSON.stringify({ message: 'Failed to reset password' }),
     };
   }
 }
@@ -470,7 +446,7 @@ async function revokeCredentials(workstationId: string, userId: string, isAdmin:
     if (!result.Item) {
       return {
         statusCode: 404,
-        headers: { 'Content-Type': 'application/json' },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Workstation not found' }),
       };
     }
@@ -481,7 +457,7 @@ async function revokeCredentials(workstationId: string, userId: string, isAdmin:
     if (!isAdmin) {
       return {
         statusCode: 403,
-        headers: { 'Content-Type': 'application/json' },
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Access denied - admin required' }),
       };
     }
@@ -501,7 +477,8 @@ async function revokeCredentials(workstationId: string, userId: string, isAdmin:
       }
     }
 
-    // Update workstation record
+    // Update workstation record. Conditional guards against the record
+    // disappearing between the GetItem above and this update.
     const updateCommand = new UpdateItemCommand({
       TableName: WORKSTATIONS_TABLE,
       Key: marshall({
@@ -509,17 +486,29 @@ async function revokeCredentials(workstationId: string, userId: string, isAdmin:
         SK: 'METADATA',
       }),
       UpdateExpression: 'REMOVE credentialsSecretArn SET credentialsRevoked = :revoked, updatedAt = :timestamp',
+      ConditionExpression: 'attribute_exists(PK)',
       ExpressionAttributeValues: marshall({
         ':revoked': true,
         ':timestamp': new Date().toISOString(),
       }),
     });
 
-    await dynamoClient.send(updateCommand);
+    try {
+      await dynamoClient.send(updateCommand);
+    } catch (updateError: any) {
+      if (updateError?.name === 'ConditionalCheckFailedException') {
+        return {
+          statusCode: 404,
+          headers: corsHeaders(),
+          body: JSON.stringify({ message: 'Workstation not found' }),
+        };
+      }
+      throw updateError;
+    }
 
     return {
       statusCode: 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: corsHeaders(),
       body: JSON.stringify({ message: 'Credentials revoked successfully' }),
     };
 
@@ -527,11 +516,8 @@ async function revokeCredentials(workstationId: string, userId: string, isAdmin:
     console.error('Error revoking credentials:', error);
     return {
       statusCode: 500,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ 
-        message: 'Failed to revoke credentials',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
+      headers: corsHeaders(),
+      body: JSON.stringify({ message: 'Failed to revoke credentials' }),
     };
   }
 }

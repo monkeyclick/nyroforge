@@ -11,11 +11,12 @@ import {
   ModifyInstanceAttributeCommand,
   IpPermission
 } from '@aws-sdk/client-ec2';
-import { DynamoDBClient, GetItemCommand, PutItemCommand, UpdateItemCommand, ScanCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, GetItemCommand, PutItemCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
 import { isValidCidr } from '../shared/validation';
 import { errorResponse } from '../shared/http';
+import { scanAllItems } from '../shared/dynamo';
 import { logEvent } from '../shared/logging';
 
 // Reject rules broader than this prefix length (e.g. 0.0.0.0/0 or /7).
@@ -24,6 +25,20 @@ const ALLOWED_PROTOCOLS = ['tcp', 'udp', 'icmp'];
 
 function validationError(message: string): APIGatewayProxyResult {
   return errorResponse(400, message);
+}
+
+/**
+ * Parse a request body, mapping malformed JSON to a client 400 instead of
+ * letting it fall into the generic 500 handler.
+ */
+function parseJsonBody(
+  body: string | null
+): { data: any; invalid?: undefined } | { data?: undefined; invalid: APIGatewayProxyResult } {
+  try {
+    return { data: JSON.parse(body || '{}') };
+  } catch {
+    return { invalid: errorResponse(400, 'Request body is not valid JSON') };
+  }
 }
 
 const ec2Client = new EC2Client({});
@@ -203,15 +218,17 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
               body: JSON.stringify({ message: 'Insufficient permissions to manage security groups' }),
             };
           }
-          const attachRequest = JSON.parse(body || '{}');
-          return await attachSecurityGroupToWorkstation(attachRequest, userId);
+          const attachParsed = parseJsonBody(body);
+          if (attachParsed.invalid) return attachParsed.invalid;
+          return await attachSecurityGroupToWorkstation(attachParsed.data, userId);
         } else if (event.path.includes('/allow-my-ip')) {
           // Add user's IP to workstation security group.
           // Intentionally NOT gated on security:manage — regular users may
           // whitelist their own IP; allowMyIpToWorkstation enforces
           // ownership-or-admin internally.
-          const allowMyIpRequest = JSON.parse(body || '{}');
-          return await allowMyIpToWorkstation(allowMyIpRequest, userId, event);
+          const allowMyIpParsed = parseJsonBody(body);
+          if (allowMyIpParsed.invalid) return allowMyIpParsed.invalid;
+          return await allowMyIpToWorkstation(allowMyIpParsed.data, userId, event);
         } else if (event.path.includes('/add-rule')) {
           // Add ingress rule
           if (!(await hasPermission(userId, 'security:manage'))) {
@@ -221,8 +238,9 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
               body: JSON.stringify({ message: 'Insufficient permissions to manage security groups' }),
             };
           }
-          const addRequest = JSON.parse(body || '{}');
-          return await addSecurityGroupRule(addRequest, userId);
+          const addParsed = parseJsonBody(body);
+          if (addParsed.invalid) return addParsed.invalid;
+          return await addSecurityGroupRule(addParsed.data, userId);
         } else {
           // Create new security group
           if (!(await hasPermission(userId, 'security:manage'))) {
@@ -232,8 +250,9 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
               body: JSON.stringify({ message: 'Insufficient permissions to create security groups' }),
             };
           }
-          const createRequest = JSON.parse(body || '{}');
-          return await createSecurityGroup(createRequest, userId);
+          const createParsed = parseJsonBody(body);
+          if (createParsed.invalid) return createParsed.invalid;
+          return await createSecurityGroup(createParsed.data, userId);
         }
 
       case 'DELETE':
@@ -246,8 +265,9 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
               body: JSON.stringify({ message: 'Insufficient permissions to manage security groups' }),
             };
           }
-          const removeRequest = JSON.parse(body || '{}');
-          return await removeSecurityGroupRule(removeRequest, userId);
+          const removeParsed = parseJsonBody(body);
+          if (removeParsed.invalid) return removeParsed.invalid;
+          return await removeSecurityGroupRule(removeParsed.data, userId);
         } else if (pathParameters?.groupId) {
           // Delete security group
           if (!(await hasPermission(userId, 'security:manage'))) {
@@ -334,8 +354,7 @@ async function listSecurityGroups(userId: string): Promise<APIGatewayProxyResult
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to list security groups',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to list security groups'
       }),
     };
   }
@@ -427,8 +446,7 @@ async function getSecurityGroup(groupId: string, userId: string): Promise<APIGat
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to get security group',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to get security group'
       }),
     };
   }
@@ -523,8 +541,7 @@ async function addSecurityGroupRule(request: {
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to add security group rule',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to add security group rule'
       }),
     };
   }
@@ -582,8 +599,7 @@ async function removeSecurityGroupRule(request: {
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to remove security group rule',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to remove security group rule'
       }),
     };
   }
@@ -641,8 +657,7 @@ async function createSecurityGroup(request: {
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to create security group',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to create security group'
       }),
     };
   }
@@ -681,8 +696,7 @@ async function deleteSecurityGroup(groupId: string, userId: string): Promise<API
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to delete security group',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to delete security group'
       }),
     };
   }
@@ -698,42 +712,47 @@ async function getWorkstationsForSecurityGroup(groupId: string, userId: string):
     });
     await ec2Client.send(sgCommand);
     
-    // Scan DynamoDB for workstations using this security group
-    const scanCommand = new ScanCommand({
+    // Scan DynamoDB for workstations using this security group (paginated:
+    // a single Scan page is capped at 1 MB, so follow LastEvaluatedKey)
+    const items = await scanAllItems(dynamoClient, {
       TableName: WORKSTATIONS_TABLE,
       FilterExpression: 'securityGroupId = :groupId',
       ExpressionAttributeValues: marshall({
         ':groupId': groupId,
       }),
     });
-    
-    const result = await dynamoClient.send(scanCommand);
-    const workstations = (result.Items || []).map(item => {
-      const ws = unmarshall(item);
-      return {
-        workstationId: ws.PK?.replace('WORKSTATION#', '') || ws.workstationId,
-        instanceId: ws.instanceId,
-        userId: ws.userId,
-        status: ws.status,
-        instanceType: ws.instanceType,
-        region: ws.region,
-        publicIp: ws.publicIp,
-      };
-    });
-    
-    // Also get instances from EC2 to ensure we have current data
-    const describeCommand = new DescribeInstancesCommand({
-      Filters: [
-        { Name: 'instance.group-id', Values: [groupId] },
-        { Name: 'instance-state-name', Values: ['pending', 'running', 'stopping', 'stopped'] },
-      ],
-    });
-    
-    const ec2Result = await ec2Client.send(describeCommand);
-    const ec2Instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
-    
+
+    const workstations = items.map(ws => ({
+      workstationId: ws.PK?.replace('WORKSTATION#', '') || ws.workstationId,
+      instanceId: ws.instanceId,
+      userId: ws.userId,
+      status: ws.status,
+      instanceType: ws.instanceType,
+      region: ws.region,
+      publicIp: ws.publicIp,
+    }));
+
+    // Also get instances from EC2 to ensure we have current data,
+    // following NextToken so instances beyond the first page are counted.
+    let ec2InstanceCount = 0;
+    let nextToken: string | undefined;
+    do {
+      const ec2Result = await ec2Client.send(new DescribeInstancesCommand({
+        Filters: [
+          { Name: 'instance.group-id', Values: [groupId] },
+          { Name: 'instance-state-name', Values: ['pending', 'running', 'stopping', 'stopped'] },
+        ],
+        NextToken: nextToken,
+      }));
+      ec2InstanceCount += ec2Result.Reservations?.reduce(
+        (count, r) => count + (r.Instances?.length || 0),
+        0
+      ) || 0;
+      nextToken = ec2Result.NextToken;
+    } while (nextToken);
+
     await logAuditEvent(userId, 'LIST_WORKSTATIONS_FOR_SG', 'security-group', groupId);
-    
+
     return {
       statusCode: 200,
       headers: {
@@ -745,7 +764,7 @@ async function getWorkstationsForSecurityGroup(groupId: string, userId: string):
       body: JSON.stringify({
         securityGroupId: groupId,
         workstations,
-        ec2InstanceCount: ec2Instances.length,
+        ec2InstanceCount,
       }),
     };
   } catch (error) {
@@ -759,8 +778,7 @@ async function getWorkstationsForSecurityGroup(groupId: string, userId: string):
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to get workstations for security group',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to get workstations for security group'
       }),
     };
   }
@@ -846,7 +864,9 @@ async function attachSecurityGroupToWorkstation(request: {
     
     await ec2Client.send(modifyCommand);
     
-    // Update DynamoDB record
+    // Update DynamoDB record. The conditional guards against the workstation
+    // record disappearing between the GetItem above and this update: without
+    // it, the update would silently create a phantom item.
     const updateCommand = new UpdateItemCommand({
       TableName: WORKSTATIONS_TABLE,
       Key: marshall({
@@ -854,13 +874,30 @@ async function attachSecurityGroupToWorkstation(request: {
         SK: 'METADATA',
       }),
       UpdateExpression: 'SET securityGroupId = :sgId, updatedAt = :timestamp',
+      ConditionExpression: 'attribute_exists(PK)',
       ExpressionAttributeValues: marshall({
         ':sgId': securityGroupId,
         ':timestamp': new Date().toISOString(),
       }),
     });
-    
-    await dynamoClient.send(updateCommand);
+
+    try {
+      await dynamoClient.send(updateCommand);
+    } catch (updateError: any) {
+      if (updateError?.name === 'ConditionalCheckFailedException') {
+        return {
+          statusCode: 404,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
+          },
+          body: JSON.stringify({ message: 'Workstation not found' }),
+        };
+      }
+      throw updateError;
+    }
     
     await logAuditEvent(userId, 'ATTACH_SECURITY_GROUP', 'workstation', workstationId, {
       securityGroupId,
@@ -893,8 +930,7 @@ async function attachSecurityGroupToWorkstation(request: {
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to attach security group to workstation',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to attach security group to workstation'
       }),
     };
   }
@@ -1054,8 +1090,7 @@ async function allowMyIpToWorkstation(request: {
         'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
       },
       body: JSON.stringify({
-        message: 'Failed to whitelist your IP address',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to whitelist your IP address'
       }),
     };
   }

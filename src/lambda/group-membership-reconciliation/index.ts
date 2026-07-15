@@ -1,13 +1,13 @@
 import { ScheduledEvent } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { 
-  DynamoDBDocumentClient, 
-  QueryCommand, 
+import {
+  DynamoDBDocumentClient,
   ScanCommand,
-  PutCommand, 
+  PutCommand,
   DeleteCommand,
   BatchWriteCommand
 } from '@aws-sdk/lib-dynamodb';
+import { docQueryAll } from '../shared/dynamo';
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -157,7 +157,7 @@ export const handler = async (event: ScheduledEvent): Promise<ReconciliationResu
  */
 async function getDynamicGroups(): Promise<Group[]> {
   try {
-    const response = await docClient.send(new QueryCommand({
+    const items = await docQueryAll(docClient, {
       TableName: GROUPS_TABLE,
       IndexName: 'MembershipTypeIndex',
       KeyConditionExpression: 'membershipType = :type',
@@ -166,9 +166,9 @@ async function getDynamicGroups(): Promise<Group[]> {
         ':type': 'dynamic',
         ':active': true
       }
-    }));
+    });
 
-    return response.Items as Group[] || [];
+    return items as Group[];
   } catch (error) {
     console.error('Error fetching dynamic groups', { error });
     throw error;
@@ -289,16 +289,16 @@ async function reconcileGroup(group: Group, users: User[]): Promise<{ added: num
  */
 async function getGroupMembers(groupId: string): Promise<GroupMembership[]> {
   try {
-    const response = await docClient.send(new QueryCommand({
+    const items = await docQueryAll(docClient, {
       TableName: MEMBERSHIPS_TABLE,
       IndexName: 'GroupMembersIndex',
       KeyConditionExpression: 'groupId = :groupId',
       ExpressionAttributeValues: {
         ':groupId': groupId
       }
-    }));
+    });
 
-    return response.Items as GroupMembership[] || [];
+    return items as GroupMembership[];
   } catch (error) {
     console.error('Error fetching group members', { groupId, error });
     return [];

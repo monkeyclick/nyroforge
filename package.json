@@ -9,6 +9,7 @@
     "build:lambdas": "node scripts/build-lambdas.js",
     "prebuild": "npm run build:lambdas",
     "watch": "tsc -w",
+    "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
     "cdk": "cdk",
@@ -20,9 +21,11 @@
     "format": "prettier --write ."
   },
   "devDependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1088.0",
     "@aws-sdk/client-efs": "^3.1078.0",
     "@aws-sdk/client-fsx": "^3.1078.0",
     "@aws-sdk/client-s3": "^3.1078.0",
+    "@aws-sdk/client-ses": "^3.1088.0",
     "@aws-sdk/s3-request-presigner": "^3.1078.0",
     "@types/aws-lambda": "^8.10.130",
     "@types/jest": "^29.5.11",

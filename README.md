@@ -125,7 +125,7 @@ cdk bootstrap
 cdk deploy --all --outputs-file cdk-outputs.json
 
 # 4. Create admin user
-USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructureStack.UserPoolId')
+USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructure.UserPoolId')
 ADMIN_PASSWORD=$(openssl rand -base64 16 | tr -d '+/=' | head -c 16)'!A1'
 aws cognito-idp admin-create-user \
   --user-pool-id $USER_POOL_ID \

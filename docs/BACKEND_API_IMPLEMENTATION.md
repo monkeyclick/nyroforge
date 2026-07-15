@@ -456,7 +456,7 @@ npm run build
 
 ### CDK Deploy
 ```bash
-cdk deploy WorkstationApiStack
+cdk deploy WorkstationApi
 ```
 
 The Lambda will be automatically:

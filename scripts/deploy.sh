@@ -94,12 +94,26 @@ cdk deploy WorkstationInfrastructure --require-approval never || {
 }
 print_success "Infrastructure stack deployed"
 
+print_status "Deploying storage stack..."
+cdk deploy WorkstationStorage --require-approval never || {
+    print_error "Storage deployment failed"
+    exit 1
+}
+print_success "Storage stack deployed"
+
 print_status "Deploying API stack..."
 cdk deploy WorkstationApi --require-approval never || {
     print_error "API deployment failed"
     exit 1
 }
 print_success "API stack deployed"
+
+print_status "Deploying admin API stack..."
+cdk deploy WorkstationAdminApi --require-approval never || {
+    print_error "Admin API deployment failed"
+    exit 1
+}
+print_success "Admin API stack deployed"
 
 print_status "Deploying frontend stack..."
 cdk deploy WorkstationFrontend --require-approval never || {

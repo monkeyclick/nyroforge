@@ -91,6 +91,15 @@ aws cloudformation describe-stacks \
   --stack-name WorkstationInfrastructure
 ```
 
+### Step 4a: Deploy Storage Stack
+
+```bash
+# Deploy the S3 transfer bucket and EFS/FSx storage (depends on Infrastructure)
+cdk deploy WorkstationStorage \
+  --require-approval never \
+  --outputs-file storage-outputs.json
+```
+
 ### Step 5: Deploy API Stack
 
 ```bash
@@ -106,6 +115,15 @@ API_ENDPOINT=$(aws cloudformation describe-stacks \
   --output text)
 
 curl "${API_ENDPOINT}health"
+```
+
+### Step 5a: Deploy Admin API Stack
+
+```bash
+# Deploy admin-only services (user/group/role management, security groups, storage admin)
+cdk deploy WorkstationAdminApi \
+  --require-approval never \
+  --outputs-file admin-api-outputs.json
 ```
 
 ### Step 6: Deploy Frontend Stack
@@ -301,7 +319,9 @@ aws cloudwatch put-dashboard \
    ```bash
    # Deploy stacks in order
    cdk deploy WorkstationInfrastructure
+   cdk deploy WorkstationStorage
    cdk deploy WorkstationApi
+   cdk deploy WorkstationAdminApi
    cdk deploy WorkstationFrontend
    ```
 

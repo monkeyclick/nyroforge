@@ -396,7 +396,7 @@ Check which IAM action failed in the CloudFormation event log:
 
 ```bash
 aws cloudformation describe-stack-events \
-  --stack-name WorkstationInfrastructureStack \
+  --stack-name WorkstationInfrastructure \
   --region "$CDK_DEFAULT_REGION" \
   --query 'StackEvents[?ResourceStatus==`CREATE_FAILED`].[LogicalResourceId,ResourceStatusReason]' \
   --output table
@@ -476,7 +476,7 @@ Verify VPC endpoints are in place:
 
 ```bash
 VPC_ID=$(aws ec2 describe-vpcs \
-  --filters "Name=tag:aws:cloudformation:stack-name,Values=WorkstationInfrastructureStack" \
+  --filters "Name=tag:aws:cloudformation:stack-name,Values=WorkstationInfrastructure" \
   --query 'Vpcs[0].VpcId' \
   --output text \
   --region "$CDK_DEFAULT_REGION")

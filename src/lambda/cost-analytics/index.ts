@@ -1,8 +1,10 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
 import { CostExplorerClient, GetCostAndUsageCommand } from '@aws-sdk/client-cost-explorer';
-import { DynamoDBClient, PutItemCommand, QueryCommand, ScanCommand } from '@aws-sdk/client-dynamodb';
-import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
+import { marshall } from '@aws-sdk/util-dynamodb';
 import { logEvent } from '../shared/logging';
+import { jsonResponse } from '../shared/http';
+import { scanAllItems, queryAllItems } from '../shared/dynamo';
 
 // Initialize AWS clients
 const costExplorerClient = new CostExplorerClient({});
@@ -49,16 +51,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
 
     // Validate permissions
     if (targetUserId && !isAdmin) {
-      return {
-        statusCode: 403,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-          'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-        },
-        body: JSON.stringify({ message: 'Access denied' }),
-      };
+      return jsonResponse(403, { message: 'Access denied' });
     }
 
     const effectiveUserId = isAdmin ? (targetUserId || undefined) : userId;
@@ -67,19 +60,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
 
   } catch (error) {
     console.error('Error:', error);
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Internal server error',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
+    return jsonResponse(500, { message: 'Internal server error' });
   }
 };
 
@@ -128,33 +109,13 @@ async function getCostAnalytics(period: string, userId?: string, isAdmin: boolea
     // Cache the results in DynamoDB for faster subsequent requests
     await cacheCostData(userId || 'all', period, response);
 
-    return {
-      statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=300', // 5 minutes cache
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify(response),
-    };
+    return jsonResponse(200, response, {
+      'Cache-Control': 'public, max-age=300', // 5 minutes cache
+    });
 
   } catch (error) {
     console.error('Error getting cost analytics:', error);
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Failed to get cost analytics',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
+    return jsonResponse(500, { message: 'Failed to get cost analytics' });
   }
 }
 
@@ -227,41 +188,27 @@ async function getCostExplorerData(startDate: Date, endDate: Date, userId?: stri
 
 async function getWorkstationCostData(userId?: string, isAdmin: boolean = false): Promise<any[]> {
   try {
-    let command;
-
-    if (userId && !isAdmin) {
-      // User querying their own workstations
-      command = new QueryCommand({
+    if (userId) {
+      // A specific user's workstations (their own, or admin drilling into one
+      // user) — query the GSI, following every page.
+      return await queryAllItems(dynamoClient, {
         TableName: WORKSTATIONS_TABLE,
         IndexName: 'UserIdIndex',
         KeyConditionExpression: 'userId = :userId',
         ExpressionAttributeValues: marshall({
           ':userId': userId,
-        }),
-      });
-    } else if (userId && isAdmin) {
-      // Admin querying specific user's workstations
-      command = new QueryCommand({
-        TableName: WORKSTATIONS_TABLE,
-        IndexName: 'UserIdIndex',
-        KeyConditionExpression: 'userId = :userId',
-        ExpressionAttributeValues: marshall({
-          ':userId': userId,
-        }),
-      });
-    } else {
-      // Admin querying all workstations
-      command = new ScanCommand({
-        TableName: WORKSTATIONS_TABLE,
-        FilterExpression: 'begins_with(PK, :pk)',
-        ExpressionAttributeValues: marshall({
-          ':pk': 'WORKSTATION#',
         }),
       });
     }
 
-    const result = await dynamoClient.send(command);
-    return (result.Items || []).map(item => unmarshall(item));
+    // Admin querying all workstations — paginated scan
+    return await scanAllItems(dynamoClient, {
+      TableName: WORKSTATIONS_TABLE,
+      FilterExpression: 'begins_with(PK, :pk)',
+      ExpressionAttributeValues: marshall({
+        ':pk': 'WORKSTATION#',
+      }),
+    });
 
   } catch (error) {
     console.error('Failed to get workstation data:', error);

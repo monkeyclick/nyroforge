@@ -77,8 +77,14 @@ Deploy the CDK stacks in order:
 # Deploy infrastructure (DynamoDB tables, VPC, etc.)
 cdk deploy WorkstationInfrastructure
 
+# Deploy storage stack (S3 transfer bucket, EFS/FSx)
+cdk deploy WorkstationStorage
+
 # Deploy API stack (Lambda functions, API Gateway)
 cdk deploy WorkstationApi
+
+# Deploy admin API stack (admin-only Lambda functions, admin API Gateway)
+cdk deploy WorkstationAdminApi
 
 # Deploy frontend stack
 cdk deploy WorkstationFrontend

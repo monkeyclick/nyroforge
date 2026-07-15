@@ -9,9 +9,15 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
-import { DynamoEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
 import { PROJECT_TAG } from './constants';
+import { ServiceLambda } from './service-lambda';
 
 export interface WorkstationApiStackProps extends cdk.StackProps {
   vpc: ec2.IVpc;
@@ -52,6 +58,7 @@ export class WorkstationApiStack extends cdk.Stack {
     groupMembershipReconciliation: lambda.Function;
     groupPackageService: lambda.Function;
   };
+  private userAttributeChangeProcessorDlq!: sqs.Queue;
 
   constructor(scope: Construct, id: string, props: WorkstationApiStackProps) {
     super(scope, id, props);
@@ -71,38 +78,93 @@ export class WorkstationApiStack extends cdk.Stack {
     // Create EventBridge rule for auto-termination
     this.createAutoTerminationSchedule();
 
+    // Alarms on the event-driven Lambdas' DLQs and error rates — previously
+    // a failed auto-termination sweep, stream batch, or reconciliation run
+    // just vanished into CloudWatch Logs with nobody notified.
+    this.createMonitoring();
+
     // Output API endpoint
     this.createOutputs();
   }
 
+  private alarmTopic?: sns.Topic;
+
+  /** Lazily-created SNS topic that every operational alarm publishes to. */
+  private getAlarmTopic(): sns.Topic {
+    if (!this.alarmTopic) {
+      this.alarmTopic = new sns.Topic(this, 'OperationalAlarmTopic', {
+        topicName: 'MediaWorkstation-OperationalAlarms',
+        displayName: 'NyroForge operational alarms',
+      });
+      const alarmEmail = this.node.tryGetContext('alarmEmail') as string | undefined;
+      if (alarmEmail) {
+        this.alarmTopic.addSubscription(new snsSubscriptions.EmailSubscription(alarmEmail));
+      }
+      new cdk.CfnOutput(this, 'OperationalAlarmTopicArn', {
+        value: this.alarmTopic.topicArn,
+        description: 'SNS topic ARN for operational alarms — subscribe an email/Slack integration to it',
+        exportName: 'OperationalAlarmTopicArn',
+      });
+    }
+    return this.alarmTopic;
+  }
+
+  /** A 14-day-retention DLQ for an async/event-driven Lambda target. */
+  private createDlq(id: string): sqs.Queue {
+    return new sqs.Queue(this, id, {
+      queueName: `MediaWorkstation-${id}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+  }
+
+  private createMonitoring(): void {
+    const topic = this.getAlarmTopic();
+    const fns = this.lambdaFunctions;
+
+    // Error-rate alarms on every event-driven (non-request/response) Lambda —
+    // these run on a schedule or stream trigger with no caller watching for
+    // a failure response, so CloudWatch has to raise the flag instead.
+    const eventDrivenFunctions: Array<[string, lambda.Function]> = [
+      ['StatusMonitor', fns.statusMonitor],
+      ['GroupMembershipReconciliation', fns.groupMembershipReconciliation],
+      ['UserAttributeChangeProcessor', fns.userAttributeChangeProcessor],
+    ];
+    for (const [name, fn] of eventDrivenFunctions) {
+      new cloudwatch.Alarm(this, `${name}ErrorsAlarm`, {
+        alarmName: `MediaWorkstation-${name}-Errors`,
+        metric: fn.metricErrors({ period: cdk.Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new cloudwatchActions.SnsAction(topic));
+    }
+
+    // DLQ depth alarms — anything landing here needs a human to re-drive it.
+    const dlqs: Array<[string, sqs.Queue | undefined]> = [
+      ['StatusMonitorDlq', fns.statusMonitor.deadLetterQueue as sqs.Queue | undefined],
+      ['GroupMembershipReconciliationDlq', fns.groupMembershipReconciliation.deadLetterQueue as sqs.Queue | undefined],
+      ['UserAttributeChangeProcessorDlq', this.userAttributeChangeProcessorDlq],
+    ];
+    for (const [name, dlq] of dlqs) {
+      if (!dlq) continue;
+      new cloudwatch.Alarm(this, `${name}DepthAlarm`, {
+        alarmName: `MediaWorkstation-${name}-NotEmpty`,
+        metric: dlq.metricApproximateNumberOfMessagesVisible({ period: cdk.Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new cloudwatchActions.SnsAction(topic));
+    }
+  }
+
   private createLambdaFunctions(props: WorkstationApiStackProps): void {
-    // Import bootstrap packages table by name (manually created outside CDK)
-    const bootstrapPackagesTable = dynamodb.Table.fromTableName(
-      this,
-      'ImportedBootstrapPackagesTable',
-      'WorkstationBootstrapPackages'
-    );
-
-    // Import analytics tables by name (manually created outside CDK)
-    const analyticsTable = dynamodb.Table.fromTableName(
-      this,
-      'ImportedAnalyticsTable',
-      'UserAnalytics'
-    );
-
-    const feedbackTable = dynamodb.Table.fromTableName(
-      this,
-      'ImportedFeedbackTable',
-      'UserFeedback'
-    );
-
     // Common Lambda configuration
     const commonLambdaProps = {
-      runtime: lambda.Runtime.NODEJS_20_X,
-      logRetention: logs.RetentionDays.ONE_MONTH,
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
-      handler: 'index.handler',
       environment: {
         WORKSTATIONS_TABLE_NAME: props.tables.workstations.tableName,
         COSTS_TABLE_NAME: props.tables.costs.tableName,
@@ -112,11 +174,16 @@ export class WorkstationApiStack extends cdk.Stack {
         ROLES_TABLE: props.tables.roles.tableName,
         GROUPS_TABLE: props.tables.groups.tableName,
         GROUP_MEMBERSHIPS_TABLE: props.tables.groupMemberships.tableName,
+        // The membership stream/reconciliation lambdas read MEMBERSHIPS_TABLE
+        // and AUDIT_LOGS_TABLE — these keys were previously missing, so both
+        // lambdas ran with empty table names.
+        MEMBERSHIPS_TABLE: props.tables.groupMemberships.tableName,
         GROUP_AUDIT_LOGS_TABLE: props.tables.groupAuditLogs.tableName,
+        AUDIT_LOGS_TABLE: props.tables.auditLogs.tableName,
         AUDIT_TABLE: props.tables.auditLogs.tableName,
-        BOOTSTRAP_PACKAGES_TABLE: bootstrapPackagesTable.tableName,
-        ANALYTICS_TABLE_NAME: analyticsTable.tableName,
-        FEEDBACK_TABLE_NAME: feedbackTable.tableName,
+        BOOTSTRAP_PACKAGES_TABLE: props.tables.bootstrapPackages.tableName,
+        ANALYTICS_TABLE_NAME: props.tables.analytics.tableName,
+        FEEDBACK_TABLE_NAME: props.tables.feedback.tableName,
         PACKAGE_QUEUE_TABLE: props.tables.packageQueue.tableName,
         GROUP_PACKAGE_BINDINGS_TABLE: props.tables.groupPackageBindings.tableName,
         USER_POOL_ID: props.userPool.userPoolId,
@@ -130,52 +197,54 @@ export class WorkstationApiStack extends cdk.Stack {
     };
 
     // EC2 Management Lambda
-    const ec2ManagementFunction = new lambda.Function(this, 'EC2ManagementFunction', {
+    const ec2ManagementFunction = new ServiceLambda(this, 'EC2ManagementFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-EC2Management',
-      code: lambda.Code.fromAsset('dist/lambda/ec2-management'),
+      serviceDir: 'ec2-management',
       description: 'Manages EC2 workstation lifecycle (launch, terminate, status)',
     });
 
     // Status Monitor Lambda
-    const statusMonitorFunction = new lambda.Function(this, 'StatusMonitorFunction', {
+    const statusMonitorFunction = new ServiceLambda(this, 'StatusMonitorFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-StatusMonitor',
-      code: lambda.Code.fromAsset('dist/lambda/status-monitor'),
+      serviceDir: 'status-monitor',
       description: 'Monitors workstation status and provides dashboard data',
+      // Failed async (EventBridge) invocations land here after retries
+      deadLetterQueue: this.createDlq('StatusMonitorDlq'),
     });
 
     // Cost Analytics Lambda
-    const costAnalyticsFunction = new lambda.Function(this, 'CostAnalyticsFunction', {
+    const costAnalyticsFunction = new ServiceLambda(this, 'CostAnalyticsFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-CostAnalytics',
-      code: lambda.Code.fromAsset('dist/lambda/cost-analytics'),
+      serviceDir: 'cost-analytics',
       description: 'Provides cost tracking and analytics data',
       timeout: cdk.Duration.minutes(10), // Cost API can be slow
     });
 
     // Configuration Service Lambda
-    const configServiceFunction = new lambda.Function(this, 'ConfigServiceFunction', {
+    const configServiceFunction = new ServiceLambda(this, 'ConfigServiceFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-ConfigService',
-      code: lambda.Code.fromAsset('dist/lambda/config-service'),
+      serviceDir: 'config-service',
       description: 'Provides configuration data (regions, instance types, etc.)',
       timeout: cdk.Duration.minutes(2),
     });
 
     // Credentials Service Lambda
-    const credentialsServiceFunction = new lambda.Function(this, 'CredentialsServiceFunction', {
+    const credentialsServiceFunction = new ServiceLambda(this, 'CredentialsServiceFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-CredentialsService',
-      code: lambda.Code.fromAsset('dist/lambda/credentials-service'),
+      serviceDir: 'credentials-service',
       description: 'Manages workstation credentials and domain join operations',
     });
 
     // User Profile Service Lambda
-    const userProfileServiceFunction = new lambda.Function(this, 'UserProfileServiceFunction', {
+    const userProfileServiceFunction = new ServiceLambda(this, 'UserProfileServiceFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-UserProfileService',
-      code: lambda.Code.fromAsset('dist/lambda/user-profile-service'),
+      serviceDir: 'user-profile-service',
       description: 'Manages user profiles and preferences',
       timeout: cdk.Duration.minutes(1),
     });
@@ -185,34 +254,37 @@ export class WorkstationApiStack extends cdk.Stack {
     // cognitoAdminService, amiValidationService, instanceTypeService, and storageService
     // are admin-only and live in WorkstationAdminApiStack to keep this stack under
     // CloudFormation's 500-resource limit.
-    const bootstrapConfigServiceFunction = new lambda.Function(this, 'BootstrapConfigServiceFunction', {
+    const bootstrapConfigServiceFunction = new ServiceLambda(this, 'BootstrapConfigServiceFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-BootstrapConfigService',
-      code: lambda.Code.fromAsset('dist/lambda/bootstrap-config-service'),
+      serviceDir: 'bootstrap-config-service',
       description: 'Manages bootstrap packages for driver and software installation',
       timeout: cdk.Duration.minutes(2),
     });
 
     // Analytics Service Lambda
-    const analyticsServiceFunction = new lambda.Function(this, 'AnalyticsServiceFunction', {
+    const analyticsServiceFunction = new ServiceLambda(this, 'AnalyticsServiceFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-AnalyticsService',
-      code: lambda.Code.fromAsset('dist/lambda/analytics-service'),
+      serviceDir: 'analytics-service',
       description: 'Tracks user analytics and manages feedback submissions',
       timeout: cdk.Duration.minutes(2),
     });
 
     // User Attribute Change Processor Lambda (DynamoDB Stream processor)
-    const userAttributeChangeProcessorFunction = new lambda.Function(this, 'UserAttributeChangeProcessorFunction', {
+    const userAttributeChangeProcessorFunction = new ServiceLambda(this, 'UserAttributeChangeProcessorFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-UserAttributeChangeProcessor',
-      code: lambda.Code.fromAsset('dist/lambda/user-attribute-change-processor'),
+      serviceDir: 'user-attribute-change-processor',
       description: 'Processes user attribute changes and updates dynamic group memberships',
       timeout: cdk.Duration.minutes(5),
       reservedConcurrentExecutions: 10, // Limit concurrent executions for stream processing
     });
 
-    // Add DynamoDB stream event source to process user changes
+    // Add DynamoDB stream event source to process user changes. Batches that
+    // still fail after all retries are shunted to a DLQ instead of being
+    // dropped (records only carry stream metadata, enough to re-drive).
+    this.userAttributeChangeProcessorDlq = this.createDlq('UserAttributeChangeProcessorDlq');
     userAttributeChangeProcessorFunction.addEventSource(new DynamoEventSource(props.tables.users, {
       startingPosition: lambda.StartingPosition.LATEST,
       batchSize: 10,
@@ -220,23 +292,25 @@ export class WorkstationApiStack extends cdk.Stack {
       retryAttempts: 3,
       bisectBatchOnError: true,
       reportBatchItemFailures: true,
+      onFailure: new SqsDlq(this.userAttributeChangeProcessorDlq),
     }));
 
     // Group Membership Reconciliation Lambda (Scheduled full re-evaluation)
-    const groupMembershipReconciliationFunction = new lambda.Function(this, 'GroupMembershipReconciliationFunction', {
+    const groupMembershipReconciliationFunction = new ServiceLambda(this, 'GroupMembershipReconciliationFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-GroupMembershipReconciliation',
-      code: lambda.Code.fromAsset('dist/lambda/group-membership-reconciliation'),
+      serviceDir: 'group-membership-reconciliation',
       description: 'Scheduled reconciliation of group memberships against dynamic rules',
       timeout: cdk.Duration.minutes(15), // Longer timeout for processing all users
       memorySize: 1024, // More memory for batch processing
+      deadLetterQueue: this.createDlq('GroupMembershipReconciliationDlq'),
     });
 
     // Group Package Service Lambda
-    const groupPackageServiceFunction = new lambda.Function(this, 'GroupPackageServiceFunction', {
+    const groupPackageServiceFunction = new ServiceLambda(this, 'GroupPackageServiceFunction', {
       ...commonLambdaProps,
       functionName: 'MediaWorkstation-GroupPackageService',
-      code: lambda.Code.fromAsset('dist/lambda/group-package-service'),
+      serviceDir: 'group-package-service',
       description: 'Manages group package bindings and installation queue',
       timeout: cdk.Duration.minutes(2),
     });
@@ -273,45 +347,54 @@ export class WorkstationApiStack extends cdk.Stack {
   }
 
   private grantLambdaPermissions(props: WorkstationApiStackProps, functions: any): void {
-    // Import bootstrap packages table by name
-    const bootstrapPackagesTable = dynamodb.Table.fromTableName(
-      this,
-      'ImportedBootstrapPackagesTableForPermissions',
-      'WorkstationBootstrapPackages'
-    );
+    // Per-function DynamoDB grants, scoped to the tables each handler's
+    // source actually reads/writes (verified against process.env.*_TABLE
+    // usage in each src/lambda/*/index.ts). The previous blanket
+    // `grantReadWriteData` loop gave every function in this stack read-write
+    // access to all 15 tables — e.g. config-service (no DynamoDB access at
+    // all) could read/write user credentials-adjacent tables it never
+    // touches.
+    props.tables.workstations.grantReadWriteData(functions.ec2Management);
+    props.tables.auditLogs.grantReadWriteData(functions.ec2Management);
+    props.tables.bootstrapPackages.grantReadWriteData(functions.ec2Management);
+    props.tables.groups.grantReadWriteData(functions.ec2Management);
+    props.tables.groupPackageBindings.grantReadWriteData(functions.ec2Management);
+    props.tables.packageQueue.grantReadWriteData(functions.ec2Management);
+    props.tables.roles.grantReadWriteData(functions.ec2Management);
+    props.tables.users.grantReadWriteData(functions.ec2Management);
 
-    // Import analytics tables by name
-    const analyticsTable = dynamodb.Table.fromTableName(
-      this,
-      'ImportedAnalyticsTableForPermissions',
-      'UserAnalytics'
-    );
+    props.tables.workstations.grantReadWriteData(functions.statusMonitor);
 
-    const feedbackTable = dynamodb.Table.fromTableName(
-      this,
-      'ImportedFeedbackTableForPermissions',
-      'UserFeedback'
-    );
+    props.tables.costs.grantReadWriteData(functions.costAnalytics);
+    props.tables.workstations.grantReadData(functions.costAnalytics);
 
-    // DynamoDB permissions
-    Object.values(functions).forEach((func) => {
-      const lambdaFunction = func as lambda.Function;
-      props.tables.workstations.grantReadWriteData(lambdaFunction);
-      props.tables.costs.grantReadWriteData(lambdaFunction);
-      props.tables.userSessions.grantReadWriteData(lambdaFunction);
-      props.tables.userProfiles.grantReadWriteData(lambdaFunction);
-      props.tables.users.grantReadWriteData(lambdaFunction);
-      props.tables.roles.grantReadWriteData(lambdaFunction);
-      props.tables.groups.grantReadWriteData(lambdaFunction);
-      props.tables.groupMemberships.grantReadWriteData(lambdaFunction);
-      props.tables.groupAuditLogs.grantReadWriteData(lambdaFunction);
-      props.tables.auditLogs.grantReadWriteData(lambdaFunction);
-      bootstrapPackagesTable.grantReadWriteData(lambdaFunction);
-      analyticsTable.grantReadWriteData(lambdaFunction);
-      feedbackTable.grantReadWriteData(lambdaFunction);
-      props.tables.packageQueue.grantReadWriteData(lambdaFunction);
-      props.tables.groupPackageBindings.grantReadWriteData(lambdaFunction);
-    });
+    // configService has no DynamoDB access — it only reads SSM/EC2 (granted below).
+
+    props.tables.workstations.grantReadData(functions.credentialsService);
+
+    props.tables.userProfiles.grantReadWriteData(functions.userProfileService);
+
+    props.tables.bootstrapPackages.grantReadWriteData(functions.bootstrapConfigService);
+
+    props.tables.analytics.grantReadWriteData(functions.analyticsService);
+    props.tables.feedback.grantReadWriteData(functions.analyticsService);
+
+    // userAttributeChangeProcessor is stream-triggered off `users` (stream
+    // read is granted by DynamoEventSource itself); it also writes group
+    // memberships and audit logs.
+    props.tables.groups.grantReadData(functions.userAttributeChangeProcessor);
+    props.tables.groupMemberships.grantReadWriteData(functions.userAttributeChangeProcessor);
+    props.tables.auditLogs.grantReadWriteData(functions.userAttributeChangeProcessor);
+
+    props.tables.users.grantReadData(functions.groupMembershipReconciliation);
+    props.tables.groups.grantReadData(functions.groupMembershipReconciliation);
+    props.tables.groupMemberships.grantReadWriteData(functions.groupMembershipReconciliation);
+    props.tables.auditLogs.grantReadWriteData(functions.groupMembershipReconciliation);
+
+    props.tables.workstations.grantReadData(functions.groupPackageService);
+    props.tables.bootstrapPackages.grantReadData(functions.groupPackageService);
+    props.tables.groupPackageBindings.grantReadWriteData(functions.groupPackageService);
+    props.tables.packageQueue.grantReadWriteData(functions.groupPackageService);
 
     // EC2 Management specific permissions — Describe actions require resources: ['*']
     functions.ec2Management.addToRolePolicy(new iam.PolicyStatement({

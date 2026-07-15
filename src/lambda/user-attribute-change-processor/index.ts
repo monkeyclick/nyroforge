@@ -8,6 +8,7 @@ import {
   DeleteCommand,
   BatchWriteCommand
 } from '@aws-sdk/lib-dynamodb';
+import { docQueryAll } from '../shared/dynamo';
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -190,7 +191,7 @@ function hasRelevantAttributeChanges(oldUser: User, newUser: User): boolean {
  */
 async function getDynamicGroups(): Promise<Group[]> {
   try {
-    const response = await docClient.send(new QueryCommand({
+    const items = await docQueryAll(docClient, {
       TableName: GROUPS_TABLE,
       IndexName: 'MembershipTypeIndex',
       KeyConditionExpression: 'membershipType = :type',
@@ -199,9 +200,9 @@ async function getDynamicGroups(): Promise<Group[]> {
         ':type': 'dynamic',
         ':active': true
       }
-    }));
+    });
 
-    return response.Items as Group[] || [];
+    return items as Group[];
   } catch (error) {
     console.error('Error fetching dynamic groups', { error });
     throw error;

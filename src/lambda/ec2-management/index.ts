@@ -3,6 +3,8 @@ import { EC2Client, RunInstancesCommand, TerminateInstancesCommand, StartInstanc
 import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand, QueryCommand, ScanCommand } from '@aws-sdk/client-dynamodb';
 import { isAdmin as isCognitoAdmin } from '../shared/auth';
 import { logEvent } from '../shared/logging';
+import { scanAllItems, queryAllItems } from '../shared/dynamo';
+import { describeInstancesByIds, describeInstancesByFilters } from '../shared/ec2';
 import { SecretsManagerClient, CreateSecretCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SSMClient, GetParameterCommand, SendCommandCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
@@ -560,7 +562,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         },
         body: JSON.stringify({
           message: 'Lambda configuration error',
-          error: `Missing environment variables: ${missingEnvVars.join(', ')}`,
+          error: 'Service configuration error',
           details: 'Please check Lambda function environment configuration'
         }),
       };
@@ -690,7 +692,21 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
             body: JSON.stringify({ message: 'Insufficient permissions to create workstations' }),
           };
         }
-        const launchRequest = JSON.parse(body || '{}') as LaunchWorkstationRequest;
+        let launchRequest: LaunchWorkstationRequest;
+        try {
+          launchRequest = JSON.parse(body || '{}') as LaunchWorkstationRequest;
+        } catch {
+          return {
+            statusCode: 400,
+            headers: {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+              'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+              'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
+            },
+            body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+          };
+        }
         return await launchWorkstation(launchRequest, userId, event);
       
       case 'DELETE':
@@ -750,7 +766,22 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
               body: JSON.stringify({ message: 'Insufficient permissions to update workstations' }),
             };
           }
-          const updateRequest = JSON.parse(body || '{}');
+          let updateRequest: any;
+          try {
+            updateRequest = JSON.parse(body || '{}');
+          } catch (parseError) {
+            console.error('❌ Malformed JSON in update request body:', parseError);
+            return {
+              statusCode: 400,
+              headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+                'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+                'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+              },
+              body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+            };
+          }
           // Power actions (start/stop/reboot) are treated as "update" operations
           if (updateRequest.powerAction) {
             return await powerWorkstation(pathParameters.workstationId, updateRequest.powerAction, userId, callerIsAdmin);
@@ -1189,7 +1220,7 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
       },
       body: JSON.stringify({
         message: 'Failed to launch workstation',
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: 'An internal error occurred while launching the workstation.',
         details: 'Check CloudWatch logs for more information'
       }),
     };
@@ -1313,7 +1344,7 @@ async function getWorkstation(workstationId: string, userId: string, callerIsAdm
       },
       body: JSON.stringify({
         message: 'Failed to get workstation',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: 'An internal error occurred while retrieving the workstation.'
       }),
     };
   }
@@ -1325,17 +1356,17 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
   console.log('UserId:', userId);
 
   try {
-    let queryCommand;
-
     // "Manage all workstations" is authoritative via the Cognito admin group
     // only. The legacy DynamoDB manage-all lookup was removed so a stale record
     // can't expose every user's workstations.
     const hasManageAll = callerIsAdmin;
     console.log('User has manage-all permission:', hasManageAll);
 
+    let workstations: Record<string, any>[];
+
     if (hasManageAll && queryParams?.userId) {
       console.log('Admin querying specific user workstations:', queryParams.userId);
-      queryCommand = new QueryCommand({
+      workstations = await queryAllItems(dynamoClient, {
         TableName: WORKSTATIONS_TABLE,
         IndexName: 'UserIdIndex',
         KeyConditionExpression: 'userId = :userId',
@@ -1345,7 +1376,7 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
       });
     } else if (hasManageAll && queryParams?.status) {
       console.log('Admin querying by status:', queryParams.status);
-      queryCommand = new QueryCommand({
+      workstations = await queryAllItems(dynamoClient, {
         TableName: WORKSTATIONS_TABLE,
         IndexName: 'StatusIndex',
         KeyConditionExpression: '#status = :status',
@@ -1360,7 +1391,7 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
       // Owned workstations plus ones shared with the user via assignedUsers.
       // assignedUsers is not indexable, so this is a filtered scan (table is small).
       console.log('User querying own + assigned workstations');
-      queryCommand = new ScanCommand({
+      workstations = await scanAllItems(dynamoClient, {
         TableName: WORKSTATIONS_TABLE,
         FilterExpression: 'begins_with(PK, :pk) AND (userId = :userId OR contains(assignedUsers, :userId))',
         ExpressionAttributeValues: marshall({
@@ -1370,7 +1401,7 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
       });
     } else {
       console.log('Admin querying all workstations (using Scan)');
-      queryCommand = new ScanCommand({
+      workstations = await scanAllItems(dynamoClient, {
         TableName: WORKSTATIONS_TABLE,
         FilterExpression: 'begins_with(PK, :pk)',
         ExpressionAttributeValues: marshall({
@@ -1379,15 +1410,12 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
       });
     }
 
-    const result = await dynamoClient.send(queryCommand);
-    const workstations = (result.Items || []).map(item => {
-      const ws = unmarshall(item);
-      // Extract workstationId from PK if not already present
+    // Extract workstationId from PK if not already present
+    for (const ws of workstations) {
       if (!ws.workstationId && ws.PK && ws.PK.startsWith('WORKSTATION#')) {
         ws.workstationId = ws.PK.replace('WORKSTATION#', '');
       }
-      return ws;
-    });
+    }
     console.log('✅ Found', workstations.length, 'workstations in DynamoDB');
 
     // Sync with EC2 to get current status
@@ -1396,14 +1424,10 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
     
     if (instanceIds.length > 0) {
       try {
-        const describeCommand = new DescribeInstancesCommand({
-          InstanceIds: instanceIds,
-        });
-        const ec2Result = await ec2Client.send(describeCommand);
         // Filter out shutting-down and terminated instances - these shouldn't recreate records
-        const ec2Instances = ec2Result.Reservations?.flatMap(r => r.Instances || [])
-          .filter(i => i.State?.Name !== 'shutting-down' && i.State?.Name !== 'terminated') || [];
-        
+        const ec2Instances = (await describeInstancesByIds(ec2Client, instanceIds))
+          .filter(i => i.State?.Name !== 'shutting-down' && i.State?.Name !== 'terminated');
+
         console.log(`Found ${ec2Instances.length} EC2 instances`);
         
         // Update workstation statuses based on EC2
@@ -1438,6 +1462,7 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
                     SK: workstation.SK,
                   }),
                   UpdateExpression: 'SET #status = :status, publicIp = :publicIp, privateIp = :privateIp, lastStatusCheck = :timestamp, updatedAt = :timestamp',
+                  ConditionExpression: 'attribute_exists(PK)',
                   ExpressionAttributeNames: {
                     '#status': 'status',
                   },
@@ -1450,6 +1475,10 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
                 })).then(() => {
                   console.log(`✅ Updated ${workstation.instanceId} status in DynamoDB`);
                 }).catch((err) => {
+                  if (err?.name === 'ConditionalCheckFailedException') {
+                    console.warn(`⚠️  Workstation ${workstation.PK} was deleted mid-sync; skipping status write`);
+                    return;
+                  }
                   console.error(`⚠️  Failed to update ${workstation.instanceId}:`, err);
                 })
               );
@@ -1605,7 +1634,7 @@ async function listWorkstations(queryParams: any, userId: string, callerIsAdmin:
       },
       body: JSON.stringify({
         message: 'Failed to list workstations',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: 'An internal error occurred while listing workstations.'
       }),
     };
   }
@@ -1628,15 +1657,14 @@ async function findWorkstationRecord(idParam: string): Promise<{ record: Worksta
   }
 
   // Fall back to scanning by instanceId (idParam is an EC2 instance id like "i-...")
-  const { ScanCommand } = await import('@aws-sdk/client-dynamodb');
-  const scan = await dynamoClient.send(new ScanCommand({
+  const items = await scanAllItems(dynamoClient, {
     TableName: WORKSTATIONS_TABLE,
     FilterExpression: 'instanceId = :iid AND begins_with(PK, :pk)',
     ExpressionAttributeValues: marshall({ ':iid': idParam, ':pk': 'WORKSTATION#' }),
-  }));
+  });
 
-  if (scan.Items && scan.Items.length > 0) {
-    const record = unmarshall(scan.Items[0]) as WorkstationRecord;
+  if (items.length > 0) {
+    const record = items[0] as WorkstationRecord;
     return { record, pk: record.PK };
   }
 
@@ -1728,23 +1756,32 @@ async function powerWorkstation(workstationIdParam: string, action: PowerAction,
         headers,
         body: JSON.stringify({
           message: `Failed to ${action} workstation`,
-          error: ec2Error instanceof Error ? ec2Error.message : String(ec2Error),
+          error: `An internal error occurred while trying to ${action} the workstation.`,
         }),
       };
     }
 
     // Update workstation status in DynamoDB
     console.log('Updating workstation status to:', newStatus!);
-    await dynamoClient.send(new UpdateItemCommand({
-      TableName: WORKSTATIONS_TABLE,
-      Key: marshall({ PK: pk, SK: 'METADATA' }),
-      UpdateExpression: 'SET #status = :status, updatedAt = :timestamp',
-      ExpressionAttributeNames: { '#status': 'status' },
-      ExpressionAttributeValues: marshall({
-        ':status': newStatus!,
-        ':timestamp': new Date().toISOString(),
-      }),
-    }));
+    try {
+      await dynamoClient.send(new UpdateItemCommand({
+        TableName: WORKSTATIONS_TABLE,
+        Key: marshall({ PK: pk, SK: 'METADATA' }),
+        UpdateExpression: 'SET #status = :status, updatedAt = :timestamp',
+        ConditionExpression: 'attribute_exists(PK)',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: marshall({
+          ':status': newStatus!,
+          ':timestamp': new Date().toISOString(),
+        }),
+      }));
+    } catch (updateError: any) {
+      if (updateError?.name === 'ConditionalCheckFailedException') {
+        console.warn(`⚠️  Workstation ${pk} was deleted before the status update could be applied`);
+        return { statusCode: 404, headers, body: JSON.stringify({ message: 'Workstation not found' }) };
+      }
+      throw updateError;
+    }
 
     await logAuditEvent(userId, auditAction!, 'workstation', workstationIdParam, { action, instanceId });
 
@@ -1764,7 +1801,7 @@ async function powerWorkstation(workstationIdParam: string, action: PowerAction,
       headers,
       body: JSON.stringify({
         message: `Failed to ${action} workstation`,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: `An internal error occurred while trying to ${action} the workstation.`,
       }),
     };
   }
@@ -1875,6 +1912,7 @@ async function terminateWorkstation(workstationId: string, userId: string, calle
         SK: 'METADATA',
       }),
       UpdateExpression: 'SET #status = :status, updatedAt = :timestamp',
+      ConditionExpression: 'attribute_exists(PK)',
       ExpressionAttributeNames: {
         '#status': 'status',
       },
@@ -1884,7 +1922,24 @@ async function terminateWorkstation(workstationId: string, userId: string, calle
       }),
     });
 
-    await dynamoClient.send(updateCommand);
+    try {
+      await dynamoClient.send(updateCommand);
+    } catch (updateError: any) {
+      if (updateError?.name === 'ConditionalCheckFailedException') {
+        console.warn(`⚠️  Workstation ${pk} was deleted before termination status could be applied`);
+        return {
+          statusCode: 404,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
+          },
+          body: JSON.stringify({ message: 'Workstation not found' }),
+        };
+      }
+      throw updateError;
+    }
     console.log('✅ Status updated');
 
     await logAuditEvent(userId, 'DELETE_WORKSTATION', 'workstation', workstationId);
@@ -1922,7 +1977,7 @@ async function terminateWorkstation(workstationId: string, userId: string, calle
       },
       body: JSON.stringify({
         message: 'Failed to terminate workstation',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: 'An internal error occurred while terminating the workstation.'
       }),
     };
   }
@@ -1937,30 +1992,21 @@ async function reconcileWorkstations(userId: string): Promise<APIGatewayProxyRes
     
     // Get all EC2 instances with WorkstationId tag
     console.log('Fetching all EC2 instances with WorkstationId tag...');
-    const describeCommand = new DescribeInstancesCommand({
-      Filters: [
-        { Name: 'tag-key', Values: ['WorkstationId'] },
-        { Name: 'instance-state-name', Values: ['pending', 'running', 'stopping', 'stopped'] },
-      ],
-    });
-    
-    const ec2Result = await ec2Client.send(describeCommand);
-    const ec2Instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
+    const ec2Instances = await describeInstancesByFilters(ec2Client, [
+      { Name: 'tag-key', Values: ['WorkstationId'] },
+      { Name: 'instance-state-name', Values: ['pending', 'running', 'stopping', 'stopped'] },
+    ]);
     console.log(`Found ${ec2Instances.length} EC2 instances with WorkstationId tag`);
-    
+
     // Get all workstation records from DynamoDB
     console.log('Fetching all workstation records from DynamoDB...');
-    const { ScanCommand } = await import('@aws-sdk/client-dynamodb');
-    const scanCommand = new ScanCommand({
+    const dynamoWorkstations = (await scanAllItems(dynamoClient, {
       TableName: WORKSTATIONS_TABLE,
       FilterExpression: 'begins_with(PK, :pk)',
       ExpressionAttributeValues: marshall({
         ':pk': 'WORKSTATION#',
       }),
-    });
-    
-    const dynamoResult = await dynamoClient.send(scanCommand);
-    const dynamoWorkstations = (dynamoResult.Items || []).map(item => unmarshall(item) as WorkstationRecord);
+    })) as WorkstationRecord[];
     const dynamoInstanceIds = new Set(dynamoWorkstations.map(w => w.instanceId));
     console.log(`Found ${dynamoWorkstations.length} workstation records in DynamoDB`);
     
@@ -2027,22 +2073,33 @@ async function reconcileWorkstations(userId: string): Promise<APIGatewayProxyRes
         const putCommand = new PutItemCommand({
           TableName: WORKSTATIONS_TABLE,
           Item: marshall(workstationRecord),
+          // Don't clobber a record another concurrent reconcile (or the normal
+          // launch path) already created for this workstationId.
+          ConditionExpression: 'attribute_not_exists(PK)',
         });
-        
-        await dynamoClient.send(putCommand);
-        
+
+        try {
+          await dynamoClient.send(putCommand);
+        } catch (putError: any) {
+          if (putError?.name === 'ConditionalCheckFailedException') {
+            console.warn(`⚠️  Workstation ${workstationId} was concurrently created; skipping reconcile for ${instance.InstanceId}`);
+            continue;
+          }
+          throw putError;
+        }
+
         reconciledRecords.push({
           workstationId,
           instanceId: instance.InstanceId,
           status: 'reconciled',
         });
-        
+
         console.log(`✅ Reconciled workstation ${workstationId}`);
       } catch (error) {
         console.error(`Error reconciling instance ${instance.InstanceId}:`, error);
         errors.push({
           instanceId: instance.InstanceId,
-          error: error instanceof Error ? error.message : 'Unknown error',
+          error: 'Failed to reconcile this instance. See server logs for details.',
         });
       }
     }
@@ -2093,7 +2150,7 @@ async function reconcileWorkstations(userId: string): Promise<APIGatewayProxyRes
       },
       body: JSON.stringify({
         message: 'Failed to reconcile workstations',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: 'An internal error occurred while reconciling workstations.'
       }),
     };
   }
@@ -2247,11 +2304,30 @@ async function updateWorkstation(workstationId: string, updateRequest: UpdateWor
         SK: 'METADATA',
       }),
       UpdateExpression: `SET ${updateExpressions.join(', ')}`,
+      ConditionExpression: 'attribute_exists(PK)',
       ExpressionAttributeValues: marshall(expressionAttributeValues),
       ReturnValues: 'ALL_NEW',
     });
 
-    const updateResult = await dynamoClient.send(updateCommand);
+    let updateResult;
+    try {
+      updateResult = await dynamoClient.send(updateCommand);
+    } catch (updateError: any) {
+      if (updateError?.name === 'ConditionalCheckFailedException') {
+        console.warn(`⚠️  Workstation ${pk} was deleted before the update could be applied`);
+        return {
+          statusCode: 404,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+          },
+          body: JSON.stringify({ message: 'Workstation not found' }),
+        };
+      }
+      throw updateError;
+    }
     const updatedWorkstation = updateResult.Attributes ? unmarshall(updateResult.Attributes) : null;
     console.log('✅ Workstation updated');
 
@@ -2298,7 +2374,7 @@ async function updateWorkstation(workstationId: string, updateRequest: UpdateWor
       },
       body: JSON.stringify({
         message: 'Failed to update workstation',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: 'An internal error occurred while updating the workstation.'
       }),
     };
   }
@@ -2469,13 +2545,11 @@ async function getInstanceProfileArn(): Promise<string> {
 async function getBootstrapPackages(instanceType: string, osVersion: string, selectedPackageIds: string[]): Promise<BootstrapPackage[]> {
   try {
     // Scan all packages from DynamoDB
-    const { ScanCommand } = await import('@aws-sdk/client-dynamodb');
-    const result = await dynamoClient.send(new ScanCommand({
+    const items = await scanAllItems(dynamoClient, {
       TableName: BOOTSTRAP_PACKAGES_TABLE,
-    }));
+    });
 
-    const allPackages = (result.Items || [])
-      .map(item => unmarshall(item) as BootstrapPackage)
+    const allPackages = (items as BootstrapPackage[])
       .filter(pkg => pkg.isEnabled); // Only enabled packages
 
     // Determine if this is a GPU instance

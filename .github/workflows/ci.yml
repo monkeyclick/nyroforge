@@ -29,6 +29,9 @@ jobs:
       - name: Lint (root)
         run: npm run lint
 
+      - name: Typecheck (root)
+        run: npm run typecheck
+
       - name: Run tests
         run: npm test
 
@@ -68,6 +71,10 @@ jobs:
       - name: Lint (frontend)
         working-directory: frontend
         run: npm run lint
+
+      - name: Typecheck (frontend)
+        working-directory: frontend
+        run: npm run typecheck
 
       - name: Build frontend
         working-directory: frontend

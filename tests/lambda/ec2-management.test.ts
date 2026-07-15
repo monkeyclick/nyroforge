@@ -346,7 +346,8 @@ describe('EC2 Management Lambda', () => {
 
       const result = await handler(event as APIGatewayProxyEvent, mockContext);
 
-      expect(result.statusCode).toBe(500);
+      // A malformed body is a client error, not a server failure.
+      expect(result.statusCode).toBe(400);
       const body = JSON.parse(result.body);
       expect(body.error ?? body.message).toBeDefined();
     });

@@ -14,10 +14,14 @@ export function corsHeaders(): Record<string, string> {
   };
 }
 
-export function jsonResponse(statusCode: number, body: unknown): APIGatewayProxyResult {
+export function jsonResponse(
+  statusCode: number,
+  body: unknown,
+  extraHeaders?: Record<string, string>
+): APIGatewayProxyResult {
   return {
     statusCode,
-    headers: corsHeaders(),
+    headers: { ...corsHeaders(), ...extraHeaders },
     body: JSON.stringify(body)
   };
 }

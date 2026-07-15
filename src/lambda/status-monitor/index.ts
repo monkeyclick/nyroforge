@@ -1,9 +1,12 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context, ScheduledEvent } from 'aws-lambda';
-import { EC2Client, DescribeInstancesCommand, DescribeInstanceStatusCommand, TerminateInstancesCommand } from '@aws-sdk/client-ec2';
+import { EC2Client, DescribeInstancesCommand, TerminateInstancesCommand, Instance } from '@aws-sdk/client-ec2';
 import { DynamoDBClient, ScanCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { CloudWatchClient, GetMetricStatisticsCommand } from '@aws-sdk/client-cloudwatch';
-import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
+import { marshall } from '@aws-sdk/util-dynamodb';
 import { logEvent } from '../shared/logging';
+import { jsonResponse } from '../shared/http';
+import { scanAllItems, queryAllItems } from '../shared/dynamo';
+import { describeInstancesByIds } from '../shared/ec2';
 
 // Initialize AWS clients
 const ec2Client = new EC2Client({});
@@ -50,7 +53,7 @@ export const handler = async (event: APIGatewayProxyEvent | ScheduledEvent, cont
 
     // Handle API Gateway events
     const apiEvent = event as APIGatewayProxyEvent;
-    const { httpMethod, pathParameters, requestContext } = apiEvent;
+    const { httpMethod, requestContext } = apiEvent;
     const userId = requestContext.authorizer?.claims?.email || 'unknown';
     const userGroups = requestContext.authorizer?.claims?.['cognito:groups']?.split(',') || [];
     const isAdmin = userGroups.includes('workstation-admin');
@@ -65,72 +68,58 @@ export const handler = async (event: APIGatewayProxyEvent | ScheduledEvent, cont
         break;
     }
 
-    return {
-      statusCode: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({ message: 'Invalid request' }),
-    };
+    return jsonResponse(400, { message: 'Invalid request' });
 
   } catch (error) {
     console.error('Error:', error);
-    
+
     // Return error response for API Gateway calls
     if ('httpMethod' in event) {
-      return {
-        statusCode: 500,
-        headers: {
-          'Content-Type': 'application/json',
-          'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-          'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-        },
-        body: JSON.stringify({
-          message: 'Internal server error',
-          error: error instanceof Error ? error.message : 'Unknown error'
-        }),
-      };
+      return jsonResponse(500, { message: 'Internal server error' });
     }
-    
+
     // For scheduled events, just log the error
     throw error;
   }
 };
 
-async function getDashboardStatus(userId: string, isAdmin: boolean): Promise<APIGatewayProxyResult> {
-  try {
-    // Get all workstations from DynamoDB
-    const scanCommand = new ScanCommand({
+/**
+ * Fetch the caller-visible workstations. Admins see everything (paginated
+ * scan); everyone else gets a Query on the UserIdIndex GSI instead of a
+ * scan-and-filter over the whole table.
+ */
+async function getWorkstationsForCaller(userId: string, isAdmin: boolean): Promise<Record<string, any>[]> {
+  if (isAdmin) {
+    return scanAllItems(dynamoClient, {
       TableName: WORKSTATIONS_TABLE,
       FilterExpression: 'begins_with(PK, :pk)',
       ExpressionAttributeValues: marshall({
         ':pk': 'WORKSTATION#',
       }),
     });
+  }
+  return queryAllItems(dynamoClient, {
+    TableName: WORKSTATIONS_TABLE,
+    IndexName: 'UserIdIndex',
+    KeyConditionExpression: 'userId = :userId',
+    FilterExpression: 'begins_with(PK, :pk)',
+    ExpressionAttributeValues: marshall({
+      ':userId': userId,
+      ':pk': 'WORKSTATION#',
+    }),
+  });
+}
 
-    const dynamoResult = await dynamoClient.send(scanCommand);
-    let allWorkstations = (dynamoResult.Items || []).map(item => unmarshall(item));
-
-    // Filter by user if not admin
-    if (!isAdmin) {
-      allWorkstations = allWorkstations.filter((ws: any) => ws.userId === userId);
-    }
+async function getDashboardStatus(userId: string, isAdmin: boolean): Promise<APIGatewayProxyResult> {
+  try {
+    const allWorkstations = await getWorkstationsForCaller(userId, isAdmin);
 
     // Get current EC2 instance statuses
     const instanceIds = allWorkstations.map((ws: any) => ws.instanceId).filter(Boolean);
-    
-    let ec2Instances: any[] = [];
-    if (instanceIds.length > 0) {
-      const describeCommand = new DescribeInstancesCommand({
-        InstanceIds: instanceIds,
-      });
 
-      const ec2Result = await ec2Client.send(describeCommand);
-      ec2Instances = ec2Result.Reservations?.flatMap(r => r.Instances || []) || [];
+    let ec2Instances: Instance[] = [];
+    if (instanceIds.length > 0) {
+      ec2Instances = await describeInstancesByIds(ec2Client, instanceIds);
     }
 
     // Update workstation statuses and collect metrics
@@ -139,7 +128,7 @@ async function getDashboardStatus(userId: string, isAdmin: boolean): Promise<API
 
     for (const workstation of allWorkstations) {
       const ec2Instance = ec2Instances.find(i => i.InstanceId === workstation.instanceId);
-      
+
       if (ec2Instance) {
         const currentStatus = mapEC2StatusToWorkstationStatus(ec2Instance.State?.Name || 'unknown');
         const publicIp = ec2Instance.PublicIpAddress;
@@ -189,8 +178,13 @@ async function getDashboardStatus(userId: string, isAdmin: boolean): Promise<API
       }
     }
 
-    // Wait for all status updates to complete
-    await Promise.all(statusUpdates);
+    // A single failed status write must not fail the whole dashboard read.
+    const updateResults = await Promise.allSettled(statusUpdates);
+    for (const result of updateResults) {
+      if (result.status === 'rejected') {
+        console.warn('Failed to persist a workstation status update:', result.reason);
+      }
+    }
 
     // Calculate summary statistics
     const summary: DashboardSummary = {
@@ -206,37 +200,17 @@ async function getDashboardStatus(userId: string, isAdmin: boolean): Promise<API
 
     summary.estimatedMonthlyCost = summary.totalHourlyCost * 24 * 30;
 
-    return {
-      statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        summary,
-        instances: instanceStatusList,
-        lastUpdated: new Date().toISOString(),
-      }),
-    };
+    return jsonResponse(200, {
+      summary,
+      instances: instanceStatusList,
+      lastUpdated: new Date().toISOString(),
+    }, {
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+    });
 
   } catch (error) {
     console.error('Error getting dashboard status:', error);
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Failed to get dashboard status',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
+    return jsonResponse(500, { message: 'Failed to get dashboard status' });
   }
 }
 
@@ -283,39 +257,20 @@ async function getHealthStatus(): Promise<APIGatewayProxyResult> {
 
     const isHealthy = Object.values(services).every(status => status === 'healthy');
 
-    return {
-      statusCode: isHealthy ? 200 : 503,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        status: isHealthy ? 'healthy' : 'degraded',
-        version: '1.0.0',
-        timestamp: new Date().toISOString(),
-        services,
-      }),
-    };
+    return jsonResponse(isHealthy ? 200 : 503, {
+      status: isHealthy ? 'healthy' : 'degraded',
+      version: '1.0.0',
+      timestamp: new Date().toISOString(),
+      services,
+    });
 
   } catch (error) {
     console.error('Error checking health:', error);
-    return {
-      statusCode: 503,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        status: 'unhealthy',
-        version: '1.0.0',
-        timestamp: new Date().toISOString(),
-        error: error instanceof Error ? error.message : 'Unknown error',
-      }),
-    };
+    return jsonResponse(503, {
+      status: 'unhealthy',
+      version: '1.0.0',
+      timestamp: new Date().toISOString(),
+    });
   }
 }
 
@@ -327,7 +282,7 @@ async function updateWorkstationStatus(pk: string, sk: string, updates: any): Pr
   Object.entries(updates).forEach(([key, value], index) => {
     const nameKey = `#attr${index}`;
     const valueKey = `:val${index}`;
-    
+
     updateExpressions.push(`${nameKey} = ${valueKey}`);
     attributeNames[nameKey] = key;
     attributeValues[valueKey] = value;
@@ -337,11 +292,22 @@ async function updateWorkstationStatus(pk: string, sk: string, updates: any): Pr
     TableName: WORKSTATIONS_TABLE,
     Key: marshall({ PK: pk, SK: sk }),
     UpdateExpression: `SET ${updateExpressions.join(', ')}`,
+    // Without this, an update racing a delete resurrects the workstation as a
+    // phantom item containing only the status fields.
+    ConditionExpression: 'attribute_exists(PK)',
     ExpressionAttributeNames: attributeNames,
     ExpressionAttributeValues: marshall(attributeValues),
   });
 
-  await dynamoClient.send(updateCommand);
+  try {
+    await dynamoClient.send(updateCommand);
+  } catch (error: any) {
+    if (error.name === 'ConditionalCheckFailedException') {
+      console.warn(`Workstation ${pk} was deleted mid-update; skipping status write`);
+      return;
+    }
+    throw error;
+  }
 }
 
 async function getInstanceMetrics(instanceId: string): Promise<{
@@ -450,8 +416,33 @@ function mapEC2StatusToWorkstationStatus(ec2Status: string): string {
     'shutting-down': 'terminating',
     'terminated': 'terminated',
   };
-  
+
   return statusMap[ec2Status] || 'launching';
+}
+
+/** Mark a workstation's status, tolerating the item having been deleted. */
+async function markWorkstationStatus(pk: string, sk: string, status: string): Promise<void> {
+  try {
+    await dynamoClient.send(new UpdateItemCommand({
+      TableName: WORKSTATIONS_TABLE,
+      Key: marshall({ PK: pk, SK: sk }),
+      UpdateExpression: 'SET #status = :status, updatedAt = :timestamp',
+      ConditionExpression: 'attribute_exists(PK)',
+      ExpressionAttributeNames: {
+        '#status': 'status',
+      },
+      ExpressionAttributeValues: marshall({
+        ':status': status,
+        ':timestamp': new Date().toISOString(),
+      }),
+    }));
+  } catch (error: any) {
+    if (error.name === 'ConditionalCheckFailedException') {
+      console.warn(`Workstation ${pk} no longer exists; skipping status write`);
+      return;
+    }
+    throw error;
+  }
 }
 
 /**
@@ -462,10 +453,12 @@ async function checkAndTerminateExpiredInstances(): Promise<void> {
   console.log('='.repeat(80));
   console.log('Starting auto-termination check...');
   console.log('='.repeat(80));
-  
+
   try {
-    // Get all workstations from DynamoDB
-    const scanCommand = new ScanCommand({
+    // Get all workstations with auto-termination configured. This must
+    // paginate: with an unpaginated scan, expired workstations past the
+    // first 1 MB page would never be terminated.
+    const workstations = await scanAllItems(dynamoClient, {
       TableName: WORKSTATIONS_TABLE,
       FilterExpression: 'begins_with(PK, :pk) AND attribute_exists(autoTerminateAt)',
       ExpressionAttributeValues: marshall({
@@ -473,103 +466,71 @@ async function checkAndTerminateExpiredInstances(): Promise<void> {
       }),
     });
 
-    const result = await dynamoClient.send(scanCommand);
-    const workstations = (result.Items || []).map(item => unmarshall(item));
-    
     console.log(`Found ${workstations.length} workstations with auto-termination configured`);
-    
+
     const now = new Date();
     const expiredWorkstations = workstations.filter((ws: any) => {
       if (!ws.autoTerminateAt) return false;
-      
+
       const terminateAt = new Date(ws.autoTerminateAt);
       const isExpired = terminateAt <= now;
-      
+
       // Only terminate if instance is running or stopped (not already terminating/terminated)
       const shouldTerminate = isExpired &&
         ws.status &&
         !['terminating', 'terminated', 'shutting-down'].includes(ws.status);
-      
+
       if (isExpired) {
         console.log(`Workstation ${ws.instanceId}: expired at ${ws.autoTerminateAt}, status: ${ws.status}, will terminate: ${shouldTerminate}`);
       }
-      
+
       return shouldTerminate;
     });
-    
+
     console.log(`Found ${expiredWorkstations.length} expired workstations to terminate`);
-    
+
     if (expiredWorkstations.length === 0) {
       console.log('No workstations need termination at this time');
       return;
     }
-    
-    // Terminate expired instances
+
+    // Terminate expired instances — each workstation is handled in isolation
+    // so one failure can't block the rest of the batch.
     const terminationResults = await Promise.allSettled(
       expiredWorkstations.map(async (ws: any) => {
         try {
           console.log(`Terminating expired workstation ${ws.instanceId} (${ws.PK})...`);
-          
+
           // Terminate the EC2 instance
           const terminateCommand = new TerminateInstancesCommand({
             InstanceIds: [ws.instanceId],
           });
-          
+
           await ec2Client.send(terminateCommand);
           console.log(`✅ Successfully initiated termination for ${ws.instanceId}`);
-          
-          // Update the status in DynamoDB
-          const updateCommand = new UpdateItemCommand({
-            TableName: WORKSTATIONS_TABLE,
-            Key: marshall({
-              PK: ws.PK,
-              SK: ws.SK,
-            }),
-            UpdateExpression: 'SET #status = :status, updatedAt = :timestamp',
-            ExpressionAttributeNames: {
-              '#status': 'status',
-            },
-            ExpressionAttributeValues: marshall({
-              ':status': 'terminating',
-              ':timestamp': new Date().toISOString(),
-            }),
-          });
-          
-          await dynamoClient.send(updateCommand);
+
+          await markWorkstationStatus(ws.PK, ws.SK, 'terminating');
           console.log(`✅ Updated status to terminating for ${ws.PK}`);
-          
+
           return {
             success: true,
             workstationId: ws.PK.replace('WORKSTATION#', ''),
             instanceId: ws.instanceId,
           };
-          
+
         } catch (error: any) {
           console.error(`❌ Failed to terminate ${ws.instanceId}:`, error);
-          
+
           // If instance doesn't exist, update status to terminated
           if (error.name === 'InvalidInstanceID.NotFound' || error.Code === 'InvalidInstanceID.NotFound') {
             console.log(`Instance ${ws.instanceId} not found, marking as terminated`);
-            
-            const updateCommand = new UpdateItemCommand({
-              TableName: WORKSTATIONS_TABLE,
-              Key: marshall({
-                PK: ws.PK,
-                SK: ws.SK,
-              }),
-              UpdateExpression: 'SET #status = :status, updatedAt = :timestamp',
-              ExpressionAttributeNames: {
-                '#status': 'status',
-              },
-              ExpressionAttributeValues: marshall({
-                ':status': 'terminated',
-                ':timestamp': new Date().toISOString(),
-              }),
-            });
-            
-            await dynamoClient.send(updateCommand);
+            try {
+              await markWorkstationStatus(ws.PK, ws.SK, 'terminated');
+            } catch (updateError) {
+              console.error(`Failed to mark ${ws.PK} terminated:`, updateError);
+            }
           }
-          
+
           return {
             success: false,
             workstationId: ws.PK.replace('WORKSTATION#', ''),
@@ -579,11 +540,11 @@ async function checkAndTerminateExpiredInstances(): Promise<void> {
         }
       })
     );
-    
+
     // Log results
     const successful = terminationResults.filter(r => r.status === 'fulfilled' && (r.value as any).success).length;
     const failed = terminationResults.filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !(r.value as any).success)).length;
-    
+
     console.log('='.repeat(80));
     console.log('Auto-termination check completed:');
     console.log(`  Total checked: ${workstations.length}`);
@@ -591,7 +552,7 @@ async function checkAndTerminateExpiredInstances(): Promise<void> {
     console.log(`  Successfully terminated: ${successful}`);
     console.log(`  Failed: ${failed}`);
     console.log('='.repeat(80));
-    
+
   } catch (error) {
     console.error('❌ Error during auto-termination check:', error);
     console.error('Error details:', {

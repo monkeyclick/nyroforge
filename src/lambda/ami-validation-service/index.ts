@@ -2,6 +2,7 @@ import { APIGatewayProxyHandler } from 'aws-lambda';
 import { EC2Client, DescribeImagesCommand } from '@aws-sdk/client-ec2';
 import { requireAdmin } from '../shared/auth';
 import { logEvent } from '../shared/logging';
+import { corsHeaders } from '../shared/http';
 
 // AMI name patterns for Windows Server versions
 const AMI_PATTERNS: Record<string, string> = {
@@ -14,11 +15,7 @@ const AMI_PATTERNS: Record<string, string> = {
 export const handler: APIGatewayProxyHandler = async (event) => {
   logEvent(event, 'AMI Validation Request');
 
-  const headers = {
-    'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  };
+  const headers = corsHeaders();
 
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers, body: '' };
@@ -30,8 +27,18 @@ export const handler: APIGatewayProxyHandler = async (event) => {
     return denied;
   }
 
+  let body: any;
   try {
-    const body = JSON.parse(event.body || '{}');
+    body = JSON.parse(event.body || '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ error: 'Request body is not valid JSON' }),
+    };
+  }
+
+  try {
     const { osVersion, region } = body;
 
     if (!osVersion || !region) {
@@ -145,7 +152,6 @@ export const handler: APIGatewayProxyHandler = async (event) => {
       headers,
       body: JSON.stringify({
         error: 'Failed to validate AMI',
-        message: error instanceof Error ? error.message : 'Unknown error',
       }),
     };
   }

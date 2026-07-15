@@ -606,6 +606,13 @@ export default function AdminPage() {
 
             {activeTab === 'settings' && (
               <div className="space-y-6">
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                  <p className="text-sm text-yellow-800">
+                    These settings are stored in this browser only. They pre-fill forms on
+                    this machine but are not applied to the backend or shared with other
+                    admins.
+                  </p>
+                </div>
                 {/* General Settings */}
                 <div className="bg-white rounded-lg shadow-sm border border-gray-200">
                   <div className="px-4 py-3 border-b border-gray-200">
@@ -768,12 +775,12 @@ export default function AdminPage() {
                         onClick={async () => {
                           setIsSavingSettings(true);
                           try {
-                            // Save to localStorage for now (can be connected to backend later)
+                            // Browser-local only; there is no backend settings API yet.
                             localStorage.setItem('adminGeneralSettings', JSON.stringify(generalSettings));
-                            alert('Settings saved successfully!');
+                            toast.success('Settings saved in this browser (not applied to the backend)');
                           } catch (error) {
                             console.error('Failed to save settings:', error);
-                            alert('Failed to save settings');
+                            toast.error('Failed to save settings');
                           } finally {
                             setIsSavingSettings(false);
                           }
@@ -1036,12 +1043,12 @@ export default function AdminPage() {
                         onClick={async () => {
                           setIsSavingDefaults(true);
                           try {
-                            // Save to localStorage for now (can be connected to backend later)
+                            // Browser-local only; there is no backend settings API yet.
                             localStorage.setItem('adminInstanceDefaults', JSON.stringify(instanceDefaults));
-                            alert('Instance defaults saved successfully!');
+                            toast.success('Defaults saved in this browser (not applied to the backend)');
                           } catch (error) {
                             console.error('Failed to save defaults:', error);
-                            alert('Failed to save defaults');
+                            toast.error('Failed to save defaults');
                           } finally {
                             setIsSavingDefaults(false);
                           }

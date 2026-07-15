@@ -3,6 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, GetCommand, UpdateCommand, DeleteCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { corsHeaders, errorResponse } from '../shared/http';
 import { requireAdmin } from '../shared/auth';
+import { docScanAll } from '../shared/dynamo';
 import { logEvent } from '../shared/logging';
 
 const client = new DynamoDBClient({ region: process.env.AWS_REGION });
@@ -137,19 +138,39 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
 };
 
 async function listGroups(): Promise<APIGatewayProxyResult> {
-  const result = await docClient.send(new ScanCommand({
+  // Paginated: a single Scan page is capped at 1 MB, so follow
+  // LastEvaluatedKey via the shared helper to avoid truncating the list.
+  const groups = await docScanAll(docClient, {
     TableName: GROUPS_TABLE
-  }));
+  });
 
   return {
     statusCode: 200,
     headers: corsHeaders(),
-    body: JSON.stringify({ groups: result.Items || [] })
+    body: JSON.stringify({ groups })
   };
 }
 
 async function createGroup(event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
-  const body = JSON.parse(event.body || '{}');
+  let body: any;
+  try {
+    body = JSON.parse(event.body || '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: 'Request body is not valid JSON' })
+    };
+  }
+
+  if (!body.name) {
+    return {
+      statusCode: 400,
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: 'name is required' })
+    };
+  }
+
   const groupId = `group_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const now = new Date().toISOString();
 
@@ -220,7 +241,16 @@ async function getGroupById(groupId: string): Promise<APIGatewayProxyResult> {
 }
 
 async function updateGroup(groupId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
-  const body = JSON.parse(event.body || '{}');
+  let body: any;
+  try {
+    body = JSON.parse(event.body || '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: 'Request body is not valid JSON' })
+    };
+  }
   const now = new Date().toISOString();
 
   const updateExpressions: string[] = [];
@@ -256,14 +286,27 @@ async function updateGroup(groupId: string, event: APIGatewayProxyEvent, current
   updateExpressions.push('updatedAt = :updatedAt');
   expressionAttributeValues[':updatedAt'] = now;
 
-  const result = await docClient.send(new UpdateCommand({
-    TableName: GROUPS_TABLE,
-    Key: { id: groupId },
-    UpdateExpression: `SET ${updateExpressions.join(', ')}`,
-    ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
-    ExpressionAttributeValues: expressionAttributeValues,
-    ReturnValues: 'ALL_NEW'
-  }));
+  let result;
+  try {
+    result = await docClient.send(new UpdateCommand({
+      TableName: GROUPS_TABLE,
+      Key: { id: groupId },
+      UpdateExpression: `SET ${updateExpressions.join(', ')}`,
+      ConditionExpression: 'attribute_exists(id)',
+      ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
+      ExpressionAttributeValues: expressionAttributeValues,
+      ReturnValues: 'ALL_NEW'
+    }));
+  } catch (err: any) {
+    if (err?.name === 'ConditionalCheckFailedException') {
+      return {
+        statusCode: 404,
+        headers: corsHeaders(),
+        body: JSON.stringify({ error: 'Group not found' })
+      };
+    }
+    throw err;
+  }
 
   await logGroupAuditEvent(groupId, 'updated', currentUserId, body);
 
@@ -325,7 +368,16 @@ async function getGroupMembers(groupId: string): Promise<APIGatewayProxyResult> 
 }
 
 async function addUserToGroup(groupId: string, event: APIGatewayProxyEvent, currentUserId: string): Promise<APIGatewayProxyResult> {
-  const body = JSON.parse(event.body || '{}');
+  let body: any;
+  try {
+    body = JSON.parse(event.body || '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      headers: corsHeaders(),
+      body: JSON.stringify({ error: 'Request body is not valid JSON' })
+    };
+  }
   const userId = body.userId;
   const membershipType = body.membershipType || 'static';
   const now = new Date().toISOString();
@@ -426,12 +478,12 @@ async function evaluateGroupRules(groupId: string, currentUserId: string): Promi
     };
   }
 
-  // Get all users
-  const usersResult = await docClient.send(new ScanCommand({
+  // Get all users. Paginated: a single Scan page is capped at 1 MB, so
+  // follow LastEvaluatedKey — otherwise rule evaluation silently skips
+  // users beyond the first page on a large user table.
+  const users = await docScanAll(docClient, {
     TableName: USERS_TABLE
-  }));
-
-  const users = usersResult.Items || [];
+  });
   const matchedUsers: string[] = [];
 
   // Evaluate rules for each user
@@ -469,10 +521,21 @@ async function evaluateGroupRules(groupId: string, currentUserId: string): Promi
           addedBy: currentUserId
         };
 
-        await docClient.send(new PutCommand({
-          TableName: GROUP_MEMBERSHIPS_TABLE,
-          Item: membership
-        }));
+        try {
+          await docClient.send(new PutCommand({
+            TableName: GROUP_MEMBERSHIPS_TABLE,
+            Item: membership,
+            // The existence check above is inherently racy (another
+            // concurrent rule evaluation could add the same membership
+            // between the Get and this Put); the condition makes the
+            // insert itself safe, and a lost race is a no-op, not an error.
+            ConditionExpression: 'attribute_not_exists(id)'
+          }));
+        } catch (err: any) {
+          if (err?.name !== 'ConditionalCheckFailedException') {
+            throw err;
+          }
+        }
       }
     }
   }
@@ -577,15 +640,27 @@ async function getGroupAuditLogs(groupId?: string): Promise<APIGatewayProxyResul
       body: JSON.stringify({ logs: result.Items || [] })
     };
   } else {
-    const result = await docClient.send(new ScanCommand({
-      TableName: GROUP_AUDIT_LOGS_TABLE,
-      Limit: 100
-    }));
+    // A Scan page can come back short of Limit (capped at 1 MB) while more
+    // matching items remain behind LastEvaluatedKey. Follow it until the
+    // requested 100 are collected or the table is exhausted, instead of
+    // returning whatever happened to fit in the first page.
+    const TARGET_LIMIT = 100;
+    const logs: Record<string, any>[] = [];
+    let lastKey: Record<string, any> | undefined;
+    do {
+      const result = await docClient.send(new ScanCommand({
+        TableName: GROUP_AUDIT_LOGS_TABLE,
+        Limit: TARGET_LIMIT - logs.length,
+        ExclusiveStartKey: lastKey
+      }));
+      logs.push(...(result.Items || []));
+      lastKey = result.LastEvaluatedKey;
+    } while (lastKey && logs.length < TARGET_LIMIT);
 
     return {
       statusCode: 200,
       headers: corsHeaders(),
-      body: JSON.stringify({ logs: result.Items || [] })
+      body: JSON.stringify({ logs })
     };
   }
 }

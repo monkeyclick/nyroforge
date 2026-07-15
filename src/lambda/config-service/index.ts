@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda
 import { EC2Client, DescribeRegionsCommand, DescribeInstanceTypesCommand, DescribeImagesCommand, _InstanceType } from '@aws-sdk/client-ec2';
 import { SSMClient, GetParameterCommand, GetParametersCommand } from '@aws-sdk/client-ssm';
 import { logEvent } from '../shared/logging';
+import { jsonResponse } from '../shared/http';
 
 // Initialize AWS clients
 const ec2Client = new EC2Client({});
@@ -54,32 +55,11 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
         break;
     }
 
-    return {
-      statusCode: 400,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({ message: 'Invalid request' }),
-    };
+    return jsonResponse(400, { message: 'Invalid request' });
 
   } catch (error) {
     console.error('Error:', error);
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Internal server error',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
+    return jsonResponse(500, { message: 'Internal server error' });
   }
 };
 
@@ -132,39 +112,21 @@ async function getAvailableRegions(): Promise<APIGatewayProxyResult> {
     // Sort regions by name for better UX
     regions.sort((a, b) => a.name.localeCompare(b.name));
 
-    return {
-      statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=3600', // 1 hour cache
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
+    return jsonResponse(
+      200,
+      {
         regions: regions, // Return ALL regions, not just available ones
         availableRegions: regions.filter(r => r.available), // Also provide filtered list
         totalRegions: regions.length,
         availableCount: regions.filter(r => r.available).length,
         lastUpdated: new Date().toISOString(),
-      }),
-    };
+      },
+      { 'Cache-Control': 'public, max-age=3600' } // 1 hour cache
+    );
 
   } catch (error) {
     console.error('Error getting regions:', error);
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Failed to get regions',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
+    return jsonResponse(500, { message: 'Failed to get regions' });
   }
 }
 
@@ -223,37 +185,19 @@ async function getInstanceTypes(): Promise<APIGatewayProxyResult> {
 
     console.log(`getInstanceTypes: Returning ${instanceTypes.length} instance types`);
     
-    return {
-      statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache, no-store, must-revalidate', // No caching - always fetch latest config
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
+    return jsonResponse(
+      200,
+      {
         instanceTypes,
         totalTypes: instanceTypes.length,
         lastUpdated: new Date().toISOString(),
-      }),
-    };
+      },
+      { 'Cache-Control': 'no-cache, no-store, must-revalidate' } // No caching - always fetch latest config
+    );
 
   } catch (error) {
     console.error('Error getting instance types:', error);
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Failed to get instance types',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
+    return jsonResponse(500, { message: 'Failed to get instance types' });
   }
 }
 
@@ -267,37 +211,19 @@ async function getWindowsAMIs(): Promise<APIGatewayProxyResult> {
       amis.push(...versionAMIs);
     }
 
-    return {
-      statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=1800', // 30 minutes cache
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
+    return jsonResponse(
+      200,
+      {
         amis,
         totalAMIs: amis.length,
         lastUpdated: new Date().toISOString(),
-      }),
-    };
+      },
+      { 'Cache-Control': 'public, max-age=1800' } // 30 minutes cache
+    );
 
   } catch (error) {
     console.error('Error getting Windows AMIs:', error);
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Failed to get Windows AMIs',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
+    return jsonResponse(500, { message: 'Failed to get Windows AMIs' });
   }
 }
 
@@ -337,36 +263,18 @@ async function getSystemConfiguration(): Promise<APIGatewayProxyResult> {
       }
     });
 
-    return {
-      statusCode: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'public, max-age=300', // 5 minutes cache
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
+    return jsonResponse(
+      200,
+      {
         configuration: config,
         lastUpdated: new Date().toISOString(),
-      }),
-    };
+      },
+      { 'Cache-Control': 'public, max-age=300' } // 5 minutes cache
+    );
 
   } catch (error) {
     console.error('Error getting system configuration:', error);
-    return {
-      statusCode: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-        'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-        'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-      },
-      body: JSON.stringify({
-        message: 'Failed to get system configuration',
-        error: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
+    return jsonResponse(500, { message: 'Failed to get system configuration' });
   }
 }
 

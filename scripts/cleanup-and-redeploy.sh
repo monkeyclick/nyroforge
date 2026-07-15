@@ -66,8 +66,10 @@ print_status "AWS Region: $AWS_REGION"
 # Confirm destruction
 print_warning "⚠️  This will PERMANENTLY DELETE all existing CloudFormation stacks:"
 echo "  - WorkstationWebsite"
-echo "  - WorkstationFrontend" 
+echo "  - WorkstationFrontend"
+echo "  - WorkstationAdminApi"
 echo "  - WorkstationApi"
+echo "  - WorkstationStorage"
 echo "  - WorkstationInfrastructure"
 echo ""
 print_warning "🗃️  This will also DELETE all data including:"
@@ -89,8 +91,10 @@ print_status "🧹 Destroying existing stacks..."
 # Destroy stacks in reverse order (dependencies)
 STACKS_TO_DESTROY=(
     "WorkstationWebsite"
-    "WorkstationFrontend" 
+    "WorkstationFrontend"
+    "WorkstationAdminApi"
     "WorkstationApi"
+    "WorkstationStorage"
     "WorkstationInfrastructure"
 )
 
@@ -145,12 +149,26 @@ cdk deploy WorkstationInfrastructure --require-approval never || {
 }
 print_success "Infrastructure stack deployed"
 
+print_status "🏗️  Deploying storage stack..."
+cdk deploy WorkstationStorage --require-approval never || {
+    print_error "Storage deployment failed"
+    exit 1
+}
+print_success "Storage stack deployed"
+
 print_status "🏗️  Deploying API stack..."
 cdk deploy WorkstationApi --require-approval never || {
     print_error "API deployment failed"
     exit 1
 }
 print_success "API stack deployed"
+
+print_status "🏗️  Deploying admin API stack..."
+cdk deploy WorkstationAdminApi --require-approval never || {
+    print_error "Admin API deployment failed"
+    exit 1
+}
+print_success "Admin API stack deployed"
 
 print_status "🏗️  Deploying frontend stack..."
 cdk deploy WorkstationFrontend --require-approval never || {

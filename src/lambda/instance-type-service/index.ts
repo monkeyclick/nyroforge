@@ -2,6 +2,8 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda
 import { EC2Client, DescribeInstanceTypesCommand, _InstanceType } from '@aws-sdk/client-ec2';
 import { SSMClient, GetParameterCommand, PutParameterCommand } from '@aws-sdk/client-ssm';
 import { logEvent } from '../shared/logging';
+import { corsHeaders } from '../shared/http';
+import { isAdmin } from '../shared/auth';
 
 // Initialize AWS clients
 const ec2Client = new EC2Client({});
@@ -39,14 +41,10 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
     const { path, httpMethod, body } = event;
 
     // Check admin authorization
-    const claims = event.requestContext.authorizer?.claims;
-    const groups = claims?.['cognito:groups'] || '';
-    const isAdmin = groups.includes('workstation-admin');
-
-    if (!isAdmin && httpMethod !== 'GET') {
+    if (!isAdmin(event) && httpMethod !== 'GET') {
       return {
         statusCode: 403,
-        headers: getCORSHeaders(),
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Admin access required' }),
       };
     }
@@ -70,7 +68,7 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
 
     return {
       statusCode: 400,
-      headers: getCORSHeaders(),
+      headers: corsHeaders(),
       body: JSON.stringify({ message: 'Invalid request' }),
     };
 
@@ -78,10 +76,9 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
     console.error('Error:', error);
     return {
       statusCode: 500,
-      headers: getCORSHeaders(),
+      headers: corsHeaders(),
       body: JSON.stringify({
-        message: 'Internal server error',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Internal server error'
       }),
     };
   }
@@ -102,7 +99,7 @@ async function getAllowedInstanceTypes(): Promise<APIGatewayProxyResult> {
 
     return {
       statusCode: 200,
-      headers: getCORSHeaders(),
+      headers: corsHeaders(),
       body: JSON.stringify({
         instanceTypes: instanceTypeDetails,
         totalTypes: instanceTypeDetails.length,
@@ -114,10 +111,9 @@ async function getAllowedInstanceTypes(): Promise<APIGatewayProxyResult> {
     console.error('Error getting allowed instance types:', error);
     return {
       statusCode: 500,
-      headers: getCORSHeaders(),
+      headers: corsHeaders(),
       body: JSON.stringify({
-        message: 'Failed to get allowed instance types',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to get allowed instance types'
       }),
     };
   }
@@ -128,17 +124,26 @@ async function updateAllowedInstanceTypes(body: string | null): Promise<APIGatew
     if (!body) {
       return {
         statusCode: 400,
-        headers: getCORSHeaders(),
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'Request body is required' }),
       };
     }
 
-    const request: UpdateInstanceTypesRequest = JSON.parse(body);
-    
+    let request: UpdateInstanceTypesRequest;
+    try {
+      request = JSON.parse(body);
+    } catch {
+      return {
+        statusCode: 400,
+        headers: corsHeaders(),
+        body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+      };
+    }
+
     if (!Array.isArray(request.instanceTypes)) {
       return {
         statusCode: 400,
-        headers: getCORSHeaders(),
+        headers: corsHeaders(),
         body: JSON.stringify({ message: 'instanceTypes must be an array' }),
       };
     }
@@ -149,7 +154,7 @@ async function updateAllowedInstanceTypes(body: string | null): Promise<APIGatew
       if (!validateResult.valid) {
         return {
           statusCode: 400,
-          headers: getCORSHeaders(),
+          headers: corsHeaders(),
           body: JSON.stringify({
             message: 'Invalid instance types',
             invalidTypes: validateResult.invalidTypes,
@@ -174,7 +179,7 @@ async function updateAllowedInstanceTypes(body: string | null): Promise<APIGatew
 
     return {
       statusCode: 200,
-      headers: getCORSHeaders(),
+      headers: corsHeaders(),
       body: JSON.stringify({
         message: 'Instance types updated successfully',
         instanceTypes: instanceTypeDetails,
@@ -187,18 +192,27 @@ async function updateAllowedInstanceTypes(body: string | null): Promise<APIGatew
     console.error('Error updating instance types:', error);
     return {
       statusCode: 500,
-      headers: getCORSHeaders(),
+      headers: corsHeaders(),
       body: JSON.stringify({
-        message: 'Failed to update instance types',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to update instance types'
       }),
     };
   }
 }
 
 async function discoverInstanceTypes(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  let body: any;
   try {
-    const body = event.body ? JSON.parse(event.body) : {};
+    body = event.body ? JSON.parse(event.body) : {};
+  } catch {
+    return {
+      statusCode: 400,
+      headers: corsHeaders(),
+      body: JSON.stringify({ message: 'Request body is not valid JSON' }),
+    };
+  }
+
+  try {
     const request: DiscoverInstanceTypesRequest = body;
 
     // Default families to discover
@@ -218,15 +232,26 @@ async function discoverInstanceTypes(event: APIGatewayProxyEvent): Promise<APIGa
           { Name: 'instance-type', Values: [`${family}.*`] },
         ];
 
-        const command = new DescribeInstanceTypesCommand({
-          Filters: filters,
-          MaxResults: 100,
-        });
+        // DescribeInstanceTypes paginates past MaxResults; follow NextToken so
+        // families with more than 100 sizes aren't silently truncated.
+        const familyInstanceTypes: any[] = [];
+        let nextToken: string | undefined;
+        do {
+          const command = new DescribeInstanceTypesCommand({
+            Filters: filters,
+            MaxResults: 100,
+            NextToken: nextToken,
+          });
 
-        const result = await regionalEC2.send(command);
-        
-        if (result.InstanceTypes && result.InstanceTypes.length > 0) {
-          const familyTypes = result.InstanceTypes.map(it => {
+          const result = await regionalEC2.send(command);
+          if (result.InstanceTypes) {
+            familyInstanceTypes.push(...result.InstanceTypes);
+          }
+          nextToken = result.NextToken;
+        } while (nextToken);
+
+        if (familyInstanceTypes.length > 0) {
+          const familyTypes = familyInstanceTypes.map(it => {
             const type = it.InstanceType!;
             const vcpus = it.VCpuInfo?.DefaultVCpus || 0;
             const memoryMiB = it.MemoryInfo?.SizeInMiB || 0;
@@ -312,7 +337,7 @@ async function discoverInstanceTypes(event: APIGatewayProxyEvent): Promise<APIGa
 
     return {
       statusCode: 200,
-      headers: getCORSHeaders(),
+      headers: corsHeaders(),
       body: JSON.stringify({
         instanceTypes: allInstanceTypes,
         byFamily,
@@ -328,10 +353,9 @@ async function discoverInstanceTypes(event: APIGatewayProxyEvent): Promise<APIGa
     console.error('Error discovering instance types:', error);
     return {
       statusCode: 500,
-      headers: getCORSHeaders(),
+      headers: corsHeaders(),
       body: JSON.stringify({
-        message: 'Failed to discover instance types',
-        error: error instanceof Error ? error.message : 'Unknown error'
+        message: 'Failed to discover instance types'
       }),
     };
   }
@@ -503,13 +527,4 @@ function estimateInstanceHourlyCost(instanceType: string, region: string): numbe
   const multiplier = regionMultipliers[region] || 1.0;
   
   return Math.round(baseCost * multiplier * 100) / 100;
-}
-
-function getCORSHeaders() {
-  return {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-  };
 }

@@ -206,8 +206,8 @@ The analytics system requires:
 2. **Deploy Command**
    ```bash
    npm run build
-   cdk deploy WorkstationInfrastructureStack
-   cdk deploy WorkstationApiStack
+   cdk deploy WorkstationInfrastructure
+   cdk deploy WorkstationApi
    ```
 
 3. **Environment Variables**

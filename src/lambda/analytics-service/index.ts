@@ -1,7 +1,10 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { DynamoDBDocumentClient, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { logEvent } from '../shared/logging';
+import { corsHeaders } from '../shared/http';
+import { isAdmin } from '../shared/auth';
+import { docScanAll } from '../shared/dynamo';
 
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
@@ -42,12 +45,7 @@ interface FeedbackSubmission {
 export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> => {
   logEvent(event, 'Analytics Service Event');
 
-  const headers = {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-    'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-  };
+  const headers = corsHeaders();
 
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers, body: '' };
@@ -93,16 +91,24 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     return {
       statusCode: 500,
       headers,
-      body: JSON.stringify({ 
-        error: 'Internal server error',
-        message: error instanceof Error ? error.message : String(error)
+      body: JSON.stringify({
+        error: 'Internal server error'
       })
     };
   }
 };
 
 async function trackEvent(event: APIGatewayProxyEvent, headers: Record<string, string>): Promise<APIGatewayProxyResult> {
-  const body = JSON.parse(event.body || '{}');
+  let body: any;
+  try {
+    body = JSON.parse(event.body || '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ error: 'Request body is not valid JSON' })
+    };
+  }
   const userId = event.requestContext.authorizer?.claims?.sub || 'anonymous';
   const userEmail = event.requestContext.authorizer?.claims?.email;
 
@@ -138,7 +144,16 @@ async function trackEvent(event: APIGatewayProxyEvent, headers: Record<string, s
 }
 
 async function submitFeedback(event: APIGatewayProxyEvent, headers: Record<string, string>): Promise<APIGatewayProxyResult> {
-  const body = JSON.parse(event.body || '{}');
+  let body: any;
+  try {
+    body = JSON.parse(event.body || '{}');
+  } catch {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ error: 'Request body is not valid JSON' })
+    };
+  }
   const userId = event.requestContext.authorizer?.claims?.sub || 'anonymous';
   const userEmail = event.requestContext.authorizer?.claims?.email;
 
@@ -173,8 +188,7 @@ async function submitFeedback(event: APIGatewayProxyEvent, headers: Record<strin
 
 async function getAnalyticsSummary(event: APIGatewayProxyEvent, headers: Record<string, string>): Promise<APIGatewayProxyResult> {
   // Check if user is admin
-  const groups = event.requestContext.authorizer?.claims?.['cognito:groups'];
-  if (!groups || !groups.includes('workstation-admin')) {
+  if (!isAdmin(event)) {
     return {
       statusCode: 403,
       headers,
@@ -185,7 +199,7 @@ async function getAnalyticsSummary(event: APIGatewayProxyEvent, headers: Record<
   const timeframe = event.queryStringParameters?.timeframe || '7d';
   const now = new Date();
   const startDate = new Date(now);
-  
+
   // Calculate start date based on timeframe
   if (timeframe === '24h') startDate.setHours(now.getHours() - 24);
   else if (timeframe === '7d') startDate.setDate(now.getDate() - 7);
@@ -193,7 +207,7 @@ async function getAnalyticsSummary(event: APIGatewayProxyEvent, headers: Record<
   else if (timeframe === '90d') startDate.setDate(now.getDate() - 90);
 
   // Scan analytics table (in production, use GSI with date filtering)
-  const result = await docClient.send(new ScanCommand({
+  const events = await docScanAll(docClient, {
     TableName: ANALYTICS_TABLE,
     FilterExpression: '#timestamp >= :startDate',
     ExpressionAttributeNames: {
@@ -202,9 +216,7 @@ async function getAnalyticsSummary(event: APIGatewayProxyEvent, headers: Record<
     ExpressionAttributeValues: {
       ':startDate': startDate.toISOString()
     }
-  }));
-
-  const events = result.Items || [];
+  });
 
   // Aggregate analytics
   const summary = {
@@ -238,8 +250,7 @@ async function getAnalyticsSummary(event: APIGatewayProxyEvent, headers: Record<
 
 async function getFeedbackList(event: APIGatewayProxyEvent, headers: Record<string, string>): Promise<APIGatewayProxyResult> {
   // Check if user is admin
-  const groups = event.requestContext.authorizer?.claims?.['cognito:groups'];
-  if (!groups || !groups.includes('workstation-admin')) {
+  if (!isAdmin(event)) {
     return {
       statusCode: 403,
       headers,
@@ -259,14 +270,14 @@ async function getFeedbackList(event: APIGatewayProxyEvent, headers: Record<stri
     params.ExpressionAttributeValues = { ':status': status };
   }
 
-  const result = await docClient.send(new ScanCommand(params));
+  const items = await docScanAll(docClient, params);
 
   return {
     statusCode: 200,
     headers,
-    body: JSON.stringify({ 
-      feedback: result.Items || [],
-      count: result.Items?.length || 0
+    body: JSON.stringify({
+      feedback: items,
+      count: items.length
     })
   };
 }

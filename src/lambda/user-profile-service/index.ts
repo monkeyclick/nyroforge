@@ -3,6 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
 import { logEvent } from '../shared/logging';
+import { corsHeaders } from '../shared/http';
 
 // Initialize DynamoDB client
 const ddbClient = new DynamoDBClient({});
@@ -60,14 +61,24 @@ export const handler = async (event: APIGatewayProxyEvent, context: Context): Pr
 
       case 'PUT':
         if (pathParts.includes('profile')) {
-          const body = JSON.parse(event.body || '{}');
+          let body: any;
+          try {
+            body = JSON.parse(event.body || '{}');
+          } catch {
+            return createErrorResponse(400, 'Request body is not valid JSON');
+          }
           return await updateUserProfile(userId, body);
         }
         break;
 
       case 'PATCH':
         if (pathParts.includes('preferences')) {
-          const body = JSON.parse(event.body || '{}');
+          let body: any;
+          try {
+            body = JSON.parse(event.body || '{}');
+          } catch {
+            return createErrorResponse(400, 'Request body is not valid JSON');
+          }
           return await updateUserPreferences(userId, body);
         }
         break;
@@ -169,13 +180,27 @@ async function updateUserProfile(userId: string, profileData: Partial<UserProfil
       TableName: USER_PROFILES_TABLE,
       Key: { userId },
       UpdateExpression: `SET ${updateExpressionParts.join(', ')}`,
+      ConditionExpression: 'attribute_exists(userId)',
       ExpressionAttributeNames: expressionAttributeNames,
       ExpressionAttributeValues: expressionAttributeValues,
       ReturnValues: 'ALL_NEW'
     });
 
-    const result = await docClient.send(updateCommand);
-    
+    let result;
+    try {
+      result = await docClient.send(updateCommand);
+    } catch (conditionError) {
+      if (conditionError instanceof Error && conditionError.name === 'ConditionalCheckFailedException') {
+        // No profile exists yet for this user — lazily create the default
+        // profile (preserves the existing lazy-create behavior), then retry
+        // the update once now that the item exists.
+        await createDefaultUserProfile(userId);
+        result = await docClient.send(updateCommand);
+      } else {
+        throw conditionError;
+      }
+    }
+
     return createSuccessResponse({
       message: 'Profile updated successfully',
       profile: result.Attributes
@@ -295,28 +320,20 @@ async function getUserIdFromEvent(event: APIGatewayProxyEvent): Promise<string |
 function createSuccessResponse(data: any): APIGatewayProxyResult {
   return {
     statusCode: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-      'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify(data),
   };
 }
 
-function createErrorResponse(statusCode: number, message: string, error?: any): APIGatewayProxyResult {
+function createErrorResponse(statusCode: number, message: string, error?: unknown): APIGatewayProxyResult {
+  if (error !== undefined) {
+    console.error(message, error);
+  }
   return {
     statusCode,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
-      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-      'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
-    },
+    headers: corsHeaders(),
     body: JSON.stringify({
-      message,
-      error: error instanceof Error ? error.message : error
+      message
     }),
   };
 }

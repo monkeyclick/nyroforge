@@ -77,20 +77,22 @@ npm run build
 cdk deploy --all
 
 # Or deploy individually
-cdk deploy WorkstationInfrastructureStack
-cdk deploy WorkstationApiStack
-cdk deploy WorkstationFrontendStack
+cdk deploy WorkstationInfrastructure
+cdk deploy WorkstationStorage
+cdk deploy WorkstationApi
+cdk deploy WorkstationAdminApi
+cdk deploy WorkstationFrontend
 ```
 
 Expected output:
 ```
-✅ WorkstationInfrastructureStack
+✅ WorkstationInfrastructure
    Outputs:
    - BootstrapPackagesTableName = WorkstationBootstrapPackages
    - VpcId = vpc-xxxxx
    ...
 
-✅ WorkstationApiStack
+✅ WorkstationApi
    Outputs:
    - ApiEndpoint = https://xxxxx.execute-api.region.amazonaws.com/api
    ...
@@ -135,7 +137,7 @@ Total: 13
 ```bash
 # Get API endpoint from CDK output
 API_ENDPOINT=$(aws cloudformation describe-stacks \
-  --stack-name WorkstationApiStack \
+  --stack-name WorkstationApi \
   --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
   --output text)
 
