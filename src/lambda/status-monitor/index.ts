@@ -2,6 +2,7 @@ import { APIGatewayProxyEvent, APIGatewayProxyResult, Context, ScheduledEvent } 
 import { EC2Client, DescribeInstancesCommand, TerminateInstancesCommand, Instance } from '@aws-sdk/client-ec2';
 import { DynamoDBClient, ScanCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { CloudWatchClient, GetMetricStatisticsCommand } from '@aws-sdk/client-cloudwatch';
+import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses';
 import { marshall } from '@aws-sdk/util-dynamodb';
 import { logEvent } from '../shared/logging';
 import { jsonResponse } from '../shared/http';
@@ -12,9 +13,13 @@ import { describeInstancesByIds } from '../shared/ec2';
 const ec2Client = new EC2Client({});
 const dynamoClient = new DynamoDBClient({});
 const cloudWatchClient = new CloudWatchClient({});
+const sesClient = new SESClient({});
 
 // Environment variables
 const WORKSTATIONS_TABLE = process.env.WORKSTATIONS_TABLE_NAME!;
+const SES_FROM_EMAIL = process.env.SES_FROM_EMAIL || 'noreply@example.com';
+// Warn owners this many minutes before their workstation is auto-terminated
+const TERMINATION_WARNING_MINUTES = parseInt(process.env.TERMINATION_WARNING_MINUTES || '60', 10);
 
 interface DashboardSummary {
   totalInstances: number;
@@ -446,6 +451,43 @@ async function markWorkstationStatus(pk: string, sk: string, status: string): Pr
 }
 
 /**
+ * Email the workstation owner that auto-termination is imminent, then stamp
+ * the deadline we warned about so the next run doesn't re-send. The stamp is
+ * written only after SES succeeds, so a failed send retries next run.
+ */
+async function sendTerminationWarning(ws: any): Promise<void> {
+  const name = ws.friendlyName || ws.instanceId;
+  const minutesLeft = Math.max(1, Math.round((new Date(ws.autoTerminateAt).getTime() - Date.now()) / 60000));
+
+  const bodyText =
+    `Your workstation "${name}" (${ws.instanceId}, ${ws.instanceType || 'unknown type'}, ${ws.region || 'unknown region'}) ` +
+    `is scheduled to be automatically TERMINATED in about ${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}, ` +
+    `at ${ws.autoTerminateAt}.\n\n` +
+    `Termination permanently destroys the instance and all data on it.\n\n` +
+    `If you still need this workstation, open the dashboard and use the "Extend" button on the workstation card ` +
+    `to push the deadline out. Otherwise, no action is needed.\n\n` +
+    `Best regards,\nNyroForge`;
+
+  await sesClient.send(new SendEmailCommand({
+    Source: SES_FROM_EMAIL,
+    Destination: { ToAddresses: [ws.userId] },
+    Message: {
+      Subject: { Data: `⏰ Workstation "${name}" terminates in ~${minutesLeft} min` },
+      Body: { Text: { Data: bodyText } },
+    },
+  }));
+  console.log(`✅ Sent termination warning for ${ws.instanceId} to ${ws.userId}`);
+
+  await dynamoClient.send(new UpdateItemCommand({
+    TableName: WORKSTATIONS_TABLE,
+    Key: marshall({ PK: ws.PK, SK: ws.SK }),
+    UpdateExpression: 'SET terminationWarnedFor = :deadline',
+    ConditionExpression: 'attribute_exists(PK)',
+    ExpressionAttributeValues: marshall({ ':deadline': ws.autoTerminateAt }),
+  }));
+}
+
+/**
  * Check for workstations that have exceeded their autoTerminateAt time
  * and terminate them automatically
  */
@@ -469,25 +511,46 @@ async function checkAndTerminateExpiredInstances(): Promise<void> {
     console.log(`Found ${workstations.length} workstations with auto-termination configured`);
 
     const now = new Date();
-    const expiredWorkstations = workstations.filter((ws: any) => {
-      if (!ws.autoTerminateAt) return false;
+    // Ignore instances that are already on their way out
+    const activeWorkstations = workstations.filter((ws: any) =>
+      ws.autoTerminateAt &&
+      ws.status &&
+      !['terminating', 'terminated', 'shutting-down'].includes(ws.status)
+    );
 
-      const terminateAt = new Date(ws.autoTerminateAt);
-      const isExpired = terminateAt <= now;
-
-      // Only terminate if instance is running or stopped (not already terminating/terminated)
-      const shouldTerminate = isExpired &&
-        ws.status &&
-        !['terminating', 'terminated', 'shutting-down'].includes(ws.status);
-
+    const expiredWorkstations = activeWorkstations.filter((ws: any) => {
+      const isExpired = new Date(ws.autoTerminateAt) <= now;
       if (isExpired) {
-        console.log(`Workstation ${ws.instanceId}: expired at ${ws.autoTerminateAt}, status: ${ws.status}, will terminate: ${shouldTerminate}`);
+        console.log(`Workstation ${ws.instanceId}: expired at ${ws.autoTerminateAt}, status: ${ws.status}`);
       }
-
-      return shouldTerminate;
+      return isExpired;
     });
 
     console.log(`Found ${expiredWorkstations.length} expired workstations to terminate`);
+
+    // Warn owners whose deadline falls inside the warning window and who
+    // haven't been warned about THIS deadline yet (extending the deadline
+    // re-arms the warning automatically).
+    const warningWindowMs = TERMINATION_WARNING_MINUTES * 60 * 1000;
+    const workstationsToWarn = activeWorkstations.filter((ws: any) => {
+      const deadline = new Date(ws.autoTerminateAt).getTime();
+      return deadline > now.getTime() &&
+        deadline - now.getTime() <= warningWindowMs &&
+        ws.terminationWarnedFor !== ws.autoTerminateAt &&
+        typeof ws.userId === 'string' && ws.userId.includes('@');
+    });
+
+    if (workstationsToWarn.length > 0) {
+      console.log(`Sending termination warnings for ${workstationsToWarn.length} workstations`);
+      const warningResults = await Promise.allSettled(
+        workstationsToWarn.map((ws: any) => sendTerminationWarning(ws))
+      );
+      for (const result of warningResults) {
+        if (result.status === 'rejected') {
+          console.warn('Failed to send a termination warning:', result.reason);
+        }
+      }
+    }
 
     if (expiredWorkstations.length === 0) {
       console.log('No workstations need termination at this time');

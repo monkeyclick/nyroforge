@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../../services/api';
+import ConfirmDialog from '../ConfirmDialog';
 
 interface BootstrapPackage {
   packageId: string;
@@ -34,6 +35,7 @@ export const BootstrapPackageManagement: React.FC = () => {
   const [editingPackage, setEditingPackage] = useState<BootstrapPackage | null>(null);
   const [filter, setFilter] = useState<'all' | 'required' | 'optional' | 'disabled'>('all');
   const [searchTerm, setSearchTerm] = useState('');
+  const [pendingDelete, setPendingDelete] = useState<{ packageId: string; name: string } | null>(null);
 
   // Fetch packages
   const { data: packagesData, isLoading } = useQuery({
@@ -93,10 +95,7 @@ export const BootstrapPackageManagement: React.FC = () => {
   };
 
   const handleDelete = (packageId: string, name: string) => {
-    // TODO: Replace native confirm() with custom ConfirmationDialog component
-    if (confirm(`Are you sure you want to delete "${name}"? This action cannot be undone.`)) {
-      deleteMutation.mutate(packageId);
-    }
+    setPendingDelete({ packageId, name });
   };
 
   if (showForm) {
@@ -118,6 +117,21 @@ export const BootstrapPackageManagement: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {pendingDelete && (
+        <ConfirmDialog
+          isOpen
+          title={`Delete "${pendingDelete.name}"?`}
+          message="The package will no longer be available for workstation setup. This action cannot be undone."
+          confirmLabel="Delete package"
+          variant="danger"
+          onConfirm={() => {
+            deleteMutation.mutate(pendingDelete.packageId);
+            setPendingDelete(null);
+          }}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+
       {/* Header */}
       <div className="flex justify-between items-center">
         <div>

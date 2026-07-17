@@ -194,18 +194,21 @@ export const handler = async (event: any) => {
       return await removePackageFromGroup(groupId, packageId);
     }
     
-    if (httpMethod === 'POST' && path.includes('/admin/workstations/') && path.includes('/packages')) {
-      const denied = requireAdmin(event);
-      if (denied) return denied;
+    // Post-launch queue management on the user API. Access is owner/shared/admin
+    // (requireWorkstationAccess), so users can manage their own queues. The POST
+    // condition also matches .../packages/{id}/retry, which is routed above.
+    if (httpMethod === 'POST' && path.includes('/workstations/') && path.includes('/packages')) {
       const workstationId = pathParams.workstationId || extractFromPath(path, 'workstations');
+      const denied = await requireWorkstationAccess(event, workstationId);
+      if (denied) return denied;
       return await addPackagesToWorkstation(workstationId, body);
     }
 
-    if (httpMethod === 'DELETE' && path.includes('/admin/workstations/') && path.includes('/packages/')) {
-      const denied = requireAdmin(event);
-      if (denied) return denied;
+    if (httpMethod === 'DELETE' && path.includes('/workstations/') && path.includes('/packages/')) {
       const workstationId = pathParams.workstationId || extractFromPath(path, 'workstations');
       const packageId = pathParams.packageId || extractFromPath(path, 'packages');
+      const denied = await requireWorkstationAccess(event, workstationId);
+      if (denied) return denied;
       return await removeQueuedPackage(workstationId, packageId);
     }
 

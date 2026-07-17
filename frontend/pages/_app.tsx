@@ -6,6 +6,9 @@ import { useRouter } from 'next/router'
 import { useAuthStore } from '@/stores/authStore'
 import { Amplify } from 'aws-amplify'
 import ErrorBoundary from '@/components/ErrorBoundary'
+import FeedbackButton from '@/components/FeedbackButton'
+import { analyticsService } from '@/services/analytics'
+import { useAnalytics } from '@/hooks/useAnalytics'
 import '@/styles/globals.css'
 
 // Configure Amplify
@@ -23,6 +26,18 @@ Amplify.configure({
 
 // Public routes that don't require authentication
 const PUBLIC_ROUTES = ['/login', '/signup', '/auth/callback']
+
+// Enables event/page-view tracking only while a user is signed in, so
+// unauthenticated pages never fire (and fail) tracking calls. Declared
+// before useAnalytics so the enable/disable effect runs first.
+function AnalyticsGate() {
+  const { isAuthenticated } = useAuthStore()
+  useEffect(() => {
+    analyticsService.setEnabled(isAuthenticated)
+  }, [isAuthenticated])
+  useAnalytics()
+  return null
+}
 
 export default function App({ Component, pageProps }: AppProps) {
   const router = useRouter()
@@ -70,7 +85,9 @@ export default function App({ Component, pageProps }: AppProps) {
   return (
     <ErrorBoundary>
       <QueryClientProvider client={queryClient}>
+        <AnalyticsGate />
         <Component {...pageProps} />
+        <FeedbackButton />
         <Toaster
           position="top-right"
           toastOptions={{

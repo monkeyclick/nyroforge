@@ -14,18 +14,25 @@ jest.mock('@aws-sdk/client-cloudwatch', () => {
   const actual = jest.requireActual('@aws-sdk/client-cloudwatch');
   return { ...actual, CloudWatchClient: jest.fn() };
 });
+jest.mock('@aws-sdk/client-ses', () => {
+  const actual = jest.requireActual('@aws-sdk/client-ses');
+  return { ...actual, SESClient: jest.fn() };
+});
 
 import { EC2Client } from '@aws-sdk/client-ec2';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
+import { SESClient } from '@aws-sdk/client-ses';
 
 const mockEC2Send = jest.fn();
 const mockDynamoSend = jest.fn();
 const mockCloudWatchSend = jest.fn();
+const mockSESSend = jest.fn();
 
 (EC2Client as jest.MockedClass<typeof EC2Client>).mockImplementation(() => ({ send: mockEC2Send } as any));
 (DynamoDBClient as jest.MockedClass<typeof DynamoDBClient>).mockImplementation(() => ({ send: mockDynamoSend } as any));
 (CloudWatchClient as jest.MockedClass<typeof CloudWatchClient>).mockImplementation(() => ({ send: mockCloudWatchSend } as any));
+(SESClient as jest.MockedClass<typeof SESClient>).mockImplementation(() => ({ send: mockSESSend } as any));
 
 // Import handler AFTER mock setup
 import { handler } from '../../src/lambda/status-monitor/index';
@@ -127,6 +134,7 @@ describe('Status Monitor Lambda', () => {
     mockDynamoSend.mockImplementation(defaultDynamoImplementation);
     mockEC2Send.mockResolvedValue({ Reservations: [] });
     mockCloudWatchSend.mockResolvedValue({ Datapoints: [] });
+    mockSESSend.mockResolvedValue({ MessageId: 'test-message-id' });
   });
 
   // ── GET /dashboard/status ─────────────────────────────────────────────────
@@ -320,6 +328,115 @@ describe('Status Monitor Lambda', () => {
       });
 
       await expect(handler(makeScheduledEvent(), mockContext)).resolves.toBeUndefined();
+    });
+  });
+
+  // ── Pre-termination warning emails ──────────────────────────────────────────
+
+  describe('Termination warning emails (scheduled event)', () => {
+    const inThirtyMinutes = () => new Date(Date.now() + 30 * 60 * 1000).toISOString();
+
+    function scanReturns(items: any[]) {
+      mockDynamoSend.mockImplementation((command: any) => {
+        if (command.constructor.name === 'ScanCommand') {
+          return Promise.resolve({ Items: items });
+        }
+        return Promise.resolve({});
+      });
+    }
+
+    it('emails the owner and stamps terminationWarnedFor when the deadline is inside the window', async () => {
+      const deadline = inThirtyMinutes();
+      scanReturns([buildWorkstationItem({ autoTerminateAt: deadline })]);
+
+      await handler(makeScheduledEvent(), mockContext);
+
+      const emailCall = mockSESSend.mock.calls.find(
+        ([command]: any[]) => command.constructor.name === 'SendEmailCommand'
+      );
+      expect(emailCall).toBeDefined();
+      expect(emailCall![0].input.Destination.ToAddresses).toEqual(['user@test.com']);
+      expect(emailCall![0].input.Message.Subject.Data).toContain('terminates');
+
+      const stampCall = mockDynamoSend.mock.calls.find(
+        ([command]: any[]) =>
+          command.constructor.name === 'UpdateItemCommand' &&
+          command.input.UpdateExpression.includes('terminationWarnedFor')
+      );
+      expect(stampCall).toBeDefined();
+      // No instance was expired, so nothing should be terminated
+      const terminateCall = mockEC2Send.mock.calls.find(
+        ([command]: any[]) => command.constructor.name === 'TerminateInstancesCommand'
+      );
+      expect(terminateCall).toBeUndefined();
+    });
+
+    it('does not re-send a warning already stamped for the same deadline', async () => {
+      const deadline = inThirtyMinutes();
+      scanReturns([buildWorkstationItem({
+        autoTerminateAt: deadline,
+        terminationWarnedFor: deadline,
+      })]);
+
+      await handler(makeScheduledEvent(), mockContext);
+      expect(mockSESSend).not.toHaveBeenCalled();
+    });
+
+    it('re-arms the warning after the deadline is extended', async () => {
+      const oldDeadline = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+      const newDeadline = inThirtyMinutes();
+      scanReturns([buildWorkstationItem({
+        autoTerminateAt: newDeadline,
+        terminationWarnedFor: oldDeadline, // warned about the OLD deadline only
+      })]);
+
+      await handler(makeScheduledEvent(), mockContext);
+      expect(mockSESSend).toHaveBeenCalled();
+    });
+
+    it('does not warn when the deadline is outside the warning window', async () => {
+      scanReturns([buildWorkstationItem({
+        autoTerminateAt: new Date(Date.now() + 5 * 60 * 60 * 1000).toISOString(),
+      })]);
+
+      await handler(makeScheduledEvent(), mockContext);
+      expect(mockSESSend).not.toHaveBeenCalled();
+    });
+
+    it('skips the warning stamp when SES fails, so it retries next run, and still terminates expired instances', async () => {
+      const expired = buildWorkstationItem({
+        workstationId: 'ws-expired',
+        instanceId: 'i-expired',
+        autoTerminateAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+      });
+      const warnable = buildWorkstationItem({
+        workstationId: 'ws-warn',
+        instanceId: 'i-warn',
+        autoTerminateAt: inThirtyMinutes(),
+      });
+      scanReturns([expired, warnable]);
+      mockSESSend.mockRejectedValue(new Error('SES sandbox rejection'));
+      mockEC2Send.mockImplementation((command: any) => {
+        if (command.constructor.name === 'TerminateInstancesCommand') {
+          return Promise.resolve({ TerminatingInstances: [{ InstanceId: 'i-expired' }] });
+        }
+        return Promise.resolve({ Reservations: [] });
+      });
+
+      await expect(handler(makeScheduledEvent(), mockContext)).resolves.toBeUndefined();
+
+      const stampCall = mockDynamoSend.mock.calls.find(
+        ([command]: any[]) =>
+          command.constructor.name === 'UpdateItemCommand' &&
+          command.input.UpdateExpression.includes('terminationWarnedFor')
+      );
+      expect(stampCall).toBeUndefined();
+
+      const terminateCall = mockEC2Send.mock.calls.find(
+        ([command]: any[]) => command.constructor.name === 'TerminateInstancesCommand'
+      );
+      expect(terminateCall).toBeDefined();
+      expect(terminateCall![0].input.InstanceIds).toEqual(['i-expired']);
     });
   });
 

@@ -207,6 +207,12 @@ export class WorkstationApiStack extends cdk.Stack {
     // Status Monitor Lambda
     const statusMonitorFunction = new ServiceLambda(this, 'StatusMonitorFunction', {
       ...commonLambdaProps,
+      environment: {
+        ...commonLambdaProps.environment,
+        // Pre-termination warning emails (scheduled auto-termination check)
+        SES_FROM_EMAIL: process.env.SES_FROM_EMAIL || 'noreply@example.com',
+        TERMINATION_WARNING_MINUTES: process.env.TERMINATION_WARNING_MINUTES || '60',
+      },
       functionName: 'MediaWorkstation-StatusMonitor',
       serviceDir: 'status-monitor',
       description: 'Monitors workstation status and provides dashboard data',
@@ -515,6 +521,13 @@ export class WorkstationApiStack extends cdk.Stack {
     // request tags, so it must be scoped by the instance's existing Project tag
     // (aws:ResourceTag). The previous aws:RequestTag condition never matched, so
     // every termination was denied and expired instances ran indefinitely.
+    // Pre-termination warning emails. SES doesn't support resource-level
+    // permissions for SendEmail.
+    functions.statusMonitor.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ses:SendEmail'],
+      resources: ['*'],
+    }));
     functions.statusMonitor.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -740,8 +753,26 @@ export class WorkstationApiStack extends cdk.Stack {
       }
     );
 
-    // POST /workstations/{workstationId}/packages/{packageId}/retry
+    // POST /workstations/{workstationId}/packages - queue packages on a
+    // launched workstation (owner/shared/admin, enforced in the lambda)
+    workstationPackagesResource.addMethod('POST',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.groupPackageService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // DELETE /workstations/{workstationId}/packages/{packageId} - remove a
+    // still-pending package from the queue
     const workstationPackageResource = workstationPackagesResource.addResource('{packageId}');
+    workstationPackageResource.addMethod('DELETE',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.groupPackageService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // POST /workstations/{workstationId}/packages/{packageId}/retry
     const packageRetryResource = workstationPackageResource.addResource('retry');
     packageRetryResource.addMethod('POST',
       new apigateway.LambdaIntegration(this.lambdaFunctions.groupPackageService), {
@@ -838,6 +869,67 @@ export class WorkstationApiStack extends cdk.Stack {
         requestModels: {
           'application/json': this.createUserPreferencesModel(),
         },
+      }
+    );
+
+    // /analytics resource
+    const analyticsResource = this.api.root.addResource('analytics');
+
+    // POST /analytics/track - record a UI analytics event
+    const analyticsTrackResource = analyticsResource.addResource('track');
+    analyticsTrackResource.addMethod('POST',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.analyticsService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // /analytics/feedback - POST submits feedback (any user);
+    // GET lists submissions (admin-gated inside the lambda)
+    const analyticsFeedbackResource = analyticsResource.addResource('feedback');
+    analyticsFeedbackResource.addMethod('POST',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.analyticsService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+    analyticsFeedbackResource.addMethod('GET',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.analyticsService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+        requestParameters: {
+          'method.request.querystring.status': false,
+        },
+      }
+    );
+
+    // PATCH /analytics/feedback/{feedbackId} - admin updates triage status
+    const analyticsFeedbackItemResource = analyticsFeedbackResource.addResource('{feedbackId}');
+    analyticsFeedbackItemResource.addMethod('PATCH',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.analyticsService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+      }
+    );
+
+    // GET /analytics/summary - aggregated events (admin-gated inside the lambda)
+    const analyticsSummaryResource = analyticsResource.addResource('summary');
+    analyticsSummaryResource.addMethod('GET',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.analyticsService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
+        requestParameters: {
+          'method.request.querystring.timeframe': false,
+        },
+      }
+    );
+
+    // GET /analytics/user/{userId} - a user's own events (self-or-admin gated inside the lambda)
+    const analyticsUserResource = analyticsResource.addResource('user').addResource('{userId}');
+    analyticsUserResource.addMethod('GET',
+      new apigateway.LambdaIntegration(this.lambdaFunctions.analyticsService), {
+        authorizer,
+        authorizationType: apigateway.AuthorizationType.COGNITO,
       }
     );
 

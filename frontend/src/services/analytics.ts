@@ -107,7 +107,7 @@ class AnalyticsService {
    * Track workstation actions
    */
   async trackWorkstationAction(
-    action: 'launch' | 'start' | 'stop' | 'terminate' | 'view',
+    action: 'launch' | 'start' | 'stop' | 'reboot' | 'terminate' | 'view',
     workstationId?: string,
     metadata?: Record<string, any>
   ): Promise<void> {
@@ -196,6 +196,25 @@ class AnalyticsService {
       return data;
     } catch (error) {
       console.error('Failed to get feedback list:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update feedback triage status (admin only)
+   */
+  async updateFeedbackStatus(
+    feedbackId: string,
+    status: 'new' | 'reviewed' | 'in-progress' | 'resolved' | 'closed'
+  ): Promise<any> {
+    try {
+      const data = await apiClient.patch<any>(
+        `/analytics/feedback/${encodeURIComponent(feedbackId)}`,
+        { status }
+      );
+      return data;
+    } catch (error) {
+      console.error('Failed to update feedback status:', error);
       throw error;
     }
   }

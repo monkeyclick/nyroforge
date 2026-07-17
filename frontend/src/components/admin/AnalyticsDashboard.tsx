@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import toast from 'react-hot-toast';
 import { analyticsService } from '../../services/analytics';
 
 interface AnalyticsSummary {
@@ -70,6 +71,25 @@ const AnalyticsDashboard: React.FC = () => {
       setError(err instanceof Error ? err.message : 'Failed to load feedback');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleStatusChange = async (feedbackId: string, status: FeedbackItem['status']) => {
+    const previous = feedback;
+    // Optimistic update; revert on failure
+    setFeedback((items) =>
+      items.map((item) => (item.feedbackId === feedbackId ? { ...item, status } : item))
+    );
+    try {
+      await analyticsService.updateFeedbackStatus(feedbackId, status);
+      toast.success('Feedback status updated');
+      // If a status filter is active, the item may no longer belong in the list
+      if (feedbackStatus) {
+        loadFeedback();
+      }
+    } catch (err) {
+      setFeedback(previous);
+      toast.error(err instanceof Error ? err.message : 'Failed to update feedback status');
     }
   };
 
@@ -358,9 +378,18 @@ const AnalyticsDashboard: React.FC = () => {
                         <div className="flex items-center space-x-2">
                           <span className="text-xl">{getFeedbackTypeIcon(item.feedbackType)}</span>
                           <p className="text-base font-medium text-gray-900">{item.title}</p>
-                          <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusBadgeColor(item.status)}`}>
-                            {item.status}
-                          </span>
+                          <select
+                            value={item.status}
+                            onChange={(e) => handleStatusChange(item.feedbackId, e.target.value as FeedbackItem['status'])}
+                            className={`text-xs leading-5 font-semibold rounded-full border-0 py-0.5 pl-2 pr-7 cursor-pointer focus:ring-2 focus:ring-blue-500 ${getStatusBadgeColor(item.status)}`}
+                            aria-label={`Status for feedback: ${item.title}`}
+                          >
+                            <option value="new">new</option>
+                            <option value="reviewed">reviewed</option>
+                            <option value="in-progress">in-progress</option>
+                            <option value="resolved">resolved</option>
+                            <option value="closed">closed</option>
+                          </select>
                         </div>
                         <p className="mt-2 text-sm text-gray-600">{item.description}</p>
                       </div>

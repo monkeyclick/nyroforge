@@ -919,7 +919,7 @@ class ApiClient {
       tags?: Record<string, string>;
     }>;
   }> {
-    return this.request('/admin/security-groups');
+    return this.request('/security-groups', {}, true);
   }
 
   async getSecurityGroup(groupId: string): Promise<{
@@ -943,23 +943,23 @@ class ApiClient {
     }>;
     tags?: Record<string, string>;
   }> {
-    return this.request(`/admin/security-groups/${groupId}`);
+    return this.request(`/security-groups/${groupId}`, {}, true);
   }
 
   async getCommonPorts(): Promise<{
     ports: Record<string, { port: number; protocol: string; description: string }>;
   }> {
-    return this.request('/admin/security-groups/common-ports');
+    return this.request('/security-groups/common-ports', {}, true);
   }
 
   async createSecurityGroup(data: {
     groupName: string;
     description: string;
   }): Promise<{ groupId: string; message: string }> {
-    return this.request('/admin/security-groups', {
+    return this.request('/security-groups', {
       method: 'POST',
       body: JSON.stringify(data),
-    });
+    }, true);
   }
 
   async addSecurityGroupRule(data: {
@@ -972,10 +972,10 @@ class ApiClient {
     description?: string;
     applicationName?: string;
   }): Promise<{ message: string; rule: any }> {
-    return this.request('/admin/security-groups/add-rule', {
+    return this.request('/security-groups/add-rule', {
       method: 'POST',
       body: JSON.stringify(data),
-    });
+    }, true);
   }
 
   async removeSecurityGroupRule(data: {
@@ -986,16 +986,16 @@ class ApiClient {
     protocol: string;
     cidrIp: string;
   }): Promise<{ message: string }> {
-    return this.request('/admin/security-groups/remove-rule', {
+    return this.request('/security-groups/remove-rule', {
       method: 'DELETE',
       body: JSON.stringify(data),
-    });
+    }, true);
   }
 
   async deleteSecurityGroup(groupId: string): Promise<{ message: string }> {
-    return this.request(`/admin/security-groups/${groupId}`, {
+    return this.request(`/security-groups/${groupId}`, {
       method: 'DELETE',
-    });
+    }, true);
   }
 
   async getWorkstationsForSecurityGroup(groupId: string): Promise<{
@@ -1011,7 +1011,7 @@ class ApiClient {
     }>;
     ec2InstanceCount: number;
   }> {
-    return this.request(`/admin/security-groups/workstations?groupId=${encodeURIComponent(groupId)}`);
+    return this.request(`/security-groups/workstations?groupId=${encodeURIComponent(groupId)}`, {}, true);
   }
 
   async attachSecurityGroupToWorkstation(data: {
@@ -1023,10 +1023,10 @@ class ApiClient {
     securityGroupId: string;
     previousSecurityGroupId?: string;
   }> {
-    return this.request('/admin/security-groups/attach-to-workstation', {
+    return this.request('/security-groups/attach-to-workstation', {
       method: 'POST',
       body: JSON.stringify(data),
-    });
+    }, true);
   }
 
   async allowMyIp(workstationId: string): Promise<{
@@ -1035,10 +1035,10 @@ class ApiClient {
     securityGroupId: string;
     workstationId: string;
   }> {
-    return this.request('/admin/security-groups/allow-my-ip', {
+    return this.request('/security-groups/allow-my-ip', {
       method: 'POST',
       body: JSON.stringify({ workstationId }),
-    });
+    }, true);
   }
 
   // Bootstrap Package Management
@@ -1217,6 +1217,20 @@ class ApiClient {
   async removeQueuedPackage(workstationId: string, packageId: string): Promise<{ message: string }> {
     return this.request(`/workstations/${workstationId}/packages/${packageId}`, {
       method: 'DELETE',
+    });
+  }
+
+  /**
+   * Push a workstation's auto-termination deadline out by N hours
+   * (from now or the current deadline, whichever is later)
+   */
+  async extendWorkstationAutoTerminate(
+    workstationId: string,
+    hours: number
+  ): Promise<{ message: string; workstation: Workstation }> {
+    return this.request(`/workstations/${workstationId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ extendAutoTerminateHours: hours }),
     });
   }
 

@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchAuthSession } from 'aws-amplify/auth';
 
+// Storage routes are served by the ADMIN API gateway at /storage/* (see
+// workstation-admin-api-stack.ts), not the user API's /admin/storage/*.
+const ADMIN_API_BASE = (
+  process.env.NEXT_PUBLIC_ADMIN_API_ENDPOINT || process.env.NEXT_PUBLIC_API_ENDPOINT || ''
+).replace(/\/+$/, '');
+
 interface StorageSystem {
   id: string;
   name: string;
@@ -155,7 +161,7 @@ export default function StorageManagement() {
       const session = await fetchAuthSession();
       const token = session.tokens?.idToken?.toString();
       
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_ENDPOINT}/admin/storage/config`, {
+      const response = await fetch(`${ADMIN_API_BASE}/storage/config`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -179,7 +185,7 @@ export default function StorageManagement() {
       const token = session.tokens?.idToken?.toString();
       
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_ENDPOINT}/admin/storage/list?prefix=${encodeURIComponent(prefix)}`,
+        `${ADMIN_API_BASE}/storage/list?prefix=${encodeURIComponent(prefix)}`,
         {
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -209,7 +215,7 @@ export default function StorageManagement() {
       const session = await fetchAuthSession();
       const token = session.tokens?.idToken?.toString();
       
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_ENDPOINT}/admin/storage/filesystems`, {
+      const response = await fetch(`${ADMIN_API_BASE}/storage/filesystems`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -248,7 +254,7 @@ export default function StorageManagement() {
       const session = await fetchAuthSession();
       const token = session.tokens?.idToken?.toString();
       
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_ENDPOINT}/admin/storage/filesystem`, {
+      const response = await fetch(`${ADMIN_API_BASE}/storage/filesystem`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -323,7 +329,7 @@ export default function StorageManagement() {
       const token = session.tokens?.idToken?.toString();
       
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_ENDPOINT}/admin/storage/download?key=${encodeURIComponent(key)}`,
+        `${ADMIN_API_BASE}/storage/download?key=${encodeURIComponent(key)}`,
         {
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -351,7 +357,7 @@ export default function StorageManagement() {
       const session = await fetchAuthSession();
       const token = session.tokens?.idToken?.toString();
       
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_ENDPOINT}/admin/storage/delete`, {
+      const response = await fetch(`${ADMIN_API_BASE}/storage/delete`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`,
@@ -397,7 +403,7 @@ export default function StorageManagement() {
         
         // Get presigned URL
         const urlResponse = await fetch(
-          `${process.env.NEXT_PUBLIC_API_ENDPOINT}/admin/storage/upload-url`,
+          `${ADMIN_API_BASE}/storage/upload-url`,
           {
             method: 'POST',
             headers: {

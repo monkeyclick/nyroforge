@@ -2160,8 +2160,11 @@ interface UpdateWorkstationRequest {
   friendlyName?: string;
   // Admin-only: reassign the owning user
   owner?: string;
-  // Admin-only: full list of additional users granted access
+  // Owner or admin: full list of additional users granted access
   assignedUsers?: string[];
+  // Owner/shared/admin: push the auto-termination deadline out by N hours
+  // from max(now, current deadline)
+  extendAutoTerminateHours?: number;
 }
 
 async function updateWorkstation(workstationId: string, updateRequest: UpdateWorkstationRequest, userId: string, callerIsAdmin: boolean): Promise<APIGatewayProxyResult> {
@@ -2208,11 +2211,14 @@ async function updateWorkstation(workstationId: string, updateRequest: UpdateWor
       };
     }
 
-    const wantsOwnershipChange = updateRequest.owner !== undefined || updateRequest.assignedUsers !== undefined;
+    const wantsOwnerReassign = updateRequest.owner !== undefined;
+    const wantsSharingChange = updateRequest.assignedUsers !== undefined;
+    const wantsOwnershipChange = wantsOwnerReassign || wantsSharingChange;
+    const callerIsOwner = workstation.userId === userId;
 
-    // Ownership changes (reassign owner / share with users) are admin-only
-    if (wantsOwnershipChange && !callerIsAdmin) {
-      console.log('❌ Ownership change denied - caller is not admin');
+    // Reassigning the owner stays admin-only
+    if (wantsOwnerReassign && !callerIsAdmin) {
+      console.log('❌ Owner reassignment denied - caller is not admin');
       await logAuditEvent(userId, 'DENIED_REASSIGN', 'workstation', workstationId, updateRequest);
       return {
         statusCode: 403,
@@ -2222,7 +2228,24 @@ async function updateWorkstation(workstationId: string, updateRequest: UpdateWor
           'Access-Control-Allow-Headers': 'Content-Type,Authorization',
           'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
         },
-        body: JSON.stringify({ message: 'Only administrators can reassign or share workstations' }),
+        body: JSON.stringify({ message: 'Only administrators can reassign workstation ownership' }),
+      };
+    }
+
+    // Sharing (assignedUsers) is self-service for the owner; shared users
+    // cannot re-share someone else's workstation.
+    if (wantsSharingChange && !callerIsAdmin && !callerIsOwner) {
+      console.log('❌ Sharing change denied - caller is neither owner nor admin');
+      await logAuditEvent(userId, 'DENIED_SHARE', 'workstation', workstationId, updateRequest);
+      return {
+        statusCode: 403,
+        headers: {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+          'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+          'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+        },
+        body: JSON.stringify({ message: 'Only the workstation owner or an administrator can manage sharing' }),
       };
     }
 
@@ -2254,6 +2277,42 @@ async function updateWorkstation(workstationId: string, updateRequest: UpdateWor
       }
       updateExpressions.push('userId = :owner');
       expressionAttributeValues[':owner'] = newOwner;
+    }
+
+    let newAutoTerminateAt: string | undefined;
+    if (updateRequest.extendAutoTerminateHours !== undefined) {
+      const hours = updateRequest.extendAutoTerminateHours;
+      if (typeof hours !== 'number' || !Number.isFinite(hours) || hours <= 0 || hours > 168) {
+        return {
+          statusCode: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+          },
+          body: JSON.stringify({ message: 'extendAutoTerminateHours must be a number between 1 and 168' }),
+        };
+      }
+      if (!workstation.autoTerminateAt) {
+        return {
+          statusCode: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': process.env.FRONTEND_URL || '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,PATCH,DELETE,OPTIONS'
+          },
+          body: JSON.stringify({ message: 'This workstation has no auto-termination schedule to extend' }),
+        };
+      }
+      // Extend from whichever is later: now, or the current deadline. An
+      // already-passed deadline extends from now so the result is always in
+      // the future.
+      const base = Math.max(Date.now(), new Date(workstation.autoTerminateAt).getTime());
+      newAutoTerminateAt = new Date(base + hours * 60 * 60 * 1000).toISOString();
+      updateExpressions.push('autoTerminateAt = :autoTerminateAt');
+      expressionAttributeValues[':autoTerminateAt'] = newAutoTerminateAt;
     }
 
     let newAssignedUsers: string[] | undefined;
@@ -2331,11 +2390,16 @@ async function updateWorkstation(workstationId: string, updateRequest: UpdateWor
     const updatedWorkstation = updateResult.Attributes ? unmarshall(updateResult.Attributes) : null;
     console.log('✅ Workstation updated');
 
-    if (wantsOwnershipChange) {
+    if (wantsOwnerReassign) {
       await logAuditEvent(userId, 'REASSIGN_WORKSTATION', 'workstation', workstationId, {
         previousOwner: workstation.userId,
         newOwner: newOwner ?? workstation.userId,
         assignedUsers: newAssignedUsers ?? workstation.assignedUsers ?? [],
+      });
+    } else if (wantsSharingChange) {
+      await logAuditEvent(userId, 'SHARE_WORKSTATION', 'workstation', workstationId, {
+        owner: workstation.userId,
+        assignedUsers: newAssignedUsers ?? [],
       });
     } else {
       await logAuditEvent(userId, 'UPDATE_WORKSTATION', 'workstation', workstationId, updateRequest);

@@ -703,6 +703,21 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
       },
     });
 
+    // Add GSI for date-range queries. eventDate is a YYYY-MM-DD daily bucket
+    // written by analytics-service; the summary endpoint queries one partition
+    // per day in the requested timeframe instead of scanning the whole table.
+    analyticsTable.addGlobalSecondaryIndex({
+      indexName: 'DateIndex',
+      partitionKey: {
+        name: 'eventDate',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'timestamp',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
     // Add GSI for searching by category
     analyticsTable.addGlobalSecondaryIndex({
       indexName: 'CategoryIndex',

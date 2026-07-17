@@ -14,8 +14,11 @@ This application now includes a comprehensive analytics system that tracks user 
    - Stores all user events and interactions
    - Partition Key: `eventId`
    - Sort Key: `timestamp`
-   - GSIs: UserIndex, EventTypeIndex, CategoryIndex
-   - TTL enabled for automatic data cleanup
+   - GSIs: UserIndex, EventTypeIndex, DateIndex, CategoryIndex
+   - `DateIndex` partitions on the `eventDate` (YYYY-MM-DD) daily bucket; the
+     summary endpoint queries one partition per day instead of scanning
+   - TTL enabled for automatic data cleanup — events expire after
+     `ANALYTICS_RETENTION_DAYS` (default 90)
 
 2. **UserFeedback Table**
    - Stores user feedback submissions
@@ -27,12 +30,13 @@ This application now includes a comprehensive analytics system that tracks user 
 
 **Analytics Service** ([`src/lambda/analytics-service/index.ts`](../src/lambda/analytics-service/index.ts))
 
-Endpoints:
+Endpoints (all wired on the user API Gateway under `/analytics`):
 - `POST /analytics/track` - Track user events
 - `POST /analytics/feedback` - Submit feedback
 - `GET /analytics/summary` - Get analytics summary (admin only)
 - `GET /analytics/feedback` - List feedback (admin only)
-- `GET /analytics/user/{userId}` - Get user-specific analytics
+- `PATCH /analytics/feedback/{feedbackId}` - Update feedback triage status (admin only)
+- `GET /analytics/user/{userId}` - Get user-specific analytics (own data, or any user for admins)
 
 ### Frontend Components
 
@@ -55,7 +59,12 @@ analyticsService.submitFeedback(feedback)
 // Admin queries
 analyticsService.getAnalyticsSummary(timeframe)
 analyticsService.getFeedbackList(status)
+analyticsService.updateFeedbackStatus(feedbackId, status)
 ```
+
+Tracking is gated on authentication: `_app.tsx` calls
+`analyticsService.setEnabled(isAuthenticated)`, so unauthenticated pages
+(login/signup) never fire tracking calls.
 
 #### React Hook
 
@@ -77,13 +86,15 @@ Features:
    - User-facing feedback form
    - Support for bug reports, feature requests, improvements
    - Optional rating system
-   - Accessible from floating button in main layout
+   - Opened by **FeedbackButton** ([`frontend/src/components/FeedbackButton.tsx`](../frontend/src/components/FeedbackButton.tsx)),
+     a floating button rendered globally from `_app.tsx` on every authenticated page
 
 2. **AnalyticsDashboard** ([`frontend/src/components/admin/AnalyticsDashboard.tsx`](../frontend/src/components/admin/AnalyticsDashboard.tsx))
    - Admin dashboard for viewing analytics
    - Three tabs: Overview, Recent Events, User Feedback
    - Filterable by timeframe and status
-   - Real-time metrics and visualizations
+   - Feedback triage: change a submission's status inline (new → reviewed →
+     in-progress → resolved/closed)
 
 ## Usage Examples
 
@@ -156,6 +167,7 @@ Admins can access the analytics dashboard from the admin panel:
 - `launch` - Launch a new workstation
 - `start` - Start a stopped workstation
 - `stop` - Stop a running workstation
+- `reboot` - Reboot a running workstation
 - `terminate` - Terminate a workstation
 - `view` - View workstation details
 
@@ -169,7 +181,8 @@ Admins can access the analytics dashboard from the admin panel:
 ## Privacy & Data Retention
 
 - Analytics data includes user email and session information
-- TTL is configured for automatic data cleanup
+- Events carry a `ttl` attribute and are auto-deleted after
+  `ANALYTICS_RETENTION_DAYS` (env var on the Lambda, default 90 days)
 - User IPs are collected but can be anonymized
 - Feedback is stored indefinitely but can be managed by admins
 
@@ -268,9 +281,13 @@ Track a user event.
 ```json
 {
   "message": "Event tracked successfully",
-  "eventId": "1699876543210-a1b2c3d4e5"
+  "eventId": "0b9c6a1e-4d2f-4a8b-9c3d-7e5f6a1b2c3d"
 }
 ```
+
+Validation: `eventAction` is required (≤200 chars); `eventType`, `eventCategory`,
+`eventLabel`, and `sessionId` are optional bounded strings; `eventValue` must be
+a finite number; `metadata` must be an object under 4 KB serialized.
 
 ### POST /analytics/feedback
 
@@ -290,7 +307,33 @@ Submit user feedback.
 ```json
 {
   "message": "Feedback submitted successfully",
-  "feedbackId": "fb-1699876543210-a1b2c3d4e5"
+  "feedbackId": "fb-0b9c6a1e-4d2f-4a8b-9c3d-7e5f6a1b2c3d"
+}
+```
+
+Validation: `title` (≤200 chars) and `description` (≤2000 chars) are required;
+`feedbackType` must be one of bug/feature/improvement/other; `rating` must be
+an integer 1–5 if present.
+
+### PATCH /analytics/feedback/{feedbackId}
+
+Update a feedback submission's triage status (admin only).
+
+**Request:**
+```json
+{
+  "status": "reviewed"
+}
+```
+
+Valid statuses: `new`, `reviewed`, `in-progress`, `resolved`, `closed`. The
+update stamps `updatedAt` and `updatedBy` (the admin's email) on the item.
+
+**Response:**
+```json
+{
+  "message": "Feedback status updated",
+  "feedback": { "feedbackId": "fb-...", "status": "reviewed", "updatedAt": "..." }
 }
 ```
 

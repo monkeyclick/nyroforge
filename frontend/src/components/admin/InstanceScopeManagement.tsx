@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { apiClient } from '../../services/api';
+import ConfirmDialog from '../ConfirmDialog';
 
 interface DiscoveredInstance {
   instanceId: string;
@@ -62,6 +63,7 @@ const InstanceScopeManagement: React.FC = () => {
   const [isUpdating, setIsUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<DiscoveredInstance[] | null>(null);
   const [showBulkActions, setShowBulkActions] = useState(false);
 
   // Fetch instances with scope status
@@ -134,8 +136,9 @@ const InstanceScopeManagement: React.FC = () => {
     }
   };
 
-  // Handle removing instances from management
-  const handleRemoveFromManagement = async () => {
+  // Handle removing instances from management: validate selection, then ask
+  // for confirmation via ConfirmDialog before running the removal.
+  const handleRemoveFromManagement = () => {
     if (selectedInstances.size === 0) return;
 
     const managedSelected = instances.filter(
@@ -147,11 +150,10 @@ const InstanceScopeManagement: React.FC = () => {
       return;
     }
 
-    // TODO: Replace native confirm() with custom ConfirmationDialog component
-    if (!confirm(`Are you sure you want to remove ${managedSelected.length} instance(s) from management? They will become unassigned. This action cannot be undone.`)) {
-      return;
-    }
+    setPendingRemoval(managedSelected);
+  };
 
+  const executeRemoveFromManagement = async (managedSelected: DiscoveredInstance[]) => {
     setIsUpdating(true);
     setError(null);
     setSuccessMessage(null);
@@ -240,6 +242,22 @@ const InstanceScopeManagement: React.FC = () => {
 
   return (
     <div className="space-y-4">
+      {pendingRemoval && (
+        <ConfirmDialog
+          isOpen
+          title={`Remove ${pendingRemoval.length} instance${pendingRemoval.length > 1 ? 's' : ''} from management?`}
+          message="The instances become unassigned and disappear from workstation management. This action cannot be undone."
+          confirmLabel="Remove from management"
+          variant="danger"
+          onConfirm={() => {
+            const toRemove = pendingRemoval;
+            setPendingRemoval(null);
+            executeRemoveFromManagement(toRemove);
+          }}
+          onCancel={() => setPendingRemoval(null)}
+        />
+      )}
+
       {/* Header */}
       <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
         <div className="flex items-center justify-between mb-4">

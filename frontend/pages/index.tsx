@@ -6,9 +6,23 @@ import toast from 'react-hot-toast'
 import LaunchWorkstationModal from '@/components/workstation/LaunchWorkstationModal'
 import RdpCredentialsModal from '@/components/workstation/RdpCredentialsModal'
 import DcvConnectionModal from '@/components/workstation/DcvConnectionModal'
+import PackageInstallationProgress from '@/components/workstation/PackageInstallationProgress'
+import ShareWorkstationModal from '@/components/workstation/ShareWorkstationModal'
+import ConfirmDialog, { ConfirmDialogProps } from '@/components/ConfirmDialog'
 import { apiClient } from '@/services/api'
+import { analyticsService } from '@/services/analytics'
 import { useAuthStore } from '@/stores/authStore'
 import { Workstation } from '@/types'
+
+function formatTimeLeft(ms: number): string {
+  const totalMinutes = Math.max(0, Math.floor(ms / 60000))
+  const days = Math.floor(totalMinutes / 1440)
+  const hours = Math.floor((totalMinutes % 1440) / 60)
+  const minutes = totalMinutes % 60
+  if (days > 0) return `${days}d ${hours}h`
+  if (hours > 0) return `${hours}h ${minutes}m`
+  return `${minutes}m`
+}
 
 export default function DashboardPage() {
   const router = useRouter()
@@ -23,6 +37,9 @@ export default function DashboardPage() {
   const [filterStatus, setFilterStatus] = useState('all')
   const [editingNameId, setEditingNameId] = useState<string | null>(null)
   const [editingNameValue, setEditingNameValue] = useState('')
+  const [packagesWorkstationId, setPackagesWorkstationId] = useState<string | null>(null)
+  const [shareWorkstation, setShareWorkstation] = useState<Workstation | null>(null)
+  const [confirmDialog, setConfirmDialog] = useState<Omit<ConfirmDialogProps, 'isOpen' | 'onCancel'> | null>(null)
   
   useEffect(() => {
     if (!user) {
@@ -34,7 +51,13 @@ export default function DashboardPage() {
     queryKey: ['workstations'],
     queryFn: () => apiClient.getWorkstations(),
     enabled: !!user,
-    refetchInterval: 30000,
+    // Poll fast while any workstation is mid-transition so state changes
+    // show up in seconds, and settle back to 30s when everything is steady.
+    refetchInterval: (query) => {
+      const list = query.state.data?.workstations || []
+      const transitional = ['launching', 'pending', 'starting', 'stopping', 'rebooting', 'shutting-down', 'terminating']
+      return list.some(ws => transitional.includes(ws.status as string)) ? 5000 : 30000
+    },
   })
 
   const { data: costData } = useQuery({
@@ -58,31 +81,71 @@ export default function DashboardPage() {
     }
   })
 
+  // Optimistically flip a workstation's status in the cache so the UI reacts
+  // instantly; the poll then converges on the real state. Returns a snapshot
+  // for rollback on error.
+  const optimisticStatus = async (id: string, status: string) => {
+    await queryClient.cancelQueries({ queryKey: ['workstations'] })
+    const previous = queryClient.getQueryData<{ workstations: Workstation[] }>(['workstations'])
+    queryClient.setQueryData<{ workstations: Workstation[] }>(['workstations'], (old) =>
+      old ? {
+        ...old,
+        workstations: old.workstations.map(ws =>
+          (ws.workstationId || ws.instanceId) === id ? { ...ws, status: status as Workstation['status'] } : ws
+        ),
+      } : old
+    )
+    return previous
+  }
+
   // Power actions (start / stop / reboot) — the instance is preserved
   const powerMutation = useMutation({
     mutationFn: ({ id, action }: { id: string; action: 'start' | 'stop' | 'reboot' }) =>
       apiClient.setWorkstationPower(id, action),
-    onSuccess: (_data, { action }) => {
+    onMutate: ({ id, action }) =>
+      optimisticStatus(id, action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'rebooting'),
+    onSuccess: (_data, { action, id }) => {
       toast.success(
         action === 'start' ? 'Workstation is starting' :
         action === 'stop' ? 'Workstation is stopping' :
         'Workstation is rebooting'
       )
-      queryClient.invalidateQueries({ queryKey: ['workstations'] })
+      analyticsService.trackWorkstationAction(action, id)
     },
-    onError: (error: any, { action }) => {
+    onError: (error: any, { action }, previous) => {
+      if (previous) queryClient.setQueryData(['workstations'], previous)
       toast.error(error.message || `Failed to ${action} workstation`)
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['workstations'] })
     },
   })
 
   const terminateMutation = useMutation({
     mutationFn: (id: string) => apiClient.terminateWorkstation(id),
-    onSuccess: () => {
+    onMutate: (id) => optimisticStatus(id, 'terminating'),
+    onSuccess: (_data, id) => {
       toast.success('Workstation is being terminated')
+      analyticsService.trackWorkstationAction('terminate', id)
+    },
+    onError: (error: any, _id, previous) => {
+      if (previous) queryClient.setQueryData(['workstations'], previous)
+      toast.error(error.message || 'Failed to terminate workstation')
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['workstations'] })
+    },
+  })
+
+  const extendMutation = useMutation({
+    mutationFn: ({ id, hours }: { id: string; hours: number }) =>
+      apiClient.extendWorkstationAutoTerminate(id, hours),
+    onSuccess: (_data, { hours }) => {
+      toast.success(`Auto-termination pushed out by ${hours}h`)
       queryClient.invalidateQueries({ queryKey: ['workstations'] })
     },
     onError: (error: any) => {
-      toast.error(error.message || 'Failed to terminate workstation')
+      toast.error(error.message || 'Failed to extend auto-termination')
     },
   })
 
@@ -108,7 +171,11 @@ export default function DashboardPage() {
 
   const runningCount = workstations.filter(ws => ws.status === 'running').length
   const stoppedCount = workstations.filter(ws => ws.status === 'stopped').length
-  const monthlyCost = (costData as any)?.total || (costData as any)?.monthlyTotal || 0
+  // The costs API returns { totalCost, trends, costOptimizationSuggestions }
+  const monthlyCost = costData?.totalCost ?? 0
+  const projectedMonthly = costData?.trends?.projectedMonthly ?? 0
+  const dailyAverage = costData?.trends?.dailyAverage ?? 0
+  const costSuggestions = costData?.costOptimizationSuggestions ?? []
 
   const handleLogout = async () => {
     await signOut()
@@ -118,15 +185,38 @@ export default function DashboardPage() {
 
   const handlePower = (ws: Workstation, action: 'start' | 'stop' | 'reboot') => {
     const name = ws.friendlyName || ws.instanceId
-    if (action === 'stop' && !confirm(`Stop ${name}?\n\nThe instance shuts down but is NOT destroyed — you can start it again later.`)) return
-    if (action === 'reboot' && !confirm(`Reboot ${name}?`)) return
-    powerMutation.mutate({ id: ws.workstationId || ws.instanceId, action })
+    const id = ws.workstationId || ws.instanceId
+    if (action === 'start') {
+      powerMutation.mutate({ id, action })
+      return
+    }
+    setConfirmDialog({
+      title: action === 'stop' ? `Stop ${name}?` : `Reboot ${name}?`,
+      message: action === 'stop'
+        ? 'The instance shuts down but is NOT destroyed — you can start it again later.'
+        : 'Anyone using this workstation will be disconnected while it restarts.',
+      confirmLabel: action === 'stop' ? 'Stop workstation' : 'Reboot workstation',
+      variant: 'warning',
+      onConfirm: () => {
+        setConfirmDialog(null)
+        powerMutation.mutate({ id, action })
+      },
+    })
   }
 
   const handleTerminate = (ws: Workstation) => {
     const name = ws.friendlyName || ws.instanceId
-    if (!confirm(`⚠️ TERMINATE ${name}?\n\nThis permanently destroys the instance and all data on it. This cannot be undone.`)) return
-    terminateMutation.mutate(ws.workstationId || ws.instanceId)
+    const id = ws.workstationId || ws.instanceId
+    setConfirmDialog({
+      title: `Terminate ${name}?`,
+      message: 'This permanently destroys the instance and ALL data on it.\nThis cannot be undone.',
+      confirmLabel: 'Terminate permanently',
+      variant: 'danger',
+      onConfirm: () => {
+        setConfirmDialog(null)
+        terminateMutation.mutate(id)
+      },
+    })
   }
 
   if (!user) return null
@@ -163,10 +253,10 @@ export default function DashboardPage() {
 
       {/* Three Column Layout */}
       <div className="max-w-full mx-auto px-6 py-6">
-        <div className="grid grid-cols-12 gap-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           
           {/* LEFT: Actions */}
-          <div className="col-span-2 space-y-4">
+          <div className="space-y-4 lg:col-span-2">
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
               <h2 className="text-sm font-semibold text-gray-900 mb-3">ACTIONS</h2>
               <div className="space-y-2">
@@ -206,9 +296,9 @@ export default function DashboardPage() {
           </div>
 
           {/* CENTER: Environment View */}
-          <div className="col-span-7 space-y-6">
+          <div className="space-y-6 lg:col-span-7">
             {/* Stats */}
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
                 <div className="text-2xl font-bold text-gray-900">{workstations.length}</div>
                 <div className="text-xs text-gray-500 mt-1">Total Workstations</div>
@@ -219,7 +309,12 @@ export default function DashboardPage() {
               </div>
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
                 <div className="text-2xl font-bold text-gray-900">${monthlyCost.toFixed(0)}</div>
-                <div className="text-xs text-gray-500 mt-1">Monthly Cost</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Cost This Month
+                  {projectedMonthly > 0 && (
+                    <span className="text-gray-400"> · projected ${projectedMonthly.toFixed(0)}</span>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -232,7 +327,24 @@ export default function DashboardPage() {
               </div>
               <div className="p-4">
                 {isLoading ? (
-                  <div className="text-center py-8 text-gray-500">Loading...</div>
+                  <div className="space-y-3" aria-label="Loading workstations">
+                    {[0, 1, 2].map(i => (
+                      <div key={i} className="border border-gray-200 rounded-lg p-4 animate-pulse">
+                        <div className="flex items-center gap-2 mb-3">
+                          <div className="h-4 w-40 bg-gray-200 rounded" />
+                          <div className="h-4 w-14 bg-gray-100 rounded" />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="h-3 w-32 bg-gray-100 rounded" />
+                          <div className="h-3 w-28 bg-gray-100 rounded" />
+                        </div>
+                        <div className="mt-3 flex gap-2 justify-end">
+                          <div className="h-6 w-16 bg-gray-100 rounded" />
+                          <div className="h-6 w-16 bg-gray-100 rounded" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 ) : filteredWorkstations.length === 0 ? (
                   <div className="text-center py-12">
                     <div className="text-gray-400 mb-2">No workstations</div>
@@ -308,7 +420,7 @@ export default function DashboardPage() {
                                     <span className={`px-2 py-0.5 text-xs font-medium rounded ${
                                       ws.status === 'running' ? 'bg-green-100 text-green-700' :
                                       ws.status === 'stopped' ? 'bg-gray-100 text-gray-700' :
-                                      (ws.status as string) === 'stopping' || (ws.status as string) === 'terminating' ? 'bg-orange-100 text-orange-700' :
+                                      ['stopping', 'shutting-down', 'terminating'].includes(ws.status) ? 'bg-orange-100 text-orange-700' :
                                       'bg-yellow-100 text-yellow-700'
                                     }`}>
                                       {ws.status}
@@ -330,7 +442,39 @@ export default function DashboardPage() {
                                   <div className="text-gray-500">IP: <span className="text-gray-900 font-mono text-xs">{ws.publicIp}</span></div>
                                 )}
                               </div>
-                              
+
+                              {/* Auto-termination countdown + extend */}
+                              {ws.autoTerminateAt && !['terminated', 'terminating'].includes(ws.status) && (() => {
+                                const msLeft = new Date(ws.autoTerminateAt).getTime() - Date.now()
+                                const urgent = msLeft < 60 * 60 * 1000
+                                return (
+                                  <div className={`mt-2 flex flex-wrap items-center gap-2 rounded-md px-2 py-1.5 text-xs ${
+                                    urgent ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-amber-50 text-amber-700 border border-amber-200'
+                                  }`}>
+                                    <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    <span className="font-medium">
+                                      Auto-terminates {msLeft <= 0 ? 'imminently' : `in ${formatTimeLeft(msLeft)}`}
+                                    </span>
+                                    <span className="ml-auto flex items-center gap-1">
+                                      <span className="hidden sm:inline">Extend:</span>
+                                      {[1, 8, 24].map(h => (
+                                        <button
+                                          key={h}
+                                          onClick={() => extendMutation.mutate({ id: wsId, hours: h })}
+                                          disabled={extendMutation.isPending}
+                                          className="px-1.5 py-0.5 rounded border border-current hover:bg-white disabled:opacity-50"
+                                          title={`Extend auto-termination by ${h} hour${h > 1 ? 's' : ''}`}
+                                        >
+                                          +{h}h
+                                        </button>
+                                      ))}
+                                    </span>
+                                  </div>
+                                )
+                              })()}
+
                               {/* Ownership Information */}
                               {(ws.ownerName || ws.ownerGroups?.length || ws.assignedUsers?.length) && (
                                 <div className="mt-2 pt-2 border-t border-gray-100">
@@ -373,6 +517,24 @@ export default function DashboardPage() {
                               )}
                             </div>
                             <div className="flex flex-wrap gap-2 justify-end">
+                              {!['terminated', 'terminating'].includes(ws.status) && (
+                                <button
+                                  onClick={() => setPackagesWorkstationId(wsId)}
+                                  className="px-3 py-1.5 text-xs border border-gray-300 rounded hover:bg-gray-50"
+                                  title="View software installation progress"
+                                >
+                                  📦 Packages
+                                </button>
+                              )}
+                              {!['terminated', 'terminating'].includes(ws.status) && (isAdmin || ws.userId === user.email) && (
+                                <button
+                                  onClick={() => setShareWorkstation(ws)}
+                                  className="px-3 py-1.5 text-xs border border-gray-300 rounded hover:bg-gray-50"
+                                  title="Share this workstation with other users"
+                                >
+                                  👥 Share
+                                </button>
+                              )}
                               {ws.status === 'running' && (
                                 <>
                                   <button
@@ -466,7 +628,7 @@ export default function DashboardPage() {
           </div>
 
           {/* RIGHT: User Management */}
-          <div className="col-span-3 space-y-4">
+          <div className="space-y-4 lg:col-span-3">
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
               <div className="flex justify-between items-center mb-3">
                 <h2 className="text-sm font-semibold text-gray-900">USER INFO</h2>
@@ -519,6 +681,32 @@ export default function DashboardPage() {
               </div>
             </div>
 
+            {(dailyAverage > 0 || costSuggestions.length > 0) && (
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                <h2 className="text-sm font-semibold text-gray-900 mb-3">COST INSIGHTS</h2>
+                <div className="space-y-2 text-sm mb-3">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Daily average</span>
+                    <span className="font-medium text-gray-900">${dailyAverage.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Projected month</span>
+                    <span className="font-medium text-gray-900">${projectedMonthly.toFixed(2)}</span>
+                  </div>
+                </div>
+                {costSuggestions.length > 0 && (
+                  <ul className="space-y-2 border-t border-gray-100 pt-3">
+                    {costSuggestions.slice(0, 4).map((suggestion, idx) => (
+                      <li key={idx} className="flex gap-2 text-xs text-gray-600">
+                        <span aria-hidden="true">💡</span>
+                        <span>{suggestion}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
             {isAdmin && (
               <div className="bg-blue-50 rounded-lg border border-blue-200 p-4">
                 <h2 className="text-sm font-semibold text-blue-900 mb-2">ADMIN ACCESS</h2>
@@ -542,9 +730,35 @@ export default function DashboardPage() {
         onClose={() => setShowLaunchModal(false)}
         onSuccess={() => {
           setShowLaunchModal(false)
+          analyticsService.trackWorkstationAction('launch')
           queryClient.invalidateQueries({ queryKey: ['workstations'] })
         }}
       />
+
+      {confirmDialog && (
+        <ConfirmDialog
+          {...confirmDialog}
+          isOpen
+          onCancel={() => setConfirmDialog(null)}
+        />
+      )}
+
+      {packagesWorkstationId && (
+        <PackageInstallationProgress
+          workstationId={packagesWorkstationId}
+          isOpen={!!packagesWorkstationId}
+          onClose={() => setPackagesWorkstationId(null)}
+        />
+      )}
+
+      {shareWorkstation && (
+        <ShareWorkstationModal
+          key={shareWorkstation.workstationId || shareWorkstation.instanceId}
+          workstation={shareWorkstation}
+          isOpen={!!shareWorkstation}
+          onClose={() => setShareWorkstation(null)}
+        />
+      )}
 
       {rdpCredentials && selectedWorkstation && (
         <RdpCredentialsModal

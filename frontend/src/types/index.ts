@@ -20,7 +20,7 @@ export interface Workstation {
   domainName?: string;
   localAdminUser?: string;
   credentialsSecretArn?: string;
-  status: 'launching' | 'running' | 'stopping' | 'stopped' | 'terminated';
+  status: 'launching' | 'pending' | 'starting' | 'running' | 'rebooting' | 'stopping' | 'stopped' | 'shutting-down' | 'terminating' | 'terminated';
   launchTime: string;
   lastStatusCheck: string;
   autoTerminateAt?: string;

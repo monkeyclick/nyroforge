@@ -227,4 +227,145 @@ describe('Group Package Service Lambda', () => {
       expect(result.statusCode).toBe(403);
     });
   });
+
+  // ── Post-launch queue management on the user API ────────────────────────────
+
+  describe('POST/DELETE /workstations/{id}/packages (post-launch queue)', () => {
+    const OWNER = 'owner@test.com';
+
+    /** GetItem on the workstations table returns a workstation owned by OWNER;
+     *  GetItem on the packages table returns a package definition. */
+    function mockWorkstationAndPackage(assignedUsers: string[] = []) {
+      mockDynamoSend.mockImplementation((command: any) => {
+        const name = command.constructor.name;
+        if (name === 'GetItemCommand' && command.input.TableName === 'test-workstations-table') {
+          return Promise.resolve({
+            Item: marshall({
+              PK: 'WORKSTATION#ws-001',
+              SK: 'METADATA',
+              workstationId: 'ws-001',
+              userId: OWNER,
+              assignedUsers,
+            }),
+          });
+        }
+        if (name === 'GetItemCommand' && command.input.TableName === 'test-bootstrap-packages-table') {
+          return Promise.resolve({
+            Item: marshall({
+              packageId: 'pkg-1',
+              name: 'Package One',
+              downloadUrl: 'https://example.com/pkg1.exe',
+              installCommand: 'pkg1.exe /S',
+              order: 10,
+            }),
+          });
+        }
+        if (name === 'QueryCommand') {
+          return Promise.resolve({ Items: [] });
+        }
+        return Promise.resolve({});
+      });
+    }
+
+    function userEvent(email: string, overrides: Record<string, any> = {}) {
+      return makeEvent({
+        requestContext: {
+          authorizer: { claims: { email, 'cognito:groups': 'workstation-user' } },
+        },
+        ...overrides,
+      });
+    }
+
+    it('lets the owner queue packages on their own workstation (201, queue write)', async () => {
+      mockWorkstationAndPackage();
+      const result = await handler(userEvent(OWNER, {
+        httpMethod: 'POST',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+        body: JSON.stringify({ packageIds: ['pkg-1'] }),
+      }));
+
+      expect(result.statusCode).toBe(201);
+      expect(JSON.parse(result.body).added).toBe(1);
+      const put = mockDynamoSend.mock.calls.find(
+        ([c]: any[]) => c.constructor.name === 'PutItemCommand' && c.input.TableName === 'test-package-queue-table'
+      );
+      expect(put).toBeDefined();
+    });
+
+    it('rejects another non-admin user with 403 and writes nothing', async () => {
+      mockWorkstationAndPackage();
+      const result = await handler(userEvent('stranger@test.com', {
+        httpMethod: 'POST',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+        body: JSON.stringify({ packageIds: ['pkg-1'] }),
+      }));
+
+      expect(result.statusCode).toBe(403);
+      const put = mockDynamoSend.mock.calls.find(
+        ([c]: any[]) => c.constructor.name === 'PutItemCommand'
+      );
+      expect(put).toBeUndefined();
+    });
+
+    it('lets a shared user manage the queue', async () => {
+      mockWorkstationAndPackage(['shared@test.com']);
+      const result = await handler(userEvent('shared@test.com', {
+        httpMethod: 'POST',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+        body: JSON.stringify({ packageIds: ['pkg-1'] }),
+      }));
+      expect(result.statusCode).toBe(201);
+    });
+
+    it('returns 400 when packageIds is missing', async () => {
+      mockWorkstationAndPackage();
+      const result = await handler(userEvent(OWNER, {
+        httpMethod: 'POST',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+        body: JSON.stringify({}),
+      }));
+      expect(result.statusCode).toBe(400);
+    });
+
+    it('lets the owner remove a queued package (DELETE → 200)', async () => {
+      mockWorkstationAndPackage();
+      const result = await handler(userEvent(OWNER, {
+        httpMethod: 'DELETE',
+        path: '/workstations/ws-001/packages/pkg-1',
+        pathParameters: { workstationId: 'ws-001', packageId: 'pkg-1' },
+      }));
+
+      expect(result.statusCode).toBe(200);
+      const del = mockDynamoSend.mock.calls.find(
+        ([c]: any[]) => c.constructor.name === 'DeleteItemCommand'
+      );
+      expect(del).toBeDefined();
+      expect(del![0].input.TableName).toBe('test-package-queue-table');
+    });
+
+    it('still routes POST .../packages/{id}/retry to the retry handler, not the queue-add handler', async () => {
+      mockWorkstationAndPackage();
+      const result = await handler(userEvent(OWNER, {
+        httpMethod: 'POST',
+        path: '/workstations/ws-001/packages/pkg-1/retry',
+        pathParameters: { workstationId: 'ws-001', packageId: 'pkg-1' },
+        body: null,
+      }));
+
+      // Retry issues an UpdateItem on the queue table (never a PutItem)
+      expect(result.statusCode).toBe(200);
+      const update = mockDynamoSend.mock.calls.find(
+        ([c]: any[]) => c.constructor.name === 'UpdateItemCommand'
+      );
+      expect(update).toBeDefined();
+      const put = mockDynamoSend.mock.calls.find(
+        ([c]: any[]) => c.constructor.name === 'PutItemCommand'
+      );
+      expect(put).toBeUndefined();
+    });
+  });
 });
