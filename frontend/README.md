@@ -1,6 +1,6 @@
 # Media Workstation Management - Next.js Frontend
 
-Modern React-based frontend for managing AWS EC2 media workstations, built with Next.js 14, TypeScript, and Tailwind CSS.
+Modern React-based frontend for managing AWS EC2 media workstations, built with Next.js 16, TypeScript, and Tailwind CSS.
 
 ---
 
@@ -25,7 +25,7 @@ Modern React-based frontend for managing AWS EC2 media workstations, built with 
 
 ## 🛠️ Tech Stack
 
-- **Framework**: Next.js 14 (Pages Router)
+- **Framework**: Next.js 16 (Pages Router)
 - **Language**: TypeScript
 - **Styling**: Tailwind CSS
 - **State Management**: Zustand + TanStack Query
@@ -54,9 +54,10 @@ frontend/
 │   │   ├── admin/          # Admin-specific components
 │   │   ├── dashboard/      # Dashboard widgets
 │   │   └── workstation/    # Workstation components
-│   ├── layouts/            # Page layouts
-│   │   ├── MainLayout.tsx  # Authenticated layout
+│   ├── layouts/            # Shared page shells
+│   │   ├── AppShell.tsx    # Authenticated navigation and theme shell
 │   │   └── AuthLayout.tsx  # Login/signup layout
+│   ├── hooks/              # Shared UI and analytics hooks
 │   ├── services/           # API services
 │   │   └── api.ts         # API client
 │   ├── stores/             # State management
@@ -150,14 +151,14 @@ See [NEXTJS_DEPLOYMENT_GUIDE.md](../NEXTJS_DEPLOYMENT_GUIDE.md) for detailed dep
 ## 🧪 Testing
 
 ```bash
-# Run tests (when implemented)
-npm run test
+# Run component tests
+npm test -- --runInBand
 
 # Run linter
 npm run lint
 
 # Type check
-npx tsc --noEmit
+npm run typecheck
 ```
 
 ---

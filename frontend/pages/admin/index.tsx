@@ -19,6 +19,12 @@ import InstanceFamilyManagement from '@/components/admin/InstanceFamilyManagemen
 import DeleteUserDialog from '@/components/admin/DeleteUserDialog'
 import PasswordManagementDialog from '@/components/admin/PasswordManagementDialog'
 import AddUserModal from '@/components/admin/AddUserModal'
+import AppShell from '@/layouts/AppShell'
+import AdminNavigation, { AdminTab } from '@/components/admin/AdminNavigation'
+import AdminSummaryStats from '@/components/admin/AdminSummaryStats'
+import AdminSystemInfo from '@/components/admin/AdminSystemInfo'
+import AdminWorkstationFleet from '@/components/admin/AdminWorkstationFleet'
+import type { Workstation } from '@/types'
 
 interface AmiValidationResult {
   available: boolean;
@@ -35,7 +41,7 @@ export default function AdminPage() {
   const router = useRouter()
   const { user, logout, isAdmin } = useAuthStore()
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useState('workstations')
+  const [activeTab, setActiveTab] = useState<AdminTab>('workstations')
   const [userManagementSubTab, setUserManagementSubTab] = useState<'users' | 'groups'>('users')
   const [securityGroups, setSecurityGroups] = useState<any[]>([])
   const [selectedOsVersion, setSelectedOsVersion] = useState('windows-server-2025')
@@ -153,13 +159,13 @@ export default function AdminPage() {
     },
   });
 
-  const handleAdminPower = (ws: any, action: 'start' | 'stop') => {
+  const handleAdminPower = (ws: Workstation, action: 'start' | 'stop') => {
     const name = ws.friendlyName || ws.instanceId;
     if (action === 'stop' && !confirm(`Stop ${name} (owner: ${ws.userId})?\n\nThe instance shuts down but is NOT destroyed.`)) return;
     powerWorkstation.mutate({ id: ws.workstationId || ws.instanceId, action });
   };
 
-  const handleAdminTerminate = (ws: any) => {
+  const handleAdminTerminate = (ws: Workstation) => {
     const name = ws.friendlyName || ws.instanceId;
     if (!confirm(`⚠️ TERMINATE ${name} (owner: ${ws.userId})?\n\nThis permanently destroys the instance and all data on it. This cannot be undone.`)) return;
     terminateWorkstation.mutate(ws.workstationId || ws.instanceId);
@@ -169,6 +175,36 @@ export default function AdminPage() {
     await signOut()
     logout()
     router.push('/login')
+  }
+
+  const handleReconcile = async () => {
+    if (!confirm('Reconcile EC2 instances with DynamoDB? This will create records for any orphaned instances.')) return
+    try {
+      console.log('Starting reconciliation...')
+      const session = await fetchAuthSession()
+      const token = session.tokens?.idToken?.toString()
+      console.log('Token obtained:', token ? 'Yes' : 'No')
+      const url = `${process.env.NEXT_PUBLIC_API_ENDPOINT}/workstations/reconcile`
+      console.log('Calling URL:', url)
+      const response = await fetch(url, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      })
+      console.log('Response status:', response.status)
+      const data = await response.json()
+      console.log('Response data:', data)
+      if (response.ok) {
+        alert(`Reconciliation complete!\n\nReconciled: ${data.summary.reconciledCount}\nTotal EC2: ${data.summary.totalEC2Instances}\nTotal DB: ${data.summary.totalDynamoRecords}`)
+        queryClient.invalidateQueries({ queryKey: ['admin-workstations'] })
+      } else {
+        const errorMessage = `Reconciliation failed!\n\nStatus: ${response.status}\nError: ${data.message || data.error || 'Unknown error'}\n\nCheck browser console for details.`
+        console.error('Reconciliation failed:', data)
+        alert(errorMessage)
+      }
+    } catch (error) {
+      console.error('Reconciliation error:', error)
+      alert(`Failed to reconcile workstations:\n${error instanceof Error ? error.message : String(error)}\n\nCheck browser console for details.`)
+    }
   }
 
   if (!user || !isAdmin) return null
@@ -183,261 +219,29 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Top Nav */}
-      <nav className="bg-white border-b border-gray-200">
-        <div className="max-w-full mx-auto px-6">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center space-x-6">
-              <h1 className="text-xl font-bold text-gray-900">Admin Panel</h1>
-              <button
-                onClick={() => router.push('/')}
-                className="text-sm text-gray-600 hover:text-gray-900"
-              >
-                ← Back to Dashboard
-              </button>
-            </div>
-            <div className="flex items-center space-x-4">
-              <span className="text-sm text-gray-600">{user.email}</span>
-              <button
-                onClick={handleLogout}
-                className="px-3 py-1.5 text-sm border border-gray-300 rounded hover:bg-gray-50"
-              >
-                Logout
-              </button>
-            </div>
-          </div>
-        </div>
-      </nav>
-
+    <AppShell title="Studio Operations" isAdmin onSignOut={handleLogout}>
       <div className="max-w-full mx-auto px-6 py-6">
-        <div className="grid grid-cols-12 gap-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           
-          {/* LEFT: Navigation */}
-          <div className="col-span-2">
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-              <h2 className="text-sm font-semibold text-gray-900 mb-3">ADMIN MENU</h2>
-              <div className="space-y-1">
-                {['workstations', 'instance-scope', 'instance-families', 'costs', 'user-management', 'security', 'storage', 'analytics', 'settings', 'bootstrap'].map(tab => (
-                  <button
-                    key={tab}
-                    onClick={() => setActiveTab(tab)}
-                    className={`w-full text-left px-3 py-2 text-sm rounded ${
-                      activeTab === tab
-                        ? 'bg-blue-50 text-blue-700 font-medium'
-                        : 'text-gray-600 hover:bg-gray-50'
-                    }`}
-                  >
-                    {tab === 'bootstrap' ? 'Bootstrap Packages' :
-                     tab === 'analytics' ? 'Analytics' :
-                     tab === 'user-management' ? 'User Management' :
-                     tab === 'storage' ? '💾 Storage' :
-                     tab === 'instance-scope' ? '🎯 Instance Scope' :
-                     tab === 'instance-families' ? '🖥️ Instance Families' :
-                     tab.charAt(0).toUpperCase() + tab.slice(1)}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
+          <AdminNavigation activeTab={activeTab} onChange={setActiveTab} />
 
           {/* CENTER: Content */}
-          <div className="col-span-7 space-y-6">
-            {/* Stats */}
-            <div className="grid grid-cols-4 gap-4">
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <div className="text-2xl font-bold text-gray-900">{summary.totalInstances}</div>
-                <div className="text-xs text-gray-500 mt-1">Total</div>
-              </div>
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <div className="text-2xl font-bold text-green-600">{summary.runningInstances}</div>
-                <div className="text-xs text-gray-500 mt-1">Running</div>
-              </div>
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <div className="text-2xl font-bold text-gray-600">{summary.stoppedInstances}</div>
-                <div className="text-xs text-gray-500 mt-1">Stopped</div>
-              </div>
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                <div className="text-2xl font-bold text-gray-900">${summary.estimatedMonthlyCost.toFixed(0)}</div>
-                <div className="text-xs text-gray-500 mt-1">Monthly</div>
-              </div>
-            </div>
+          <div className="space-y-6 lg:col-span-7">
+            <AdminSummaryStats summary={summary} />
 
             {/* Content Area */}
             {activeTab === 'workstations' && (
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200">
-                <div className="px-4 py-3 border-b border-gray-200 flex justify-between items-center">
-                  <h2 className="text-sm font-semibold text-gray-900">
-                    ALL WORKSTATIONS ({workstations.length})
-                  </h2>
-                  <div className="flex items-center space-x-2">
-                    <button
-                      onClick={() => setShowAddExistingInstanceModal(true)}
-                      className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700"
-                    >
-                      + Add Existing EC2
-                    </button>
-                    <button
-                      onClick={async () => {
-                      if (!confirm('Reconcile EC2 instances with DynamoDB? This will create records for any orphaned instances.')) return;
-                      try {
-                        console.log('Starting reconciliation...');
-                        const session = await fetchAuthSession();
-                        const token = session.tokens?.idToken?.toString();
-                        console.log('Token obtained:', token ? 'Yes' : 'No');
-                        
-                        const url = `${process.env.NEXT_PUBLIC_API_ENDPOINT}/workstations/reconcile`;
-                        console.log('Calling URL:', url);
-                        
-                        const response = await fetch(url, {
-                          method: 'PUT',
-                          headers: {
-                            'Authorization': `Bearer ${token}`,
-                            'Content-Type': 'application/json',
-                          },
-                        });
-                        
-                        console.log('Response status:', response.status);
-                        const data = await response.json();
-                        console.log('Response data:', data);
-                        
-                        if (response.ok) {
-                          alert(`Reconciliation complete!\n\nReconciled: ${data.summary.reconciledCount}\nTotal EC2: ${data.summary.totalEC2Instances}\nTotal DB: ${data.summary.totalDynamoRecords}`);
-                          queryClient.invalidateQueries({ queryKey: ['admin-workstations'] });
-                        } else {
-                          const errorMsg = `Reconciliation failed!\n\nStatus: ${response.status}\nError: ${data.message || data.error || 'Unknown error'}\n\nCheck browser console for details.`;
-                          console.error('Reconciliation failed:', data);
-                          alert(errorMsg);
-                        }
-                      } catch (error) {
-                        console.error('Reconciliation error:', error);
-                        const errorMsg = `Failed to reconcile workstations:\n${error instanceof Error ? error.message : String(error)}\n\nCheck browser console for details.`;
-                        alert(errorMsg);
-                      }
-                    }}
-                      className="px-3 py-1.5 text-xs bg-green-600 text-white rounded hover:bg-green-700"
-                    >
-                      🔄 Reconcile
-                    </button>
-                  </div>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="min-w-full divide-y divide-gray-200">
-                    <thead className="bg-gray-50">
-                      <tr>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Instance ID</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Owner</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Region</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">IP</th>
-                        <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="bg-white divide-y divide-gray-200">
-                      {isLoading ? (
-                        <tr>
-                          <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
-                            Loading...
-                          </td>
-                        </tr>
-                      ) : workstations.length === 0 ? (
-                        <tr>
-                          <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
-                            No workstations found
-                          </td>
-                        </tr>
-                      ) : (
-                        workstations.map((ws: any) => {
-                          const wsId = ws.workstationId || ws.instanceId;
-                          const pendingPowerAction = powerWorkstation.isPending && powerWorkstation.variables?.id === wsId
-                            ? powerWorkstation.variables.action
-                            : null;
-                          const isTerminatePending = terminateWorkstation.isPending && terminateWorkstation.variables === wsId;
-                          const isBusy = !!pendingPowerAction || isTerminatePending;
-
-                          return (
-                          <tr key={ws.instanceId} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 text-sm font-mono text-gray-900">
-                              <div>{ws.instanceId}</div>
-                              {ws.friendlyName && (
-                                <div className="text-xs text-gray-400 font-sans">{ws.friendlyName}</div>
-                              )}
-                            </td>
-                            <td className="px-4 py-3 text-sm text-gray-600">
-                              <div>{ws.userId}</div>
-                              {ws.assignedUsers && ws.assignedUsers.length > 0 && (
-                                <div
-                                  className="text-xs text-blue-600 mt-0.5"
-                                  title={`Shared with: ${ws.assignedUsers.join(', ')}`}
-                                >
-                                  +{ws.assignedUsers.length} shared user{ws.assignedUsers.length > 1 ? 's' : ''}
-                                </div>
-                              )}
-                            </td>
-                            <td className="px-4 py-3 text-sm text-gray-600">{ws.instanceType}</td>
-                            <td className="px-4 py-3 text-sm text-gray-600">{ws.region}</td>
-                            <td className="px-4 py-3 text-sm">
-                              <span className={`px-2 py-1 text-xs font-medium rounded ${
-                                ws.status === 'running' ? 'bg-green-100 text-green-700' :
-                                ws.status === 'stopped' ? 'bg-gray-100 text-gray-700' :
-                                ws.status === 'stopping' || ws.status === 'terminating' ? 'bg-orange-100 text-orange-700' :
-                                'bg-yellow-100 text-yellow-700'
-                              }`}>
-                                {ws.status}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3 text-sm font-mono text-gray-600">{ws.publicIp || '-'}</td>
-                            <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
-                              <div className="flex items-center justify-end gap-2">
-                                {ws.status === 'stopped' && (
-                                  <button
-                                    onClick={() => handleAdminPower(ws, 'start')}
-                                    className="px-2 py-1 text-xs bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50"
-                                    disabled={isBusy}
-                                    title="Start the instance"
-                                  >
-                                    {pendingPowerAction === 'start' ? 'Starting…' : 'Start'}
-                                  </button>
-                                )}
-                                {ws.status === 'running' && (
-                                  <button
-                                    onClick={() => handleAdminPower(ws, 'stop')}
-                                    className="px-2 py-1 text-xs bg-amber-500 text-white rounded hover:bg-amber-600 disabled:opacity-50"
-                                    disabled={isBusy}
-                                    title="Shut down the instance — it can be started again later"
-                                  >
-                                    {pendingPowerAction === 'stop' ? 'Stopping…' : 'Stop'}
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => setAssigningWorkstation(ws)}
-                                  className="px-2 py-1 text-xs border border-blue-300 text-blue-700 rounded hover:bg-blue-50 disabled:opacity-50"
-                                  disabled={isBusy}
-                                  title="Reassign owner or share with other users"
-                                >
-                                  Assign
-                                </button>
-                                {!['terminated', 'terminating'].includes(ws.status) && (
-                                  <button
-                                    onClick={() => handleAdminTerminate(ws)}
-                                    className="px-2 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
-                                    disabled={isBusy}
-                                    title="Permanently destroy the instance and all data on it"
-                                  >
-                                    {isTerminatePending ? 'Terminating…' : 'Terminate'}
-                                  </button>
-                                )}
-                              </div>
-                            </td>
-                          </tr>
-                          );
-                        })
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+              <AdminWorkstationFleet
+                workstations={workstations}
+                isLoading={isLoading}
+                pendingPower={powerWorkstation.isPending ? powerWorkstation.variables : undefined}
+                pendingTerminationId={terminateWorkstation.isPending ? terminateWorkstation.variables : undefined}
+                onAddExisting={() => setShowAddExistingInstanceModal(true)}
+                onReconcile={handleReconcile}
+                onPower={handleAdminPower}
+                onAssign={setAssigningWorkstation}
+                onTerminate={handleAdminTerminate}
+              />
             )}
 
             {activeTab === 'user-management' && (
@@ -1085,43 +889,7 @@ export default function AdminPage() {
             )}
           </div>
 
-          {/* RIGHT: System Info */}
-          <div className="col-span-3 space-y-4">
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-              <h2 className="text-sm font-semibold text-gray-900 mb-3">SYSTEM STATUS</h2>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Total Instances</span>
-                  <span className="font-semibold text-gray-900">{summary.totalInstances}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Running</span>
-                  <span className="font-semibold text-green-600">{summary.runningInstances}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Stopped</span>
-                  <span className="font-semibold text-gray-600">{summary.stoppedInstances}</span>
-                </div>
-                <div className="pt-2 border-t border-gray-200 mt-2">
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Hourly Cost</span>
-                    <span className="font-semibold text-gray-900">${summary.totalHourlyCost.toFixed(2)}</span>
-                  </div>
-                  <div className="flex justify-between mt-1">
-                    <span className="text-gray-500">Monthly Est.</span>
-                    <span className="font-semibold text-gray-900">${summary.estimatedMonthlyCost.toFixed(0)}</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="bg-blue-50 rounded-lg border border-blue-200 p-4">
-              <h2 className="text-sm font-semibold text-blue-900 mb-2">ADMIN PRIVILEGES</h2>
-              <p className="text-xs text-blue-700">
-                You have full system access. All workstations and users are visible.
-              </p>
-            </div>
-          </div>
+          <AdminSystemInfo summary={summary} />
         </div>
       </div>
 
@@ -1218,6 +986,6 @@ export default function AdminPage() {
           currentUserId={user?.id || ''}
         />
       )}
-    </div>
+    </AppShell>
   )
 }

@@ -3,6 +3,7 @@ import { useRouter } from 'next/router'
 import { useAuthStore, SYSTEM_ROLES } from '@/stores/authStore'
 import { signIn, confirmSignIn, fetchAuthSession, signOut, getCurrentUser, fetchUserAttributes } from 'aws-amplify/auth'
 import { Permission } from '@/types/auth'
+import ThemeToggle from '@/components/ThemeToggle'
 
 // Helper function to get default permissions for a role
 function getDefaultPermissionsForRole(roleId: string): Permission[] {
@@ -190,7 +191,8 @@ export default function LoginPage() {
 
   if (needsNewPassword) {
     return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', padding: '1rem' }}>
+      <div className="studio-shell auth-stage">
+        <div className="absolute right-5 top-5"><ThemeToggle /></div>
         <div className="login-card">
           <div className="flex justify-center mb-6">
             <div className="flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-500 to-blue-600">
@@ -256,18 +258,19 @@ export default function LoginPage() {
   }
 
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100vh', padding: '1rem' }}>
+    <div className="studio-shell auth-stage">
+      <div className="absolute right-5 top-5"><ThemeToggle /></div>
       <div className="login-card">
         <div className="flex justify-center mb-6">
           <div className="flex items-center justify-center w-16 h-16 rounded-2xl bg-gradient-to-br from-purple-500 to-blue-600">
-            <span className="text-3xl">🖥️</span>
+            <span className="text-2xl font-black text-white">N</span>
           </div>
         </div>
         <h2 className="text-center text-2xl font-bold mb-2 text-gray-900">
-          Welcome Back
+          Welcome back to NyroForge
         </h2>
         <p className="text-center text-gray-600 mb-8">
-          Sign in to manage your workstations
+          Your creative workstations are ready when you are.
         </p>
 
         <form onSubmit={handleSubmit}>

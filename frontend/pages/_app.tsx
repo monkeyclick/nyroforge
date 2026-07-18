@@ -77,7 +77,7 @@ export default function App({ Component, pageProps }: AppProps) {
   if (!isHydrated || isLoading) {
     return (
       <div className="flex h-screen items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+        <div className="h-12 w-12 animate-spin rounded-full border-2 border-violet-500/20 border-t-violet-500"></div>
       </div>
     )
   }
@@ -93,8 +93,9 @@ export default function App({ Component, pageProps }: AppProps) {
           toastOptions={{
             duration: 4000,
             style: {
-              background: '#363636',
-              color: '#fff',
+              background: 'var(--studio-surface)',
+              color: 'var(--studio-text)',
+              border: '1px solid var(--studio-border)',
             },
             success: {
               duration: 3000,

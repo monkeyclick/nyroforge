@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/authStore'
 import { updatePassword } from 'aws-amplify/auth'
 import { apiClient } from '@/services/api'
 import toast from 'react-hot-toast'
+import AppShell from '@/layouts/AppShell'
 
 export default function ProfilePage() {
   const router = useRouter()
@@ -92,24 +93,7 @@ export default function ProfilePage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Top Nav */}
-      <nav className="bg-white border-b border-gray-200">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="flex justify-between h-16">
-            <div className="flex items-center space-x-6">
-              <h1 className="text-xl font-bold text-gray-900">My Profile</h1>
-              <button
-                onClick={() => router.push('/')}
-                className="text-sm text-gray-600 hover:text-gray-900"
-              >
-                ← Back to Dashboard
-              </button>
-            </div>
-          </div>
-        </div>
-      </nav>
-
+    <AppShell title="My Profile">
       <div className="max-w-4xl mx-auto px-6 py-8">
         <div className="grid gap-6">
           {/* Profile Information Card */}
@@ -342,6 +326,6 @@ export default function ProfilePage() {
           </div>
         </div>
       </div>
-    </div>
+    </AppShell>
   )
 }
