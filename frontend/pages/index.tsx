@@ -19,11 +19,13 @@ import StudioHero from '@/components/dashboard/StudioHero'
 import StudioStats from '@/components/dashboard/StudioStats'
 import StudioFilters from '@/components/dashboard/StudioFilters'
 import DashboardInsights from '@/components/dashboard/DashboardInsights'
+import { useActivityStore } from '@/stores/activityStore'
 
 export default function DashboardPage() {
   const router = useRouter()
   const { user, logout, isAdmin } = useAuthStore()
   const queryClient = useQueryClient()
+  const { addActivity, updateActivity } = useActivityStore()
   const [showLaunchModal, setShowLaunchModal] = useState(false)
   const [showRdpModal, setShowRdpModal] = useState(false)
   const [showDcvModal, setShowDcvModal] = useState(false)
@@ -98,18 +100,23 @@ export default function DashboardPage() {
   const powerMutation = useMutation({
     mutationFn: ({ id, action }: { id: string; action: 'start' | 'stop' | 'reboot' }) =>
       apiClient.setWorkstationPower(id, action),
-    onMutate: ({ id, action }) =>
-      optimisticStatus(id, action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'rebooting'),
-    onSuccess: (_data, { action, id }) => {
+    onMutate: async ({ id, action }) => {
+      const previous = await optimisticStatus(id, action === 'start' ? 'starting' : action === 'stop' ? 'stopping' : 'rebooting')
+      const activityId = addActivity({ title: `${action.charAt(0).toUpperCase() + action.slice(1)} workstation`, description: 'Request sent to the studio infrastructure.', status: 'in_progress', category: 'workstation', resourceId: id })
+      return { previous, activityId }
+    },
+    onSuccess: (_data, { action, id }, context) => {
       toast.success(
         action === 'start' ? 'Workstation is starting' :
         action === 'stop' ? 'Workstation is stopping' :
         'Workstation is rebooting'
       )
       analyticsService.trackWorkstationAction(action, id)
+      if (context?.activityId) updateActivity(context.activityId, { status: 'succeeded', description: `Workstation ${action} request accepted.` })
     },
-    onError: (error: any, { action }, previous) => {
-      if (previous) queryClient.setQueryData(['workstations'], previous)
+    onError: (error: any, { action }, context) => {
+      if (context?.previous) queryClient.setQueryData(['workstations'], context.previous)
+      if (context?.activityId) updateActivity(context.activityId, { status: 'failed', description: error.message || `Failed to ${action} workstation.` })
       toast.error(error.message || `Failed to ${action} workstation`)
     },
     onSettled: () => {
@@ -119,13 +126,19 @@ export default function DashboardPage() {
 
   const terminateMutation = useMutation({
     mutationFn: (id: string) => apiClient.terminateWorkstation(id),
-    onMutate: (id) => optimisticStatus(id, 'terminating'),
-    onSuccess: (_data, id) => {
+    onMutate: async (id) => {
+      const previous = await optimisticStatus(id, 'terminating')
+      const activityId = addActivity({ title: 'Terminate workstation', description: 'Permanent termination requested.', status: 'in_progress', category: 'workstation', resourceId: id })
+      return { previous, activityId }
+    },
+    onSuccess: (_data, id, context) => {
       toast.success('Workstation is being terminated')
       analyticsService.trackWorkstationAction('terminate', id)
+      if (context?.activityId) updateActivity(context.activityId, { status: 'succeeded', description: 'Termination request accepted.' })
     },
-    onError: (error: any, _id, previous) => {
-      if (previous) queryClient.setQueryData(['workstations'], previous)
+    onError: (error: any, _id, context) => {
+      if (context?.previous) queryClient.setQueryData(['workstations'], context.previous)
+      if (context?.activityId) updateActivity(context.activityId, { status: 'failed', description: error.message || 'Failed to terminate workstation.' })
       toast.error(error.message || 'Failed to terminate workstation')
     },
     onSettled: () => {
@@ -136,11 +149,13 @@ export default function DashboardPage() {
   const extendMutation = useMutation({
     mutationFn: ({ id, hours }: { id: string; hours: number }) =>
       apiClient.extendWorkstationAutoTerminate(id, hours),
-    onSuccess: (_data, { hours }) => {
+    onSuccess: (_data, { id, hours }) => {
       toast.success(`Auto-termination pushed out by ${hours}h`)
+      addActivity({ title: 'Session extended', description: `Session lifetime extended by ${hours} hour${hours === 1 ? '' : 's'}.`, status: 'succeeded', category: 'workstation', resourceId: id })
       queryClient.invalidateQueries({ queryKey: ['workstations'] })
     },
-    onError: (error: any) => {
+    onError: (error: any, { id }) => {
+      addActivity({ title: 'Session extension failed', description: error.message || 'The session could not be extended.', status: 'failed', category: 'workstation', resourceId: id })
       toast.error(error.message || 'Failed to extend auto-termination')
     },
   })
@@ -298,22 +313,28 @@ export default function DashboardPage() {
                         onPower={(action) => handlePower(ws, action)}
                         onTerminate={() => handleTerminate(ws)}
                         onRemoteDesktop={async () => {
+                          const activityId = addActivity({ title: 'Prepare remote desktop', description: `Retrieving secure credentials for ${ws.friendlyName || ws.instanceId}.`, status: 'in_progress', category: 'connection', resourceId: wsId, resourceName: ws.friendlyName })
                           try {
                             const creds = await apiClient.getWorkstationCredentials(wsId)
                             setRdpCredentials(creds)
                             setSelectedWorkstation(ws)
                             setShowRdpModal(true)
+                            updateActivity(activityId, { status: 'succeeded', description: 'Remote desktop credentials are ready.' })
                           } catch (error: any) {
+                            updateActivity(activityId, { status: 'failed', description: error.message || 'Failed to retrieve remote desktop credentials.' })
                             toast.error(error.message || 'Failed to get credentials')
                           }
                         }}
                         onConnect={async () => {
+                          const activityId = addActivity({ title: 'Prepare studio connection', description: `Opening a low-latency session for ${ws.friendlyName || ws.instanceId}.`, status: 'in_progress', category: 'connection', resourceId: wsId, resourceName: ws.friendlyName })
                           try {
                             const creds = await apiClient.getWorkstationCredentials(wsId)
                             setDcvConnection({ url: `https://${ws.publicIp}:8443`, quicEnabled: true, username: creds.username, password: creds.password })
                             setSelectedWorkstation(ws)
                             setShowDcvModal(true)
+                            updateActivity(activityId, { status: 'succeeded', description: 'Studio connection credentials are ready.' })
                           } catch (error: any) {
+                            updateActivity(activityId, { status: 'failed', description: error.message || 'Failed to prepare studio connection.' })
                             toast.error(error.message || 'Failed to get credentials')
                           }
                         }}
@@ -346,6 +367,7 @@ export default function DashboardPage() {
         onClose={() => setShowLaunchModal(false)}
         onSuccess={() => {
           setShowLaunchModal(false)
+          addActivity({ title: 'Workstation launch accepted', description: 'Your new creative workstation is being provisioned.', status: 'succeeded', category: 'workstation' })
           analyticsService.trackWorkstationAction('launch')
           queryClient.invalidateQueries({ queryKey: ['workstations'] })
         }}

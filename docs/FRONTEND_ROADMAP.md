@@ -37,10 +37,14 @@ This roadmap captures the work that follows the initial visual redesign and comp
 
 ## Planned: Activity center
 
-- Add persistent progress for provisioning, software installation, power transitions, and failures.
-- Provide recovery guidance and recent completed activity.
+- [x] Add a persistent, accessible activity drawer with unread state and bounded device-local history.
+- [x] Track workstation power, termination, connection preparation, session extensions, launch acknowledgement, and admin fleet actions.
+- [x] Surface aggregate software installation progress, completion, failure, and retry state.
+- [x] Provide failure guidance, dismissal, and completed-activity clearing.
+- [ ] Reconcile API acknowledgements with authoritative backend completion events across devices.
+- [ ] Keep software polling active outside the installation modal for server-authoritative background progress.
 
-**Done when:** users can leave a modal and still understand every operation in progress.
+**Current scope:** recent activity persists on this browser and is operational feedback, not an audit log. Cross-device history requires a backend event stream.
 
 ## Planned: Search and filters
 

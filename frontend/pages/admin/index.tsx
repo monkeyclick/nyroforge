@@ -25,6 +25,7 @@ import AdminSummaryStats from '@/components/admin/AdminSummaryStats'
 import AdminSystemInfo from '@/components/admin/AdminSystemInfo'
 import AdminWorkstationFleet from '@/components/admin/AdminWorkstationFleet'
 import type { Workstation } from '@/types'
+import { useActivityStore } from '@/stores/activityStore'
 
 interface AmiValidationResult {
   available: boolean;
@@ -41,6 +42,7 @@ export default function AdminPage() {
   const router = useRouter()
   const { user, logout, isAdmin } = useAuthStore()
   const queryClient = useQueryClient()
+  const { addActivity, updateActivity } = useActivityStore()
   const [activeTab, setActiveTab] = useState<AdminTab>('workstations')
   const [userManagementSubTab, setUserManagementSubTab] = useState<'users' | 'groups'>('users')
   const [securityGroups, setSecurityGroups] = useState<any[]>([])
@@ -132,12 +134,15 @@ export default function AdminPage() {
 
   const terminateWorkstation = useMutation({
     mutationFn: (workstationId: string) => apiClient.terminateWorkstation(workstationId),
-    onSuccess: () => {
+    onMutate: (workstationId) => addActivity({ title: 'Admin termination', description: 'Termination requested from Studio Operations.', status: 'in_progress', category: 'workstation', resourceId: workstationId }),
+    onSuccess: (_data, _workstationId, activityId) => {
+      if (activityId) updateActivity(activityId, { status: 'succeeded', description: 'Termination request accepted.' })
       toast.success('Workstation is being terminated');
       queryClient.invalidateQueries({ queryKey: ['admin-workstations'] });
       queryClient.invalidateQueries({ queryKey: ['admin-dashboard'] });
     },
-    onError: (error: any) => {
+    onError: (error: any, _workstationId, activityId) => {
+      if (activityId) updateActivity(activityId, { status: 'failed', description: error.message || 'Failed to terminate workstation.' })
       toast.error(error.message || 'Failed to terminate workstation');
     },
   });
@@ -145,7 +150,9 @@ export default function AdminPage() {
   const powerWorkstation = useMutation({
     mutationFn: ({ id, action }: { id: string; action: 'start' | 'stop' | 'reboot' }) =>
       apiClient.setWorkstationPower(id, action),
-    onSuccess: (_data, { action }) => {
+    onMutate: ({ id, action }) => addActivity({ title: `Admin ${action} request`, description: 'Request sent from Studio Operations.', status: 'in_progress', category: 'workstation', resourceId: id }),
+    onSuccess: (_data, { action }, activityId) => {
+      if (activityId) updateActivity(activityId, { status: 'succeeded', description: `Workstation ${action} request accepted.` })
       toast.success(
         action === 'start' ? 'Workstation is starting' :
         action === 'stop' ? 'Workstation is stopping' :
@@ -154,7 +161,8 @@ export default function AdminPage() {
       queryClient.invalidateQueries({ queryKey: ['admin-workstations'] });
       queryClient.invalidateQueries({ queryKey: ['admin-dashboard'] });
     },
-    onError: (error: any, { action }) => {
+    onError: (error: any, { action }, activityId) => {
+      if (activityId) updateActivity(activityId, { status: 'failed', description: error.message || `Failed to ${action} workstation.` })
       toast.error(error.message || `Failed to ${action} workstation`);
     },
   });

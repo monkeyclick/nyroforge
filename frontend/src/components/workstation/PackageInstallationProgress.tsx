@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { apiClient } from '../../services/api';
 import type { PackageQueueItem } from '../../types';
+import { useActivityStore } from '../../stores/activityStore';
 
 interface PackageInstallationProgressProps {
   workstationId: string;
@@ -15,6 +16,7 @@ export const PackageInstallationProgress: React.FC<PackageInstallationProgressPr
   onClose,
 }) => {
   const [retryingPackageId, setRetryingPackageId] = useState<string | null>(null);
+  const { addActivity, updateActivity } = useActivityStore();
 
   // Poll for installation status every 10 seconds
   const { data: statusData, isLoading, refetch } = useQuery({
@@ -24,13 +26,30 @@ export const PackageInstallationProgress: React.FC<PackageInstallationProgressPr
     enabled: isOpen,
   });
 
+  useEffect(() => {
+    const summary = statusData?.summary
+    if (!summary?.total) return
+    const id = `software-${workstationId}`
+    const status = summary.failed > 0 ? 'failed' : summary.completed === summary.total ? 'succeeded' : summary.installing > 0 ? 'in_progress' : 'queued'
+    const progress = Math.round((summary.completed / summary.total) * 100)
+    const description = `${summary.completed} of ${summary.total} packages installed${summary.failed ? ` · ${summary.failed} failed` : ''}.`
+    const existing = useActivityStore.getState().activities.find(item => item.id === id)
+    if (!existing) {
+      addActivity({ id, title: 'Software installation', description, status, category: 'software', resourceId: workstationId, progress, errorMessage: summary.failed ? 'One or more packages need attention.' : undefined })
+    } else if (existing.status !== status || existing.progress !== progress || existing.description !== description) {
+      updateActivity(id, { status, progress, description, errorMessage: summary.failed ? 'One or more packages need attention.' : undefined, read: false })
+    }
+  }, [statusData, workstationId, addActivity, updateActivity])
+
   const handleRetry = async (packageId: string) => {
     setRetryingPackageId(packageId);
+    updateActivity(`software-${workstationId}`, { status: 'in_progress', description: 'Retrying failed software installation.', errorMessage: undefined, read: false });
     try {
       await apiClient.retryPackageInstallation(workstationId, packageId);
       await refetch();
     } catch (error) {
       console.error('Failed to retry package installation:', error);
+      updateActivity(`software-${workstationId}`, { status: 'failed', description: 'Software installation retry failed.', errorMessage: 'The retry request could not be completed.', read: false });
     } finally {
       setRetryingPackageId(null);
     }
