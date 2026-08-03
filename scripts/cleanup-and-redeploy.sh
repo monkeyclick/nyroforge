@@ -177,10 +177,8 @@ cdk deploy WorkstationFrontend --require-approval never || {
 }
 print_success "Frontend stack deployed"
 
-print_status "🏗️  Deploying website stack..."
-cdk deploy WorkstationWebsite --require-approval never || {
-    print_warning "Website deployment failed or not needed. Continuing..."
-}
+# The website stack is deployed at the end, once the UI has been built against
+# the endpoints below — Next.js inlines them at build time.
 
 # Get deployment outputs
 print_status "📋 Retrieving deployment information..."
@@ -211,21 +209,22 @@ export USER_POOL_ID="$USER_POOL_ID"
 export AWS_REGION="$AWS_REGION"
 
 # Get admin credentials
-if [ -z "$ADMIN_EMAIL" ]; then
+if [ -z "${ADMIN_EMAIL:-}" ]; then
     read -p "Enter admin email address [admin@company.com]: " ADMIN_EMAIL
     ADMIN_EMAIL=${ADMIN_EMAIL:-admin@company.com}
 fi
 
-if [ -z "$ADMIN_NAME" ]; then
+if [ -z "${ADMIN_NAME:-}" ]; then
     read -p "Enter admin full name [System Administrator]: " ADMIN_NAME
     ADMIN_NAME=${ADMIN_NAME:-"System Administrator"}
 fi
 
-if [ -z "$ADMIN_PASSWORD" ]; then
+if [ -z "${ADMIN_PASSWORD:-}" ]; then
     echo "Enter admin password (leave blank for auto-generated):"
     read -s ADMIN_PASSWORD
     if [ -z "$ADMIN_PASSWORD" ]; then
-        ADMIN_PASSWORD="${ADMIN_PASSWORD:-$(openssl rand -base64 16 | tr -d '+/=' | head -c 16)!A1}"
+        RANDOM_BASE=$(openssl rand -base64 24 | tr -d '+/=\n')
+        ADMIN_PASSWORD="${RANDOM_BASE:0:16}!A1a"
         echo "Admin password: $ADMIN_PASSWORD"
         echo "⚠️  Save this password - it will not be shown again."
     fi
@@ -243,14 +242,39 @@ node scripts/init-admin-system.js || {
 
 print_success "Admin system initialized successfully"
 
-# Build frontend
-print_status "🎨 Building frontend application..."
-cd frontend
-npm install
-npm run build
-cd ..
+# Seed the bootstrap package catalog. A fresh deployment starts with an empty
+# table, so workstations would launch with no GPU driver and no DCV server.
+print_status "📦 Seeding the bootstrap package catalog..."
+BOOTSTRAP_PACKAGES_TABLE=$(aws cloudformation describe-stacks \
+    --stack-name WorkstationInfrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`BootstrapPackagesTableName`].OutputValue' \
+    --output text --region "$AWS_REGION" 2>/dev/null || echo "")
+export BOOTSTRAP_PACKAGES_TABLE="${BOOTSTRAP_PACKAGES_TABLE:-WorkstationBootstrapPackages}"
 
-print_success "Frontend built successfully"
+node scripts/seed-bootstrap-packages.js || {
+    print_error "Bootstrap package seeding failed"
+    exit 1
+}
+node scripts/seed-dcv-package.js || {
+    print_error "DCV package seeding failed"
+    exit 1
+}
+print_success "Package catalog seeded"
+
+# Deploy the website stack and publish the UI. deploy-frontend.sh reads the
+# deployed endpoints, writes frontend/.env.local, builds the static export and
+# syncs it — the only correct order.
+print_status "🎨 Deploying website stack and publishing the web UI..."
+cdk deploy WorkstationWebsite --require-approval never || {
+    print_error "Website stack deployment failed"
+    exit 1
+}
+./scripts/deploy-frontend.sh || {
+    print_error "Frontend deployment failed"
+    exit 1
+}
+
+print_success "Web UI deployed"
 
 # Final summary
 echo ""
@@ -261,16 +285,16 @@ echo ""
 echo "✅ All old stacks destroyed"
 echo "✅ Fresh infrastructure deployed"
 echo "✅ Admin system initialized"
-echo "✅ Frontend application built"
+echo "✅ Package catalog seeded"
+echo "✅ Web UI built and published"
 echo ""
 echo "🔐 Admin Login Credentials:"
 echo "  Email: $ADMIN_EMAIL"
-echo "  Password: $ADMIN_PASSWORD"
+echo "  Password: $ADMIN_PASSWORD (temporary — change it at first login)"
 echo ""
 echo "🌐 API Endpoint: $API_ENDPOINT"
 echo "🆔 User Pool ID: $USER_POOL_ID"
 echo ""
-echo "📁 Frontend Build Location: frontend/build/"
 echo ""
 echo "📝 Next Steps:"
 echo "  1. Deploy the frontend (frontend/build/) to your hosting platform"

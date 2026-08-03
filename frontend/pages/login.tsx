@@ -18,10 +18,14 @@ export default function LoginPage() {
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
-  // Set when Cognito requires the user to replace their temporary password
+  // Set when Cognito requires the user to replace their temporary password.
+  // given_name/family_name are required pool attributes and are collected here
+  // because the challenge response must carry any that are still unset.
   const [needsNewPassword, setNeedsNewPassword] = useState(false)
   const [newPassword, setNewPassword] = useState('')
   const [confirmNewPassword, setConfirmNewPassword] = useState('')
+  const [firstName, setFirstName] = useState('')
+  const [lastName, setLastName] = useState('')
 
   // Builds the session user object from Cognito and routes to the dashboard.
   // Everything here comes from the ID token and user attributes — no backend
@@ -157,14 +161,35 @@ export default function LoginPage() {
       setError('Passwords do not match.')
       return
     }
-    if (newPassword.length < 8) {
-      setError('Password must be at least 8 characters long.')
+    // Matches the user pool policy (minLength 12, all four character classes).
+    // This used to allow 8, so a compliant-looking password was rejected by
+    // Cognito instead of by the form.
+    if (newPassword.length < 12) {
+      setError('Password must be at least 12 characters long.')
+      return
+    }
+    if (!/[a-z]/.test(newPassword) || !/[A-Z]/.test(newPassword) ||
+        !/[0-9]/.test(newPassword) || !/[^A-Za-z0-9]/.test(newPassword)) {
+      setError('Password must include uppercase, lowercase, a number, and a symbol.')
       return
     }
 
     setIsLoading(true)
     try {
-      const result = await confirmSignIn({ challengeResponse: newPassword })
+      // given_name and family_name are required attributes on the pool. When an
+      // admin-created user is missing them, Cognito rejects the challenge
+      // response unless they are supplied here — which left affected users
+      // unable to complete first login at all. Sending them is harmless when
+      // they are already set.
+      const result = await confirmSignIn({
+        challengeResponse: newPassword,
+        options: {
+          userAttributes: {
+            given_name: firstName.trim() || email.split('@')[0],
+            family_name: lastName.trim() || 'User',
+          },
+        },
+      })
 
       if (result.isSignedIn) {
         await completeLogin()
@@ -203,10 +228,35 @@ export default function LoginPage() {
             Set Your Password
           </h2>
           <p className="text-center text-gray-600 mb-8">
-            Your account was created with a temporary password. Choose a new one to continue.
+            Your account was created with a temporary password. Confirm your name
+            and choose a new password to continue.
           </p>
 
           <form onSubmit={handleNewPasswordSubmit}>
+            <div className="form-group">
+              <label htmlFor="first-name">First Name</label>
+              <input
+                id="first-name"
+                type="text"
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                autoComplete="given-name"
+                required
+              />
+            </div>
+
+            <div className="form-group">
+              <label htmlFor="last-name">Last Name</label>
+              <input
+                id="last-name"
+                type="text"
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                autoComplete="family-name"
+                required
+              />
+            </div>
+
             <div className="form-group">
               <label htmlFor="new-password">New Password</label>
               <input

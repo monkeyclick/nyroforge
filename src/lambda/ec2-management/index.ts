@@ -199,6 +199,14 @@ function isPackageRequired(pkg: BootstrapPackage): boolean {
   return (pkg.isRequired as unknown) === true || (pkg.isRequired as unknown) === 'true';
 }
 
+// `isEnabled` has the same string-vs-boolean hazard: it is a real boolean on
+// most rows, but older seed data wrote the string "true". A bare truthy check
+// would let a disabled row stored as "false" through, installing software an
+// admin had switched off.
+function isPackageEnabled(pkg: BootstrapPackage): boolean {
+  return (pkg.isEnabled as unknown) === true || (pkg.isEnabled as unknown) === 'true';
+}
+
 interface WorkstationRecord {
   PK: string;
   SK: string;
@@ -2619,7 +2627,7 @@ async function getBootstrapPackages(instanceType: string, osVersion: string, sel
     });
 
     const allPackages = (items as BootstrapPackage[])
-      .filter(pkg => pkg.isEnabled); // Only enabled packages
+      .filter(isPackageEnabled); // Only enabled packages
 
     // Determine if this is a GPU instance
     const isGpuInstance = instanceType.startsWith('g4') || instanceType.startsWith('g5') || instanceType.startsWith('g6');

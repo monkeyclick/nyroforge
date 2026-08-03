@@ -16,7 +16,7 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { DynamoEventSource, SqsDlq } from 'aws-cdk-lib/aws-lambda-event-sources';
 import { Construct } from 'constructs';
-import { PROJECT_TAG } from './constants';
+import { PROJECT_TAG, resourceName } from './constants';
 import { ServiceLambda } from './service-lambda';
 
 export interface WorkstationApiStackProps extends cdk.StackProps {
@@ -93,7 +93,7 @@ export class WorkstationApiStack extends cdk.Stack {
   private getAlarmTopic(): sns.Topic {
     if (!this.alarmTopic) {
       this.alarmTopic = new sns.Topic(this, 'OperationalAlarmTopic', {
-        topicName: 'MediaWorkstation-OperationalAlarms',
+        topicName: resourceName('MediaWorkstation-OperationalAlarms'),
         displayName: 'NyroForge operational alarms',
       });
       const alarmEmail = this.node.tryGetContext('alarmEmail') as string | undefined;
@@ -103,7 +103,7 @@ export class WorkstationApiStack extends cdk.Stack {
       new cdk.CfnOutput(this, 'OperationalAlarmTopicArn', {
         value: this.alarmTopic.topicArn,
         description: 'SNS topic ARN for operational alarms — subscribe an email/Slack integration to it',
-        exportName: 'OperationalAlarmTopicArn',
+        exportName: resourceName('OperationalAlarmTopicArn'),
       });
     }
     return this.alarmTopic;
@@ -112,7 +112,7 @@ export class WorkstationApiStack extends cdk.Stack {
   /** A 14-day-retention DLQ for an async/event-driven Lambda target. */
   private createDlq(id: string): sqs.Queue {
     return new sqs.Queue(this, id, {
-      queueName: `MediaWorkstation-${id}`,
+      queueName: resourceName(`MediaWorkstation-${id}`),
       retentionPeriod: cdk.Duration.days(14),
       encryption: sqs.QueueEncryption.SQS_MANAGED,
     });
@@ -199,7 +199,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // EC2 Management Lambda
     const ec2ManagementFunction = new ServiceLambda(this, 'EC2ManagementFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-EC2Management',
+      functionName: resourceName('MediaWorkstation-EC2Management'),
       serviceDir: 'ec2-management',
       description: 'Manages EC2 workstation lifecycle (launch, terminate, status)',
     });
@@ -213,7 +213,7 @@ export class WorkstationApiStack extends cdk.Stack {
         SES_FROM_EMAIL: process.env.SES_FROM_EMAIL || 'noreply@example.com',
         TERMINATION_WARNING_MINUTES: process.env.TERMINATION_WARNING_MINUTES || '60',
       },
-      functionName: 'MediaWorkstation-StatusMonitor',
+      functionName: resourceName('MediaWorkstation-StatusMonitor'),
       serviceDir: 'status-monitor',
       description: 'Monitors workstation status and provides dashboard data',
       // Failed async (EventBridge) invocations land here after retries
@@ -223,7 +223,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // Cost Analytics Lambda
     const costAnalyticsFunction = new ServiceLambda(this, 'CostAnalyticsFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-CostAnalytics',
+      functionName: resourceName('MediaWorkstation-CostAnalytics'),
       serviceDir: 'cost-analytics',
       description: 'Provides cost tracking and analytics data',
       timeout: cdk.Duration.minutes(10), // Cost API can be slow
@@ -232,7 +232,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // Configuration Service Lambda
     const configServiceFunction = new ServiceLambda(this, 'ConfigServiceFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-ConfigService',
+      functionName: resourceName('MediaWorkstation-ConfigService'),
       serviceDir: 'config-service',
       description: 'Provides configuration data (regions, instance types, etc.)',
       timeout: cdk.Duration.minutes(2),
@@ -241,7 +241,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // Credentials Service Lambda
     const credentialsServiceFunction = new ServiceLambda(this, 'CredentialsServiceFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-CredentialsService',
+      functionName: resourceName('MediaWorkstation-CredentialsService'),
       serviceDir: 'credentials-service',
       description: 'Manages workstation credentials and domain join operations',
     });
@@ -249,7 +249,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // User Profile Service Lambda
     const userProfileServiceFunction = new ServiceLambda(this, 'UserProfileServiceFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-UserProfileService',
+      functionName: resourceName('MediaWorkstation-UserProfileService'),
       serviceDir: 'user-profile-service',
       description: 'Manages user profiles and preferences',
       timeout: cdk.Duration.minutes(1),
@@ -262,7 +262,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // CloudFormation's 500-resource limit.
     const bootstrapConfigServiceFunction = new ServiceLambda(this, 'BootstrapConfigServiceFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-BootstrapConfigService',
+      functionName: resourceName('MediaWorkstation-BootstrapConfigService'),
       serviceDir: 'bootstrap-config-service',
       description: 'Manages bootstrap packages for driver and software installation',
       timeout: cdk.Duration.minutes(2),
@@ -271,7 +271,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // Analytics Service Lambda
     const analyticsServiceFunction = new ServiceLambda(this, 'AnalyticsServiceFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-AnalyticsService',
+      functionName: resourceName('MediaWorkstation-AnalyticsService'),
       serviceDir: 'analytics-service',
       description: 'Tracks user analytics and manages feedback submissions',
       timeout: cdk.Duration.minutes(2),
@@ -280,7 +280,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // User Attribute Change Processor Lambda (DynamoDB Stream processor)
     const userAttributeChangeProcessorFunction = new ServiceLambda(this, 'UserAttributeChangeProcessorFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-UserAttributeChangeProcessor',
+      functionName: resourceName('MediaWorkstation-UserAttributeChangeProcessor'),
       serviceDir: 'user-attribute-change-processor',
       description: 'Processes user attribute changes and updates dynamic group memberships',
       timeout: cdk.Duration.minutes(5),
@@ -304,7 +304,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // Group Membership Reconciliation Lambda (Scheduled full re-evaluation)
     const groupMembershipReconciliationFunction = new ServiceLambda(this, 'GroupMembershipReconciliationFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-GroupMembershipReconciliation',
+      functionName: resourceName('MediaWorkstation-GroupMembershipReconciliation'),
       serviceDir: 'group-membership-reconciliation',
       description: 'Scheduled reconciliation of group memberships against dynamic rules',
       timeout: cdk.Duration.minutes(15), // Longer timeout for processing all users
@@ -315,7 +315,7 @@ export class WorkstationApiStack extends cdk.Stack {
     // Group Package Service Lambda
     const groupPackageServiceFunction = new ServiceLambda(this, 'GroupPackageServiceFunction', {
       ...commonLambdaProps,
-      functionName: 'MediaWorkstation-GroupPackageService',
+      functionName: resourceName('MediaWorkstation-GroupPackageService'),
       serviceDir: 'group-package-service',
       description: 'Manages group package bindings and installation queue',
       timeout: cdk.Duration.minutes(2),
@@ -1076,7 +1076,7 @@ export class WorkstationApiStack extends cdk.Stack {
   private createAutoTerminationSchedule(): void {
     // Create EventBridge rule to check for expired workstations every 5 minutes
     const autoTerminationRule = new events.Rule(this, 'AutoTerminationRule', {
-      ruleName: 'MediaWorkstation-AutoTerminationCheck',
+      ruleName: resourceName('MediaWorkstation-AutoTerminationCheck'),
       description: 'Periodically checks for and terminates expired workstations',
       schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
       enabled: true,
@@ -1091,12 +1091,12 @@ export class WorkstationApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AutoTerminationRuleArn', {
       value: autoTerminationRule.ruleArn,
       description: 'EventBridge rule ARN for auto-termination checks',
-      exportName: 'AutoTerminationRuleArn',
+      exportName: resourceName('AutoTerminationRuleArn'),
     });
 
     // Create EventBridge rule for group membership reconciliation (daily at 2 AM UTC)
     const reconciliationRule = new events.Rule(this, 'GroupMembershipReconciliationRule', {
-      ruleName: 'MediaWorkstation-GroupMembershipReconciliation',
+      ruleName: resourceName('MediaWorkstation-GroupMembershipReconciliation'),
       description: 'Daily reconciliation of group memberships against dynamic rules',
       schedule: events.Schedule.cron({
         hour: '2',
@@ -1114,7 +1114,7 @@ export class WorkstationApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'GroupReconciliationRuleArn', {
       value: reconciliationRule.ruleArn,
       description: 'EventBridge rule ARN for group membership reconciliation',
-      exportName: 'GroupReconciliationRuleArn',
+      exportName: resourceName('GroupReconciliationRuleArn'),
     });
   }
 
@@ -1122,13 +1122,13 @@ export class WorkstationApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ApiEndpoint', {
       value: this.api.url,
       description: 'API Gateway endpoint URL',
-      exportName: 'WorkstationApiEndpoint',
+      exportName: resourceName('WorkstationApiEndpoint'),
     });
 
     new cdk.CfnOutput(this, 'ApiId', {
       value: this.api.restApiId,
       description: 'API Gateway ID',
-      exportName: 'WorkstationApiId',
+      exportName: resourceName('WorkstationApiId'),
     });
   }
 }

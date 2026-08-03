@@ -101,26 +101,48 @@ aws configure
 
 ### What the script does
 
-The script walks through these stages automatically, prompting for input at each configuration step:
+The deployment runs in **two phases**. This split is not cosmetic: the web UI is a
+Next.js static export, and Next.js inlines the API Gateway URL and Cognito IDs
+into its JavaScript bundle at *build* time. Those values do not exist until the
+backend stacks are created, so the UI must be built after Phase 1 and published
+in Phase 2.
+
+**Phase 1 — backend**
 
 1. **Pre-flight checks** — Verifies Node.js (18+), npm, AWS CLI (v2), and CDK are installed. Validates that your AWS credentials are active.
 2. **Configuration prompts** — Asks for:
    - Target AWS region (defaults to your CLI default)
    - Admin email address
-   - Whether to configure Active Directory domain join (optional)
+   - Admin first and last name (Cognito requires both — see §6)
 3. **Dependency installation** — Runs `npm install` at the root, in `src/lambda/cognito-admin-service/`, and in `frontend/`.
-4. **CDK bootstrap** — Checks whether CDK is already bootstrapped in the target region and bootstraps it if not.
-5. **Infrastructure deployment** — Runs `cdk deploy --all`. This takes approximately 15–25 minutes.
-6. **Admin user creation** — Creates a Cognito user with the email you provided and adds them to the `workstation-admin` group with a temporary password.
-7. **System parameter configuration** — Writes default SSM parameters (default region, allowed instance types, auto-termination hours).
-8. **Domain join configuration** (if selected) — Writes domain name and OU path to SSM Parameter Store.
-9. **Output** — Displays the website URL, API endpoint, User Pool ID, admin email, and temporary password. Non-sensitive details are saved to `deployment-info.txt`.
+4. **Lambda bundling** — Runs `npm run build:lambdas`, which esbuilds every function into `dist/lambda/<service>`. Each Lambda's CDK code asset points there, and `dist/` is gitignored, so this step is mandatory — without it `cdk deploy` aborts during synthesis with `Cannot find asset`.
+5. **CDK bootstrap** — Checks the bootstrap stack *version* (6+ required) and bootstraps or upgrades it as needed.
+6. **Backend deployment** — Deploys `WorkstationInfrastructure`, `WorkstationStorage`, `WorkstationApi`, `WorkstationAdminApi` and `WorkstationFrontend`. Roughly 15–25 minutes.
+
+**Phase 2 — configuration and web UI**
+
+7. **Admin user creation** — Creates a Cognito user with the email and name you provided, with a temporary password, and adds them to the `workstation-admin` group. Skips creation if the user already exists, leaving their password untouched.
+8. **Package catalog seeding** — Populates the bootstrap package table with the NVIDIA GRID driver, the DCV server and the common applications. Skipping this leaves the catalog empty, so launched workstations come up with no GPU driver and no remote-access server.
+9. **System parameter verification** — Confirms the SSM parameters the launcher reads are present. The CDK infrastructure stack owns these values, so the script verifies rather than overwrites them.
+10. **Web UI build** — Writes `frontend/.env.local` from the deployed stack outputs and builds the static export.
+11. **Website deployment** — Deploys `WorkstationWebsite`, which uploads the built UI to S3 and invalidates CloudFront.
+12. **Output** — Displays the website URL, API endpoint, User Pool ID, admin email, and temporary password. Non-sensitive details are saved to `deployment-info.txt`.
+
+Every step is idempotent. If the script fails it names the step that failed and
+exits without rolling anything back — re-run it and completed work is skipped.
 
 ### After the script completes
 
 The script prints your deployment credentials to the terminal. **Copy the temporary password immediately — it is not stored anywhere.**
 
-Open the website URL printed in the output, log in with your admin email and temporary password, and change the password when prompted.
+Open the website URL printed in the output, log in with your admin email and temporary password, and set a permanent password when prompted. CloudFront may take a few minutes to serve the new build in every region.
+
+To rebuild and republish only the web UI later (after a UI change, or after a
+backend redeploy moved an endpoint):
+
+```bash
+./scripts/deploy-frontend.sh
+```
 
 ---
 
@@ -148,22 +170,40 @@ npm install
 cd ..
 ```
 
-### 3.2 Set environment variables
+### 3.2 Build the Lambda bundles
+
+**Required.** Every Lambda's CDK code asset is `dist/lambda/<service>`
+(`lib/service-lambda.ts`), produced by esbuild. `dist/` is gitignored and
+`npm install` does not build it, so skipping this step makes `cdk deploy` fail
+during *synthesis* with `Cannot find asset .../dist/lambda/ec2-management` —
+before any stack is created.
+
+```bash
+npm run build:lambdas
+```
+
+### 3.3 Set environment variables
 
 ```bash
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 export CDK_DEFAULT_REGION=us-west-2   # replace with your target region
+export AWS_REGION=$CDK_DEFAULT_REGION
 ```
 
-### 3.3 Bootstrap CDK
+### 3.4 Bootstrap CDK
 
 ```bash
 cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION"
 ```
 
-Skip this step if CDK is already bootstrapped in the account/region.
+Skip this step if CDK is already bootstrapped at version 6 or later. Check with:
 
-### 3.4 Synthesise and review
+```bash
+aws cloudformation describe-stacks --stack-name CDKToolkit \
+  --query "Stacks[0].Outputs[?OutputKey=='BootstrapVersion'].OutputValue" --output text
+```
+
+### 3.5 Synthesise and review
 
 ```bash
 cdk synth
@@ -171,38 +211,56 @@ cdk synth
 
 Review the synthesised CloudFormation templates in `cdk.out/` before deploying.
 
-### 3.5 Deploy all stacks
+### 3.6 Deploy the backend stacks
+
+Deploy the backend first and leave `WorkstationWebsite` for §3.9 — its content is
+the compiled UI, which needs the endpoints produced here baked in at build time.
 
 ```bash
-cdk deploy --all --outputs-file cdk-outputs.json
+cdk deploy \
+  WorkstationInfrastructure WorkstationStorage \
+  WorkstationApi WorkstationAdminApi WorkstationFrontend \
+  --outputs-file cdk-outputs.json
 ```
 
 You will be prompted to approve IAM and security group changes. To suppress prompts in CI environments:
 
 ```bash
-cdk deploy --all --require-approval never --outputs-file cdk-outputs.json
+cdk deploy ... --require-approval never --outputs-file cdk-outputs.json
 ```
 
 Deployment takes approximately 15–20 minutes.
 
-### 3.6 Create the admin user
+> `cdk deploy --all` also works. `WorkstationWebsite` deploys a placeholder page
+> when `frontend/out` does not exist yet, and §3.9 replaces it with the real UI.
+
+### 3.7 Create the admin user
 
 ```bash
-USER_POOL_ID=$(cat cdk-outputs.json | grep -o '"UserPoolId"[^,]*' | cut -d'"' -f4 | head -1)
+USER_POOL_ID=$(aws cloudformation describe-stacks --stack-name WorkstationInfrastructure \
+  --query "Stacks[0].Outputs[?OutputKey=='UserPoolId'].OutputValue" --output text)
 
-# Generate a compliant temporary password
-ADMIN_PASSWORD=$(openssl rand -base64 16 | tr -d '+/=' | head -c 16)'!A1'
+# Generate a compliant temporary password. The suffix guarantees one character
+# from each required class; `tr` strips openssl's trailing newline too.
+ADMIN_PASSWORD="$(openssl rand -base64 24 | tr -d '+/=\n' | cut -c1-16)!A1a"
 
+# given_name and family_name are REQUIRED attributes on this user pool.
+# Omitting them fails with:
+#   InvalidParameterException: Attributes did not conform to the schema:
+#   given_name: The attribute is required
 aws cognito-idp admin-create-user \
   --user-pool-id "$USER_POOL_ID" \
   --username admin@yourcompany.com \
   --user-attributes \
     Name=email,Value=admin@yourcompany.com \
     Name=email_verified,Value=true \
+    Name=given_name,Value=System \
+    Name=family_name,Value=Administrator \
   --temporary-password "$ADMIN_PASSWORD" \
   --message-action SUPPRESS \
   --region "$CDK_DEFAULT_REGION"
 
+# Cognito group membership is what grants admin rights.
 aws cognito-idp admin-add-user-to-group \
   --user-pool-id "$USER_POOL_ID" \
   --username admin@yourcompany.com \
@@ -213,7 +271,42 @@ echo "Temporary password: $ADMIN_PASSWORD"
 echo "Change this password on first login."
 ```
 
-> Passwords must be at least 8 characters and include uppercase, lowercase, numbers, and special characters. Never commit passwords to source control.
+Or use the script, which handles both steps and is safe to re-run:
+
+```bash
+USER_POOL_ID="$USER_POOL_ID" \
+ADMIN_EMAIL=admin@yourcompany.com \
+ADMIN_FIRST_NAME=System ADMIN_LAST_NAME=Administrator \
+  node scripts/init-admin-system.js
+```
+
+> Passwords must be at least **12** characters and include uppercase, lowercase, numbers, and special characters. Never commit passwords to source control.
+
+### 3.8 Seed the bootstrap package catalog
+
+**Required for usable workstations.** Without it the catalog is empty, so
+launched instances get no GPU driver and no DCV remote-access server — the
+instance boots but cannot be used.
+
+```bash
+export BOOTSTRAP_PACKAGES_TABLE=$(aws cloudformation describe-stacks \
+  --stack-name WorkstationInfrastructure \
+  --query "Stacks[0].Outputs[?OutputKey=='BootstrapPackagesTableName'].OutputValue" --output text)
+
+node scripts/seed-bootstrap-packages.js
+node scripts/seed-dcv-package.js
+```
+
+### 3.9 Build and publish the web UI
+
+```bash
+cdk deploy WorkstationWebsite --require-approval never
+./scripts/deploy-frontend.sh
+```
+
+`deploy-frontend.sh` reads the deployed endpoints from CloudFormation, writes
+`frontend/.env.local`, builds the static export, syncs it to S3 and invalidates
+CloudFront. Run it again after any UI change.
 
 ---
 
@@ -228,29 +321,26 @@ echo "Change this password on first login."
 
 ### 4.2 Configure SSM parameters
 
-The deployment script sets sensible defaults. Override them as needed:
+The `WorkstationInfrastructure` stack creates these parameters with the defaults
+below, and CloudFormation owns them. Overriding a value by hand works until the
+next `cdk deploy`, which resets it — change the value in
+`lib/workstation-infrastructure-stack.ts` if you want it to persist.
+
+| Parameter | Default |
+|-----------|---------|
+| `/workstation/config/defaultInstanceType` | `g4dn.xlarge` |
+| `/workstation/config/allowedInstanceTypes` | `g4dn`/`g5`/`g6` in xlarge, 2xlarge and 4xlarge |
+| `/workstation/config/defaultAutoTerminateHours` | `24` |
+| `/workstation/config/windowsVersions` | `["Windows Server 2019","Windows Server 2022"]` |
+| `/workstation/config/instanceProfileArn` | The workstation instance profile |
+| `/workstation/config/instanceRoleArn` | The workstation instance role |
+
+To override one for the current deployment:
 
 ```bash
-# Set the default AWS region for workstation launches
-aws ssm put-parameter \
-  --name "/workstation/config/defaultRegion" \
-  --value "us-west-2" \
-  --type "String" \
-  --overwrite \
-  --region "$CDK_DEFAULT_REGION"
-
-# Set allowed instance types (JSON array stored as a String)
 aws ssm put-parameter \
   --name "/workstation/config/allowedInstanceTypes" \
-  --value '["g4dn.xlarge","g5.xlarge","g6.xlarge","c7i.xlarge"]' \
-  --type "String" \
-  --overwrite \
-  --region "$CDK_DEFAULT_REGION"
-
-# Set default auto-termination timeout in hours
-aws ssm put-parameter \
-  --name "/workstation/config/defaultAutoTerminateHours" \
-  --value "8" \
+  --value '["g4dn.xlarge","g5.xlarge","g6.xlarge"]' \
   --type "String" \
   --overwrite \
   --region "$CDK_DEFAULT_REGION"
@@ -258,25 +348,14 @@ aws ssm put-parameter \
 
 ### 4.3 Configure Active Directory domain join (optional)
 
-If your workstations need to join an Active Directory domain:
+Domain join is configured **per workstation at launch time** in the web UI
+(**Workstations** → **Launch** → authentication method **Domain**), not through
+deployment-time configuration. The domain name and OU travel with the launch
+request; there are no `/workstation/domain/*` SSM parameters.
+
+What you do need is the join account, in Secrets Manager:
 
 ```bash
-# Domain configuration in SSM
-aws ssm put-parameter \
-  --name "/workstation/domain/name" \
-  --value "corp.example.com" \
-  --type "String" \
-  --overwrite \
-  --region "$CDK_DEFAULT_REGION"
-
-aws ssm put-parameter \
-  --name "/workstation/domain/ou-path" \
-  --value "OU=Workstations,DC=corp,DC=example,DC=com" \
-  --type "String" \
-  --overwrite \
-  --region "$CDK_DEFAULT_REGION"
-
-# Domain join credentials in Secrets Manager
 aws secretsmanager create-secret \
   --name "workstation/domain-join" \
   --region "$CDK_DEFAULT_REGION" \
@@ -285,6 +364,9 @@ aws secretsmanager create-secret \
     "password": "your-secure-password"
   }'
 ```
+
+Your workstation subnets must also be able to resolve and reach the domain
+controllers (DNS, and the usual AD ports).
 
 > The domain join account needs only the permission to join computers to the specified OU. Do not use a domain admin account for this purpose.
 
@@ -299,28 +381,63 @@ aws secretsmanager create-secret \
 
 ### 4.5 Seed bootstrap packages
 
-The `WorkstationBootstrapPackages` DynamoDB table is empty after a fresh deployment. Without packages, the bootstrap package selector in the launch modal will show nothing. Seed default packages using `BatchWriteItem`:
+The `WorkstationBootstrapPackages` DynamoDB table is empty after a fresh
+deployment. Without packages the launch modal shows nothing to install, and —
+more importantly — workstations come up with no GPU driver and no DCV
+remote-access server. `deploy-one-click.sh` and `deploy.sh` do this for you; run
+it by hand with:
 
 ```bash
-TABLE=$(cat cdk-outputs.json | grep -o '"BootstrapPackagesTable"[^,]*' | cut -d'"' -f4 | head -1)
-# Or use the known table name: WorkstationBootstrapPackages
-aws dynamodb batch-write-item \
-  --request-items file://scripts/seed-bootstrap-packages.json \
-  --region "$CDK_DEFAULT_REGION"
+export BOOTSTRAP_PACKAGES_TABLE=$(aws cloudformation describe-stacks \
+  --stack-name WorkstationInfrastructure \
+  --query "Stacks[0].Outputs[?OutputKey=='BootstrapPackagesTableName'].OutputValue" --output text)
+
+node scripts/seed-bootstrap-packages.js   # drivers + common applications
+node scripts/seed-dcv-package.js          # Amazon DCV server
 ```
 
-> `isRequired` must be stored as a **String** (`"true"` / `"false"`), not a Boolean, because the `RequiredIndex` GSI uses `AttributeType.STRING`. Any seed script or manual write must use string values.
+Both scripts are idempotent (`PutItem` by `packageId`) and exit non-zero if any
+entry fails.
+
+#### Catalog entry contract
+
+Getting these wrong makes installs fail *silently* — the launcher wraps each
+package in `try { … } catch { }`, so a bad command leaves no trace on the
+instance beyond missing software.
+
+- **`installCommand` holds the complete PowerShell command**, with the literal
+  token `${INSTALLER}` wherever the downloaded file's local path belongs. The
+  launcher substitutes it with `C:\Temp\<filename-from-downloadUrl>`. Do not
+  hardcode the path — if it disagrees with the filename in `downloadUrl`, the
+  installer runs against a path that does not exist.
+- **`installArgs` should be `null`.** It exists only for legacy rows and is
+  appended verbatim after the command.
+- **`downloadUrl: 'none'`** means nothing is downloaded and `installCommand` is
+  spliced in as a bare inline PowerShell statement — no executable prefix.
+- **`isRequired` must be a String** (`"true"` / `"false"`), not a Boolean,
+  because the `RequiredIndex` GSI uses `AttributeType.STRING`.
+- **`isEnabled` must be a real Boolean.** It is not a GSI key, and a string
+  `"false"` is truthy in the filters that read it.
 
 ### 4.6 Create additional users
 
 ```bash
+# given_name and family_name are required attributes on this user pool.
 aws cognito-idp admin-create-user \
   --user-pool-id "$USER_POOL_ID" \
   --username user@yourcompany.com \
   --user-attributes \
     Name=email,Value=user@yourcompany.com \
     Name=email_verified,Value=true \
-  --temporary-password "TempPass123!" \
+    Name=given_name,Value=Jane \
+    Name=family_name,Value=Doe \
+  --temporary-password 'TempPassw0rd!2024' \
+  --region "$CDK_DEFAULT_REGION"
+
+aws cognito-idp admin-add-user-to-group \
+  --user-pool-id "$USER_POOL_ID" \
+  --username user@yourcompany.com \
+  --group-name workstation-user \
   --region "$CDK_DEFAULT_REGION"
 ```
 
@@ -336,16 +453,43 @@ These variables are used during deployment. They are not required at runtime (th
 |----------|-------------|---------|
 | `CDK_DEFAULT_ACCOUNT` | AWS account ID for deployment | `123456789012` |
 | `CDK_DEFAULT_REGION` | AWS region for deployment | `us-west-2` |
+| `ENVIRONMENT` | `dev` \| `staging` \| `prod`. `prod` enables termination protection and RETAIN removal policies on stateful resources | `dev` |
+| `NYROFORGE_RESOURCE_PREFIX` | Prefix for every globally-named resource (tables, buckets, functions, exports). Empty by default | `staging-` |
+| `STACK_PREFIX` | Prefix for CloudFormation stack names. Empty by default | `staging-` |
+| `ENABLE_EFS`, `ENABLE_FSX_WINDOWS`, `ENABLE_FSX_LUSTRE`, `ENABLE_FSX_ONTAP`, `ENABLE_FSX_OPENZFS` | Set to `true` to provision that storage backend | `true` |
+| `RETAIN_VPC_ON_DELETE` | Set to `false` to allow VPC resources to be deleted with the stack | `false` |
+| `ALARM_EMAIL` | Email subscribed to storage alarm notifications | `ops@example.com` |
+| `SKIP_VPC_CHECK` | Set to `true` to skip the pre-synth VPC endpoint scan (offline/CI) | `true` |
+
+#### Running two deployments in one account and region
+
+Table names, the website bucket, Lambda function names and CloudFormation export
+names are fixed literals by default. A second deployment into the same account
+and region therefore collides — typically failing partway through with
+`Table already exists` and leaving a half-created stack. Set both prefixes to
+isolate it:
+
+```bash
+export NYROFORGE_RESOURCE_PREFIX=staging-
+export STACK_PREFIX=staging-
+```
+
+Leave both unset for an existing deployment: the names are unchanged, so nothing
+is replaced. Use a lowercase prefix — it is normalised for S3 bucket names, but
+keeping it lowercase avoids surprises elsewhere.
 
 ### SSM Parameter Store keys (runtime)
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `/workstation/config/defaultRegion` | String | Default region for launching workstations |
+| `/workstation/config/defaultInstanceType` | String | Default EC2 instance type (`g4dn.xlarge`) |
 | `/workstation/config/allowedInstanceTypes` | String | JSON-encoded array of allowed EC2 instance types |
-| `/workstation/config/defaultAutoTerminateHours` | String | Hours before auto-termination (default: `8`) |
-| `/workstation/domain/name` | String | Active Directory domain name (optional) |
-| `/workstation/domain/ou-path` | String | OU path for domain join (optional) |
+| `/workstation/config/defaultAutoTerminateHours` | String | Hours before auto-termination (default: `24`) |
+| `/workstation/config/windowsVersions` | String | JSON-encoded array of supported Windows Server versions |
+| `/workstation/config/instanceProfileArn` | String | Instance profile attached to launched workstations |
+| `/workstation/config/instanceRoleArn` | String | IAM role for launched workstations |
+| `/workstation/frontend/config` | String | JSON frontend runtime configuration |
+| `/workstation/frontend/auth` | String | JSON Cognito configuration |
 
 ### Secrets Manager keys (runtime)
 
@@ -382,13 +526,76 @@ If workstations launch without a public IP (DCV URL shows `https://undefined:844
 
 ---
 
+### Synthesis fails with "Cannot find asset .../dist/lambda/<service>"
+
+The Lambda bundles were never built. `dist/` is gitignored and `npm install` does
+not build it, so this is the normal state of a fresh clone:
+
+```bash
+npm run build:lambdas
+```
+
+This is a *synthesis* failure, so it happens before any stack is touched —
+nothing needs cleaning up. `deploy-one-click.sh` and `deploy.sh` run the build
+for you.
+
+### The website loads but shows "UI not built yet"
+
+`WorkstationWebsite` was deployed before the UI was built, so it is serving the
+placeholder page. Build and publish the real bundle:
+
+```bash
+./scripts/deploy-frontend.sh
+```
+
+### The website loads but every request fails, or login does nothing
+
+The UI was built without the API and Cognito values. Next.js inlines
+`NEXT_PUBLIC_*` at build time, so a bundle built before the backend existed — or
+built by hand without `frontend/.env.local` — has empty endpoints. Check the
+generated config and rebuild:
+
+```bash
+cat frontend/.env.local     # should list API, admin API, user pool and client IDs
+./scripts/deploy-frontend.sh
+```
+
+If the browser console shows requests to `undefined/...`, this is the cause.
+
 ### Deployment fails with "CDK bootstrap required"
 
 ```bash
 cdk bootstrap "aws://$CDK_DEFAULT_ACCOUNT/$CDK_DEFAULT_REGION"
 ```
 
-Then re-run the deployment.
+Then re-run the deployment. If assets fail to publish with a permissions or
+version error, the bootstrap stack is too old — check and re-bootstrap:
+
+```bash
+aws cloudformation describe-stacks --stack-name CDKToolkit \
+  --query "Stacks[0].Outputs[?OutputKey=='BootstrapVersion'].OutputValue" --output text
+```
+
+Version 6 or later is required.
+
+### Deployment fails with "Table already exists" / "BucketAlreadyExists"
+
+Either another NyroForge deployment already occupies these names in this account
+and region, or a previous stack was deleted while its tables were retained. To
+run a second deployment alongside the first, set `NYROFORGE_RESOURCE_PREFIX` and
+`STACK_PREFIX` (see §5). Otherwise delete the leftover resources, or the stack
+stuck in `ROLLBACK_COMPLETE`:
+
+```bash
+aws cloudformation delete-stack --stack-name WorkstationInfrastructure \
+  --region "$CDK_DEFAULT_REGION"
+```
+
+### Admin user creation fails with "given_name: The attribute is required"
+
+`given_name` and `family_name` are required attributes on the user pool, so
+`admin-create-user` must supply both. See §3.7 for the full command, or use
+`scripts/init-admin-system.js`.
 
 ### Deployment fails with insufficient permissions
 
@@ -420,6 +627,24 @@ Common causes:
 - Insufficient EC2 capacity in the selected availability zone (try a different region or AZ)
 - Missing AMI in the selected region (confirm the Windows Server AMI is available)
 
+### Workstation launches, but has no GPU driver / no DCV / no software
+
+The workstation boots and reaches Running, but nothing is installed. Two causes:
+
+**The package catalog is empty.** Check and seed it (§4.5):
+
+```bash
+aws dynamodb scan --table-name WorkstationBootstrapPackages \
+  --select COUNT --region "$CDK_DEFAULT_REGION"
+```
+
+**A catalog entry's install command is malformed.** The generated PowerShell wraps
+each package in `try { … } catch { }`, so a bad command fails silently. Read the
+setup log on the instance at `C:\WorkstationSetup.log`, and check the entry
+against the contract in §4.5 — most often `installCommand` is missing the
+`${INSTALLER}` placeholder, or hardcodes a path that disagrees with the filename
+in `downloadUrl`.
+
 ### Authentication / login fails
 
 Verify the Cognito User Pool is healthy:
@@ -430,14 +655,29 @@ aws cognito-idp describe-user-pool \
   --region "$CDK_DEFAULT_REGION"
 ```
 
-Reset a user's password if needed:
+Reset a user's password if needed. The pool requires **12+ characters** with
+uppercase, lowercase, a digit and a symbol:
 
 ```bash
 aws cognito-idp admin-set-user-password \
   --user-pool-id "$USER_POOL_ID" \
   --username user@yourcompany.com \
-  --password "NewPass123!" \
+  --password 'NewPassw0rd!2024' \
   --permanent \
+  --region "$CDK_DEFAULT_REGION"
+```
+
+**First login rejects the new password with an attribute error.** The user is
+missing the required `given_name`/`family_name`. The login form collects both
+alongside the new password and sends them with the challenge response, so this
+resolves itself — but for a user created outside the UI you can also set them
+directly:
+
+```bash
+aws cognito-idp admin-update-user-attributes \
+  --user-pool-id "$USER_POOL_ID" \
+  --username user@yourcompany.com \
+  --user-attributes Name=given_name,Value=Jane Name=family_name,Value=Doe \
   --region "$CDK_DEFAULT_REGION"
 ```
 
@@ -512,6 +752,7 @@ aws ec2 describe-vpc-endpoints \
 - CloudFront distributions take up to 15 minutes to propagate globally after creation. Wait and retry.
 - Confirm the S3 bucket policy allows CloudFront access (the CDK stack configures this automatically).
 - Clear your browser cache and try an incognito window.
+- If it serves an old build, the cache invalidation has not finished. `deploy-frontend.sh` waits for it; check manually with `aws cloudfront list-invalidations --distribution-id <id>`.
 
 ---
 

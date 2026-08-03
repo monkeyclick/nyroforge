@@ -6,6 +6,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { resourceName } from './constants';
 
 /**
  * Stack properties for WorkstationInfrastructureStack
@@ -199,7 +200,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
   private createDynamoDBTables(): void {
     // Workstations table
     const workstationsTable = new dynamodb.Table(this, 'WorkstationsTable', {
-      tableName: 'WorkstationManagement',
+      tableName: resourceName('WorkstationManagement'),
       partitionKey: {
         name: 'PK',
         type: dynamodb.AttributeType.STRING,
@@ -245,7 +246,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Cost tracking table
     const costsTable = new dynamodb.Table(this, 'CostTrackingTable', {
-      tableName: 'CostAnalytics',
+      tableName: resourceName('CostAnalytics'),
       partitionKey: {
         name: 'PK',
         type: dynamodb.AttributeType.STRING,
@@ -266,7 +267,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // User sessions table
     const userSessionsTable = new dynamodb.Table(this, 'UserSessionsTable', {
-      tableName: 'UserSessions',
+      tableName: resourceName('UserSessions'),
       partitionKey: {
         name: 'PK',
         type: dynamodb.AttributeType.STRING,
@@ -287,7 +288,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // User profiles table for storing user preferences
     const userProfilesTable = new dynamodb.Table(this, 'UserProfilesTable', {
-      tableName: 'UserProfiles',
+      tableName: resourceName('UserProfiles'),
       partitionKey: {
         name: 'userId',
         type: dynamodb.AttributeType.STRING,
@@ -303,7 +304,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Enhanced Users table for RBAC system
     const usersTable = new dynamodb.Table(this, 'UsersTable', {
-      tableName: 'EnhancedUsers',
+      tableName: resourceName('EnhancedUsers'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING,
@@ -342,7 +343,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Roles table
     const rolesTable = new dynamodb.Table(this, 'RolesTable', {
-      tableName: 'UserRoles',
+      tableName: resourceName('UserRoles'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING,
@@ -371,7 +372,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Groups table (enhanced for comprehensive management)
     const groupsTable = new dynamodb.Table(this, 'GroupsTable', {
-      tableName: 'UserGroups',
+      tableName: resourceName('UserGroups'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING,
@@ -440,7 +441,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Group Memberships table (many-to-many relationships)
     const groupMembershipsTable = new dynamodb.Table(this, 'GroupMembershipsTable', {
-      tableName: 'GroupMemberships',
+      tableName: resourceName('GroupMemberships'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING, // Format: "user#<userId>#group#<groupId>"
@@ -496,7 +497,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Group Audit Logs table (separate from general audit logs)
     const groupAuditLogsTable = new dynamodb.Table(this, 'GroupAuditLogsTable', {
-      tableName: 'GroupAuditLogs',
+      tableName: resourceName('GroupAuditLogs'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING,
@@ -556,7 +557,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Audit logs table
     const auditLogsTable = new dynamodb.Table(this, 'AuditLogsTable', {
-      tableName: 'AuditLogs',
+      tableName: resourceName('AuditLogs'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING,
@@ -603,7 +604,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Bootstrap packages table
     const bootstrapPackagesTable = new dynamodb.Table(this, 'BootstrapPackagesTable', {
-      tableName: 'WorkstationBootstrapPackages',
+      tableName: resourceName('WorkstationBootstrapPackages'),
       partitionKey: {
         name: 'packageId',
         type: dynamodb.AttributeType.STRING,
@@ -658,7 +659,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Analytics events table
     const analyticsTable = new dynamodb.Table(this, 'AnalyticsTable', {
-      tableName: 'UserAnalytics',
+      tableName: resourceName('UserAnalytics'),
       partitionKey: {
         name: 'eventId',
         type: dynamodb.AttributeType.STRING,
@@ -733,7 +734,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Feedback submissions table
     const feedbackTable = new dynamodb.Table(this, 'FeedbackTable', {
-      tableName: 'UserFeedback',
+      tableName: resourceName('UserFeedback'),
       partitionKey: {
         name: 'feedbackId',
         type: dynamodb.AttributeType.STRING,
@@ -792,7 +793,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Workstation Package Queue table (Phase 1: Post-Boot Package Installation)
     const packageQueueTable = new dynamodb.Table(this, 'PackageQueueTable', {
-      tableName: 'WorkstationPackageQueue',
+      tableName: resourceName('WorkstationPackageQueue'),
       partitionKey: {
         name: 'PK',
         type: dynamodb.AttributeType.STRING,
@@ -839,7 +840,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Group Package Bindings table (Phase 1: Post-Boot Package Installation)
     const groupPackageBindingsTable = new dynamodb.Table(this, 'GroupPackageBindingsTable', {
-      tableName: 'GroupPackageBindings',
+      tableName: resourceName('GroupPackageBindings'),
       partitionKey: {
         name: 'PK',
         type: dynamodb.AttributeType.STRING,
@@ -885,7 +886,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Deleted Users table (for soft-delete with data retention)
     const deletedUsersTable = new dynamodb.Table(this, 'DeletedUsersTable', {
-      tableName: 'DeletedUsers',
+      tableName: resourceName('DeletedUsers'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING,
@@ -941,7 +942,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Password Reset Records table (for tracking password changes)
     const passwordResetRecordsTable = new dynamodb.Table(this, 'PasswordResetRecordsTable', {
-      tableName: 'PasswordResetRecords',
+      tableName: resourceName('PasswordResetRecords'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING,
@@ -997,7 +998,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Password Policy table (for storing password requirements)
     const passwordPolicyTable = new dynamodb.Table(this, 'PasswordPolicyTable', {
-      tableName: 'PasswordPolicy',
+      tableName: resourceName('PasswordPolicy'),
       partitionKey: {
         name: 'id',
         type: dynamodb.AttributeType.STRING, // 'default' or custom policy IDs
@@ -1036,7 +1037,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
   private createCognitoUserPool(): void {
     const userPool = new cognito.UserPool(this, 'WorkstationUserPool', {
-      userPoolName: 'MediaWorkstationUsers',
+      userPoolName: resourceName('MediaWorkstationUsers'),
       selfSignUpEnabled: false, // Disabled - admins must create users for security
       signInAliases: {
         email: true,
@@ -1082,7 +1083,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
     // Create User Pool Client
     const userPoolClient = new cognito.UserPoolClient(this, 'WorkstationUserPoolClient', {
       userPool: userPool,
-      userPoolClientName: 'MediaWorkstationApp',
+      userPoolClientName: resourceName('MediaWorkstationApp'),
       generateSecret: false, // Frontend apps don't use client secrets
       authFlows: {
         adminUserPassword: true,
@@ -1275,73 +1276,73 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'VpcId', {
       value: this.vpc.vpcId,
       description: 'VPC ID for workstation deployment',
-      exportName: 'WorkstationVpcId',
+      exportName: resourceName('WorkstationVpcId'),
     });
 
     new cdk.CfnOutput(this, 'UserPoolId', {
       value: this.userPool.userPoolId,
       description: 'Cognito User Pool ID',
-      exportName: 'WorkstationUserPoolId',
+      exportName: resourceName('WorkstationUserPoolId'),
     });
 
     new cdk.CfnOutput(this, 'UserPoolClientId', {
       value: this.userPoolClient.userPoolClientId,
       description: 'Cognito User Pool Client ID',
-      exportName: 'WorkstationUserPoolClientId',
+      exportName: resourceName('WorkstationUserPoolClientId'),
     });
 
     new cdk.CfnOutput(this, 'WorkstationsTableName', {
       value: this.tables.workstations.tableName,
       description: 'DynamoDB workstations table name',
-      exportName: 'WorkstationsTableName',
+      exportName: resourceName('WorkstationsTableName'),
     });
 
     new cdk.CfnOutput(this, 'UserProfilesTableName', {
       value: this.tables.userProfiles.tableName,
       description: 'DynamoDB user profiles table name',
-      exportName: 'UserProfilesTableName',
+      exportName: resourceName('UserProfilesTableName'),
     });
 
     new cdk.CfnOutput(this, 'KMSKeyArn', {
       value: this.kmsKey.keyArn,
       description: 'KMS key ARN for encryption',
-      exportName: 'WorkstationKMSKeyArn',
+      exportName: resourceName('WorkstationKMSKeyArn'),
     });
 
     new cdk.CfnOutput(this, 'BootstrapPackagesTableName', {
       value: this.tables.bootstrapPackages.tableName,
       description: 'DynamoDB bootstrap packages table name',
-      exportName: 'BootstrapPackagesTableName',
+      exportName: resourceName('BootstrapPackagesTableName'),
     });
 
     new cdk.CfnOutput(this, 'PackageQueueTableName', {
       value: this.tables.packageQueue.tableName,
       description: 'DynamoDB package queue table name',
-      exportName: 'PackageQueueTableName',
+      exportName: resourceName('PackageQueueTableName'),
     });
 
     new cdk.CfnOutput(this, 'GroupPackageBindingsTableName', {
       value: this.tables.groupPackageBindings.tableName,
       description: 'DynamoDB group package bindings table name',
-      exportName: 'GroupPackageBindingsTableName',
+      exportName: resourceName('GroupPackageBindingsTableName'),
     });
 
     new cdk.CfnOutput(this, 'DeletedUsersTableName', {
       value: this.tables.deletedUsers.tableName,
       description: 'DynamoDB deleted users table name (soft-delete retention)',
-      exportName: 'DeletedUsersTableName',
+      exportName: resourceName('DeletedUsersTableName'),
     });
 
     new cdk.CfnOutput(this, 'PasswordResetRecordsTableName', {
       value: this.tables.passwordResetRecords.tableName,
       description: 'DynamoDB password reset records table name',
-      exportName: 'PasswordResetRecordsTableName',
+      exportName: resourceName('PasswordResetRecordsTableName'),
     });
 
     new cdk.CfnOutput(this, 'PasswordPolicyTableName', {
       value: this.tables.passwordPolicy.tableName,
       description: 'DynamoDB password policy table name',
-      exportName: 'PasswordPolicyTableName',
+      exportName: resourceName('PasswordPolicyTableName'),
     });
   }
 

@@ -3,6 +3,7 @@ import { StepReview } from './StepReview'
 import { LaunchFormValues } from './types'
 
 const values: LaunchFormValues = {
+  friendlyName: '',
   region: 'us-west-2',
   instanceType: 'g5.xlarge',
   osVersion: 'windows-server-2025',

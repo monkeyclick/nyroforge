@@ -1,66 +1,115 @@
 #!/bin/bash
 
-# Deploy Frontend with Correct API Endpoint
-# This script builds and deploys the frontend with the correct API endpoint
+# Build and deploy the web UI against a live deployment.
+#
+# Next.js inlines NEXT_PUBLIC_* values into the JavaScript bundle at build time,
+# so the API Gateway and Cognito IDs are read from CloudFormation first and the
+# bundle is rebuilt before upload. Run this any time the UI changes, or after a
+# backend redeploy that moved an endpoint.
+#
+# Region resolution order: AWS_REGION, then CDK_DEFAULT_REGION, then the AWS CLI
+# default. It used to be hardcoded to us-west-2 in seven places, so deployments
+# in any other region produced a UI pointing at endpoints that did not exist.
 
 set -euo pipefail
 
+REGION="${AWS_REGION:-${CDK_DEFAULT_REGION:-$(aws configure get region 2>/dev/null || echo "")}}"
+
+if [ -z "$REGION" ]; then
+  echo "❌ Error: could not determine the AWS region."
+  echo "   Set AWS_REGION, or configure one with: aws configure"
+  exit 1
+fi
+
 echo "🚀 Deploying Frontend to S3/CloudFront"
+echo "   Region: $REGION"
 echo ""
 
-# Get API endpoint from CloudFormation
+# Stack names honour STACK_PREFIX, matching bin/app.ts.
+STACK_PREFIX="${STACK_PREFIX:-}"
+stack() {
+  echo "${STACK_PREFIX}$1"
+}
+
+# Read one output value from a deployed stack.
+stack_output() {
+  aws cloudformation describe-stacks \
+    --stack-name "$1" \
+    --query "Stacks[0].Outputs[?OutputKey=='$2'].OutputValue" \
+    --output text \
+    --region "$REGION" 2>/dev/null || echo ""
+}
+
+# Fetch API endpoint
 echo "📡 Fetching API endpoint from AWS..."
-API_ENDPOINT=$(aws cloudformation describe-stacks \
-  --stack-name WorkstationApi \
-  --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
-  --output text \
-  --region us-west-2)
+API_ENDPOINT=$(stack_output "$(stack WorkstationApi)" ApiEndpoint)
 
 if [ -z "$API_ENDPOINT" ]; then
   echo "❌ Error: Could not retrieve API endpoint from CloudFormation"
-  echo "   Make sure the WorkstationApi stack is deployed"
+  echo "   Make sure the WorkstationApi stack is deployed in $REGION"
   exit 1
 fi
 
 echo "✅ API Endpoint: $API_ENDPOINT"
 echo ""
 
-# Get Admin API endpoint from CloudFormation
+# Fetch Admin API endpoint
 echo "📡 Fetching Admin API endpoint from AWS..."
-ADMIN_API_ENDPOINT=$(aws cloudformation describe-stacks \
-  --stack-name WorkstationAdminApi \
-  --query 'Stacks[0].Outputs[?OutputKey==`AdminApiUrl`].OutputValue' \
-  --output text \
-  --region us-west-2 2>/dev/null || echo "")
+ADMIN_API_ENDPOINT=$(stack_output "$(stack WorkstationAdminApi)" AdminApiUrl)
 
 if [ -z "$ADMIN_API_ENDPOINT" ]; then
   echo "⚠️  Warning: Could not retrieve Admin API endpoint from CloudFormation"
-  echo "   Using main API endpoint as fallback"
+  echo "   Using main API endpoint as fallback — admin pages may not work"
   ADMIN_API_ENDPOINT="$API_ENDPOINT"
 fi
 
 echo "✅ Admin API Endpoint: $ADMIN_API_ENDPOINT"
 echo ""
 
-# Get other config from CloudFormation
+# Fetch Cognito configuration
 echo "📡 Fetching Cognito configuration..."
-USER_POOL_ID=$(aws cloudformation describe-stacks \
-  --stack-name WorkstationInfrastructure \
-  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' \
-  --output text \
-  --region us-west-2 2>/dev/null || echo "")
+USER_POOL_ID=$(stack_output "$(stack WorkstationInfrastructure)" UserPoolId)
+USER_POOL_CLIENT_ID=$(stack_output "$(stack WorkstationInfrastructure)" UserPoolClientId)
 
-USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
-  --stack-name WorkstationInfrastructure \
-  --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' \
-  --output text \
-  --region us-west-2 2>/dev/null || echo "")
+# Without these the built bundle cannot sign anyone in, so fail loudly rather
+# than shipping a login page that throws in the browser.
+if [ -z "$USER_POOL_ID" ] || [ -z "$USER_POOL_CLIENT_ID" ]; then
+  echo "❌ Error: Could not retrieve Cognito user pool configuration"
+  echo "   Make sure the WorkstationInfrastructure stack is deployed in $REGION"
+  exit 1
+fi
 
-# Create or update .env.local
+echo "✅ User Pool: $USER_POOL_ID"
+echo ""
+
+# Resolve the upload target before spending time on a build.
+echo "📡 Fetching website hosting configuration..."
+S3_BUCKET="${FRONTEND_S3_BUCKET:-$(stack_output "$(stack WorkstationWebsite)" WebsiteBucketName)}"
+DISTRIBUTION_ID="${CLOUDFRONT_DISTRIBUTION_ID:-$(stack_output "$(stack WorkstationWebsite)" DistributionId)}"
+
+if [ -z "$S3_BUCKET" ]; then
+  echo "❌ Error: Could not determine the S3 bucket."
+  echo "   Set FRONTEND_S3_BUCKET, or ensure the WorkstationWebsite stack is"
+  echo "   deployed in $REGION."
+  exit 1
+fi
+
+if [ -z "$DISTRIBUTION_ID" ]; then
+  echo "❌ Error: Could not determine the CloudFront distribution ID."
+  echo "   Set CLOUDFRONT_DISTRIBUTION_ID, or ensure the WorkstationWebsite"
+  echo "   stack is deployed in $REGION."
+  exit 1
+fi
+
+echo "✅ Bucket: $S3_BUCKET"
+echo "✅ Distribution: $DISTRIBUTION_ID"
+echo ""
+
+# Write the build-time environment
 echo "📝 Creating frontend/.env.local..."
 cat > frontend/.env.local << EOF
-# Auto-generated by deploy-frontend.sh
-NEXT_PUBLIC_AWS_REGION=us-west-2
+# Auto-generated by scripts/deploy-frontend.sh — do not edit by hand.
+NEXT_PUBLIC_AWS_REGION=$REGION
 NEXT_PUBLIC_API_ENDPOINT=$API_ENDPOINT
 NEXT_PUBLIC_ADMIN_API_ENDPOINT=$ADMIN_API_ENDPOINT
 NEXT_PUBLIC_USER_POOL_ID=$USER_POOL_ID
@@ -71,65 +120,55 @@ EOF
 echo "✅ Environment configured"
 echo ""
 
-# Build frontend
+# Build frontend. Clearing .next/out first prevents a stale export from being
+# uploaded when a build fails partway through.
 echo "🔨 Building frontend..."
-cd frontend
-npm run build
-cd ..
+(cd frontend && npm install --silent && rm -rf .next out && npm run build)
+
+if [ ! -d "frontend/out" ] || [ -z "$(ls -A frontend/out 2>/dev/null)" ]; then
+  echo "❌ Error: build produced no output in frontend/out"
+  exit 1
+fi
 
 echo "✅ Frontend built successfully"
 echo ""
 
 # Upload to S3
 echo "📤 Uploading to S3..."
-S3_BUCKET="${FRONTEND_S3_BUCKET:-$(aws cloudformation describe-stacks --stack-name WorkstationWebsite --query 'Stacks[0].Outputs[?OutputKey==`WebsiteBucketName`].OutputValue' --output text 2>/dev/null)}"
-
-if [ -z "$S3_BUCKET" ]; then
-  echo "Error: Could not determine S3 bucket."
-  echo "Set FRONTEND_S3_BUCKET environment variable,"
-  echo "or ensure the WorkstationWebsite stack is deployed."
-  exit 1
-fi
-
-aws s3 sync frontend/out/ s3://$S3_BUCKET/ --delete --region us-west-2
+aws s3 sync frontend/out/ "s3://$S3_BUCKET/" --delete --region "$REGION"
 
 echo "✅ Uploaded to S3"
 echo ""
 
 # Invalidate CloudFront cache
 echo "🔄 Invalidating CloudFront cache..."
-DISTRIBUTION_ID="${CLOUDFRONT_DISTRIBUTION_ID:-$(aws cloudformation describe-stacks --stack-name WorkstationWebsite --query 'Stacks[0].Outputs[?OutputKey==`DistributionId`].OutputValue' --output text 2>/dev/null)}"
-
-if [ -z "$DISTRIBUTION_ID" ]; then
-  echo "Error: Could not determine CloudFront distribution ID."
-  echo "Set CLOUDFRONT_DISTRIBUTION_ID environment variable,"
-  echo "or ensure the WorkstationWebsite stack is deployed."
-  exit 1
-fi
 INVALIDATION_ID=$(aws cloudfront create-invalidation \
-  --distribution-id $DISTRIBUTION_ID \
+  --distribution-id "$DISTRIBUTION_ID" \
   --paths "/*" \
   --query 'Invalidation.Id' \
-  --output text \
-  --region us-west-2)
+  --output text)
 
 echo "✅ CloudFront invalidation created: $INVALIDATION_ID"
 echo ""
 
-# Wait for invalidation to complete
 echo "⏳ Waiting for CloudFront invalidation to complete..."
 aws cloudfront wait invalidation-completed \
-  --distribution-id $DISTRIBUTION_ID \
-  --id $INVALIDATION_ID \
-  --region us-west-2
+  --distribution-id "$DISTRIBUTION_ID" \
+  --id "$INVALIDATION_ID"
+
+WEBSITE_URL=$(stack_output "$(stack WorkstationWebsite)" WebsiteUrl)
 
 echo ""
 echo "🎉 Deployment complete!"
 echo ""
 echo "📋 Configuration Summary:"
+echo "   Region: $REGION"
 echo "   API Endpoint: $API_ENDPOINT"
 echo "   Admin API Endpoint: $ADMIN_API_ENDPOINT"
 echo "   CloudFront Distribution: $DISTRIBUTION_ID"
 echo "   S3 Bucket: $S3_BUCKET"
+if [ -n "$WEBSITE_URL" ]; then
+  echo ""
+  echo "🌐 $WEBSITE_URL"
+fi
 echo ""
-echo "✅ You can now test the application with the correct API endpoint configured!"

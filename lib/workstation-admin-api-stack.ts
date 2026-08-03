@@ -6,7 +6,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import { Construct } from 'constructs';
-import { PROJECT_TAG } from './constants';
+import { PROJECT_TAG, resourceName } from './constants';
 import { ServiceLambda } from './service-lambda';
 
 interface WorkstationAdminApiStackProps extends cdk.StackProps {
@@ -138,7 +138,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const cognitoAdminServiceRole = createFunctionRole('CognitoAdminService');
     const cognitoAdminServiceFunction = new ServiceLambda(this, 'CognitoAdminService', {
       ...lambdaDefaults,
-      functionName: 'workstation-cognito-admin-service',
+      functionName: resourceName('workstation-cognito-admin-service'),
       serviceDir: 'cognito-admin-service',
       description: 'Handles Cognito user and group administration',
       role: cognitoAdminServiceRole,
@@ -175,7 +175,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const groupManagementServiceRole = createFunctionRole('GroupManagementService');
     const groupManagementServiceFunction = new ServiceLambda(this, 'GroupManagementService', {
       ...lambdaDefaults,
-      functionName: 'workstation-group-management-service',
+      functionName: resourceName('workstation-group-management-service'),
       serviceDir: 'group-management-service',
       description: 'Handles group management operations',
       role: groupManagementServiceRole,
@@ -199,7 +199,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const securityGroupServiceRole = createFunctionRole('SecurityGroupService');
     const securityGroupServiceFunction = new ServiceLambda(this, 'SecurityGroupService', {
       ...lambdaDefaults,
-      functionName: 'workstation-security-group-service',
+      functionName: resourceName('workstation-security-group-service'),
       serviceDir: 'security-group-service',
       description: 'Handles security group management',
       role: securityGroupServiceRole,
@@ -272,7 +272,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const amiValidationServiceRole = createFunctionRole('AmiValidationService');
     const amiValidationServiceFunction = new ServiceLambda(this, 'AmiValidationService', {
       ...lambdaDefaults,
-      functionName: 'workstation-ami-validation-service',
+      functionName: resourceName('workstation-ami-validation-service'),
       serviceDir: 'ami-validation-service',
       description: 'Validates AMI IDs and retrieves AMI information',
       role: amiValidationServiceRole,
@@ -292,7 +292,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const bootstrapConfigServiceRole = createFunctionRole('BootstrapConfigService');
     const bootstrapConfigServiceFunction = new ServiceLambda(this, 'BootstrapConfigService', {
       ...lambdaDefaults,
-      functionName: 'workstation-bootstrap-config-service',
+      functionName: resourceName('workstation-bootstrap-config-service'),
       serviceDir: 'bootstrap-config-service',
       description: 'Manages bootstrap package configurations',
       role: bootstrapConfigServiceRole,
@@ -306,7 +306,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const groupPackageServiceRole = createFunctionRole('GroupPackageService');
     const groupPackageServiceFunction = new ServiceLambda(this, 'GroupPackageService', {
       ...lambdaDefaults,
-      functionName: 'workstation-group-package-service',
+      functionName: resourceName('workstation-group-package-service'),
       serviceDir: 'group-package-service',
       description: 'Manages group-specific package assignments',
       role: groupPackageServiceRole,
@@ -331,7 +331,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const storageServiceRole = createFunctionRole('StorageService');
     const storageServiceFunction = new ServiceLambda(this, 'StorageService', {
       ...lambdaDefaults,
-      functionName: 'workstation-storage-service',
+      functionName: resourceName('workstation-storage-service'),
       serviceDir: 'storage-service',
       description: 'Handles storage management operations',
       role: storageServiceRole,
@@ -404,7 +404,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const ec2DiscoveryServiceRole = createFunctionRole('Ec2DiscoveryService');
     const ec2DiscoveryServiceFunction = new ServiceLambda(this, 'Ec2DiscoveryService', {
       ...lambdaDefaults,
-      functionName: 'workstation-ec2-discovery-service',
+      functionName: resourceName('workstation-ec2-discovery-service'),
       serviceDir: 'ec2-discovery-service',
       description: 'Discovers and imports existing EC2 instances',
       role: ec2DiscoveryServiceRole,
@@ -450,7 +450,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const instanceFamilyServiceRole = createFunctionRole('InstanceFamilyService');
     const instanceFamilyServiceFunction = new ServiceLambda(this, 'InstanceFamilyService', {
       ...lambdaDefaults,
-      functionName: 'workstation-instance-family-service',
+      functionName: resourceName('workstation-instance-family-service'),
       serviceDir: 'instance-family-service',
       description: 'Manages allowed EC2 instance families for deployments',
       role: instanceFamilyServiceRole,
@@ -499,7 +499,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const userManagementServiceRole = createFunctionRole('UserManagementService');
     const userManagementServiceFunction = new ServiceLambda(this, 'UserManagementService', {
       ...lambdaDefaults,
-      functionName: 'workstation-user-management-service',
+      functionName: resourceName('workstation-user-management-service'),
       serviceDir: 'user-management-service',
       description: 'Handles user deletion (soft/hard) and password management operations',
       timeout: cdk.Duration.seconds(60), // Longer timeout for deletion operations
@@ -868,13 +868,13 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AdminApiUrl', {
       value: this.adminApi.url,
       description: 'Admin API Gateway URL',
-      exportName: 'WorkstationAdminApiUrl',
+      exportName: resourceName('WorkstationAdminApiUrl'),
     });
 
     new cdk.CfnOutput(this, 'AdminApiId', {
       value: this.adminApi.restApiId,
       description: 'Admin API Gateway ID',
-      exportName: 'WorkstationAdminApiId',
+      exportName: resourceName('WorkstationAdminApiId'),
     });
   }
 }
