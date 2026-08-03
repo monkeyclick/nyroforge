@@ -287,40 +287,6 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       }
     }));
 
-    // --- Instance Type Service ---
-    // No DynamoDB access. Only ec2:DescribeInstanceTypes (DescribeImages is
-    // not called by this handler). SSM statement copied as-is from the
-    // shared role (Get/Put/Delete on /workstation/*) even though this
-    // handler only exercises Get/Put — Delete is kept to match the existing
-    // grantable statement rather than splitting a single policy mid-action.
-    // No SecureString/KMS-encrypted params are involved (the parameter this
-    // handler writes is a plain String type), so no KMS grant is needed.
-    const instanceTypeServiceRole = createFunctionRole('InstanceTypeService');
-    const instanceTypeServiceFunction = new ServiceLambda(this, 'InstanceTypeService', {
-      ...lambdaDefaults,
-      functionName: 'workstation-instance-type-service',
-      serviceDir: 'instance-type-service',
-      description: 'Manages allowed instance types',
-      role: instanceTypeServiceRole,
-    });
-    instanceTypeServiceFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ec2:DescribeInstanceTypes'],
-      resources: ['*'],
-      conditions: {
-        'StringEquals': {
-          'aws:RequestedRegion': cdk.Stack.of(this).region,
-        }
-      }
-    }));
-    instanceTypeServiceFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'ssm:GetParameter',
-        'ssm:PutParameter',
-        'ssm:DeleteParameter',
-      ],
-      resources: [ssmWorkstationParameterArn],
-    }));
-
     // --- Bootstrap Config Service ---
     // Only ever touches the BootstrapPackages table.
     const bootstrapConfigServiceRole = createFunctionRole('BootstrapConfigService');
@@ -357,7 +323,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     // SSM parameters under /workstation/storage/* for the EFS file system
     // and access point IDs (falling back to SSM for the transfer bucket
     // name too), so it needs the same /workstation/* SSM statement as
-    // instance-type-service/instance-family-service — the original grant
+    // instance-family-service — the original grant
     // matrix omitted this, but the handler cannot fetch its own config
     // without it. Those SSM parameters are plain String type (see
     // lib/enterprise-storage-construct.ts / enterprise-storage-stack.ts:
@@ -480,7 +446,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     // helper). Workstations is read-WRITE, not read-only as the original
     // matrix assumed: saveInstanceFamilyConfig() stores the instance-family
     // allowlist as an item in the Workstations table (PutItem with
-    // PK=CONFIG#INSTANCE_FAMILIES). SSM statement mirrors instance-type-service.
+    // PK=CONFIG#INSTANCE_FAMILIES).
     const instanceFamilyServiceRole = createFunctionRole('InstanceFamilyService');
     const instanceFamilyServiceFunction = new ServiceLambda(this, 'InstanceFamilyService', {
       ...lambdaDefaults,
@@ -623,7 +589,6 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const groupManagementIntegration = new apigateway.LambdaIntegration(groupManagementServiceFunction);
     const securityGroupIntegration = new apigateway.LambdaIntegration(securityGroupServiceFunction);
     const amiValidationIntegration = new apigateway.LambdaIntegration(amiValidationServiceFunction);
-    const instanceTypeIntegration = new apigateway.LambdaIntegration(instanceTypeServiceFunction);
     const bootstrapConfigIntegration = new apigateway.LambdaIntegration(bootstrapConfigServiceFunction);
     const groupPackageIntegration = new apigateway.LambdaIntegration(groupPackageServiceFunction);
     const storageIntegration = new apigateway.LambdaIntegration(storageServiceFunction);
@@ -804,16 +769,6 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const validateAmiResource = this.adminApi.root.addResource('validate-ami');
     validateAmiResource.addMethod('GET', amiValidationIntegration, authorizedMethodOptions);
     validateAmiResource.addMethod('POST', amiValidationIntegration, authorizedMethodOptions);
-
-    // /instance-types resource
-    const instanceTypesResource = this.adminApi.root.addResource('instance-types');
-    instanceTypesResource.addMethod('GET', instanceTypeIntegration, authorizedMethodOptions);
-    instanceTypesResource.addMethod('PUT', instanceTypeIntegration, authorizedMethodOptions);
-
-    // /instance-types/discover
-    const discoverInstanceTypesResource = instanceTypesResource.addResource('discover');
-    discoverInstanceTypesResource.addMethod('POST', instanceTypeIntegration, authorizedMethodOptions);
-    discoverInstanceTypesResource.addMethod('GET', instanceTypeIntegration, authorizedMethodOptions);
 
     // /bootstrap-packages resource
     const bootstrapPackagesResource = this.adminApi.root.addResource('bootstrap-packages');

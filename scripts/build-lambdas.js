@@ -14,7 +14,6 @@ const lambdaFunctions = [
   'security-group-service',
   'cognito-admin-service',
   'ami-validation-service',
-  'instance-type-service',
   'bootstrap-config-service',
   'analytics-service',
   'user-attribute-change-processor',

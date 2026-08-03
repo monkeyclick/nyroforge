@@ -96,6 +96,7 @@ export interface LaunchWorkstationRequest {
   region: string;
   instanceType: string;
   osVersion: string;
+  friendlyName?: string;
   authMethod: 'domain' | 'local';
   domainConfig?: {
     domainName: string;
@@ -106,6 +107,13 @@ export interface LaunchWorkstationRequest {
   };
   autoTerminateHours?: number;
   tags?: Record<string, string>;
+  bootstrapPackages?: string[];
+  securityGroupId?: string;
+  createSecurityGroup?: {
+    name: string;
+    description: string;
+    rules: Array<{ port: number; protocol: string; cidrIp: string; description: string }>;
+  };
 }
 
 export interface RegionInfo {

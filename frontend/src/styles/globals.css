@@ -96,11 +96,49 @@
 .dark .bg-white { background-color: var(--studio-surface) !important; }
 .dark .bg-gray-50 { background-color: var(--studio-canvas) !important; }
 .dark .bg-gray-100 { background-color: rgba(255,255,255,.06) !important; }
+.dark .bg-gray-200 { background-color: rgba(255,255,255,.1) !important; }
 .dark .text-gray-900, .dark .text-gray-800, .dark .text-gray-700 { color: var(--studio-text) !important; }
 .dark .text-gray-600, .dark .text-gray-500, .dark .text-gray-400 { color: var(--studio-muted) !important; }
 .dark .border-gray-100, .dark .border-gray-200, .dark .border-gray-300 { border-color: var(--studio-border) !important; }
-.dark input, .dark select, .dark textarea { border-color: var(--studio-border) !important; background: rgba(7,9,15,.65) !important; color: var(--studio-text) !important; }
+.dark input:not([type=checkbox]):not([type=radio]), .dark select, .dark textarea { border-color: var(--studio-border) !important; background: rgba(7,9,15,.65) !important; color: var(--studio-text) !important; }
 .dark .modal-content, .dark .login-card, .dark .card { background: #11141d; color: var(--studio-text); border: 1px solid var(--studio-border); }
+
+/* @tailwindcss/forms draws the checkmark via `background-image` on `:checked`. The
+   generic `.dark input` rule above used the `background` SHORTHAND with `!important`,
+   which resets background-image to `none` — so checking a box in dark mode produced no
+   visual change at all (state updated, but nothing on screen showed it). Scope checkbox/
+   radio out of that rule and restyle them with background-color only, so the checked
+   icon survives. */
+.dark input[type=checkbox], .dark input[type=radio] { border-color: var(--studio-border) !important; background-color: rgba(7,9,15,.4) !important; }
+.dark input[type=checkbox]:checked, .dark input[type=radio]:checked { background-color: #7c3aed !important; border-color: #7c3aed !important; }
+
+/* Tailwind hover: variants compile to their own class (e.g. `hover:bg-white`), so the
+   base-class overrides above never match them — leaving hover states literally white
+   in dark mode while the text on top stays light, making it unreadable on hover. */
+.dark .hover\:bg-white:hover { background-color: var(--studio-surface) !important; }
+.dark .hover\:bg-gray-50:hover { background-color: rgba(255,255,255,.04) !important; }
+.dark .hover\:bg-gray-100:hover { background-color: rgba(255,255,255,.08) !important; }
+.dark .hover\:bg-gray-200:hover { background-color: rgba(255,255,255,.14) !important; }
+
+/* Semantic info/badge colors (blue/purple/green) used for banners and tags — untouched
+   by the neutral overrides above, so they stayed light-mode bright against a dark page. */
+.dark .bg-blue-50 { background-color: rgba(59,130,246,.12) !important; }
+.dark .bg-blue-100 { background-color: rgba(59,130,246,.18) !important; }
+.dark .bg-purple-50 { background-color: rgba(168,85,247,.12) !important; }
+.dark .bg-purple-100 { background-color: rgba(168,85,247,.18) !important; }
+.dark .bg-green-100 { background-color: rgba(34,197,94,.18) !important; }
+.dark .border-blue-200 { border-color: rgba(59,130,246,.35) !important; }
+.dark .border-blue-500 { border-color: rgba(59,130,246,.6) !important; }
+.dark .text-blue-600, .dark .text-blue-700, .dark .text-blue-800 { color: #93c5fd !important; }
+.dark .text-purple-700, .dark .text-purple-800 { color: #d8b4fe !important; }
+.dark .text-green-700, .dark .text-green-800 { color: #86efac !important; }
+
+/* "Selected" row treatment for package checkboxes — violet-50/900 are the only
+   two new light-toned violet classes this introduces; violet-500/600 (used for
+   the ring and checkmark accent) are the app's own brand accent and already
+   render fine unmodified in both themes elsewhere (e.g. .nav-pill-active). */
+.dark .bg-violet-50 { background-color: rgba(124,58,237,.14) !important; }
+.dark .text-violet-900 { color: #ede9fe !important; }
 
 @media (max-width: 640px) { .studio-hero { align-items: flex-start; flex-direction: column; } .hero-action { width: 100%; justify-content: center; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; } }

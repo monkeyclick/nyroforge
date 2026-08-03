@@ -1,8 +1,10 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
-import { EC2Client, DescribeRegionsCommand, DescribeInstanceTypesCommand, DescribeImagesCommand, _InstanceType } from '@aws-sdk/client-ec2';
+import { EC2Client, DescribeRegionsCommand, DescribeImagesCommand } from '@aws-sdk/client-ec2';
 import { SSMClient, GetParameterCommand, GetParametersCommand } from '@aws-sdk/client-ssm';
 import { logEvent } from '../shared/logging';
 import { jsonResponse } from '../shared/http';
+import { getAllowedInstanceTypes } from '../shared/instanceFamilies';
+import { describeInstanceTypesBatched } from '../shared/ec2';
 
 // Initialize AWS clients
 const ec2Client = new EC2Client({});
@@ -70,7 +72,7 @@ async function getAvailableRegions(): Promise<APIGatewayProxyResult> {
     const regionsResult = await ec2Client.send(describeCommand);
 
     // Get allowed instance types for checking availability
-    const allowedInstanceTypes = await getAllowedInstanceTypes();
+    const allowedInstanceTypes = await getAllowedInstanceTypes(ssmClient);
 
     const regions: RegionInfo[] = [];
 
@@ -82,12 +84,8 @@ async function getAvailableRegions(): Promise<APIGatewayProxyResult> {
       
       try {
         // Check if G4/G5/G6 instances are available in this region
-        const instanceTypesCommand = new DescribeInstanceTypesCommand({
-          InstanceTypes: allowedInstanceTypes as _InstanceType[],
-        });
-        
-        const instanceTypesResult = await regionalEC2.send(instanceTypesCommand);
-        const availableTypes = instanceTypesResult.InstanceTypes?.map(it => it.InstanceType!) || [];
+        const instanceTypeDetails = await describeInstanceTypesBatched(regionalEC2, allowedInstanceTypes);
+        const availableTypes = instanceTypeDetails.map(it => it.InstanceType!);
         
         regions.push({
           id: regionId,
@@ -133,18 +131,14 @@ async function getAvailableRegions(): Promise<APIGatewayProxyResult> {
 async function getInstanceTypes(): Promise<APIGatewayProxyResult> {
   try {
     console.log('getInstanceTypes: Starting...');
-    const allowedTypes = await getAllowedInstanceTypes();
+    const allowedTypes = await getAllowedInstanceTypes(ssmClient);
     console.log(`getInstanceTypes: Got ${allowedTypes.length} allowed types from SSM:`, allowedTypes.slice(0, 5), '...');
     
     // Get detailed information for each instance type
-    const describeCommand = new DescribeInstanceTypesCommand({
-      InstanceTypes: allowedTypes as _InstanceType[],
-    });
+    const describedTypes = await describeInstanceTypesBatched(ec2Client, allowedTypes);
+    console.log(`getInstanceTypes: EC2 returned ${describedTypes.length} instance type details`);
 
-    const result = await ec2Client.send(describeCommand);
-    console.log(`getInstanceTypes: EC2 returned ${result.InstanceTypes?.length || 0} instance type details`);
-    
-    const instanceTypes: InstanceTypeInfo[] = (result.InstanceTypes || []).map(instanceType => {
+    const instanceTypes: InstanceTypeInfo[] = describedTypes.map(instanceType => {
       const type = instanceType.InstanceType!;
       const vcpus = instanceType.VCpuInfo?.DefaultVCpus || 0;
       const memoryMiB = instanceType.MemoryInfo?.SizeInMiB || 0;
@@ -279,24 +273,6 @@ async function getSystemConfiguration(): Promise<APIGatewayProxyResult> {
 }
 
 // Helper functions
-
-async function getAllowedInstanceTypes(): Promise<string[]> {
-  try {
-    const getCommand = new GetParameterCommand({
-      Name: '/workstation/config/allowedInstanceTypes',
-    });
-
-    const result = await ssmClient.send(getCommand);
-    return JSON.parse(result.Parameter?.Value || '[]');
-  } catch (error) {
-    console.warn('Could not get allowed instance types from SSM, using defaults:', error);
-    return [
-      'g4dn.xlarge', 'g4dn.2xlarge', 'g4dn.4xlarge',
-      'g5.xlarge', 'g5.2xlarge', 'g5.4xlarge',
-      'g6.xlarge', 'g6.2xlarge', 'g6.4xlarge'
-    ];
-  }
-}
 
 async function getSupportedWindowsVersions(): Promise<string[]> {
   try {

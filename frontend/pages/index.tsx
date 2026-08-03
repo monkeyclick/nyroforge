@@ -3,7 +3,6 @@ import { useRouter } from 'next/router'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { signOut } from 'aws-amplify/auth'
 import toast from 'react-hot-toast'
-import LaunchWorkstationModal from '@/components/workstation/LaunchWorkstationModal'
 import RdpCredentialsModal from '@/components/workstation/RdpCredentialsModal'
 import DcvConnectionModal from '@/components/workstation/DcvConnectionModal'
 import PackageInstallationProgress from '@/components/workstation/PackageInstallationProgress'
@@ -26,7 +25,6 @@ export default function DashboardPage() {
   const { user, logout, isAdmin } = useAuthStore()
   const queryClient = useQueryClient()
   const { addActivity, updateActivity } = useActivityStore()
-  const [showLaunchModal, setShowLaunchModal] = useState(false)
   const [showRdpModal, setShowRdpModal] = useState(false)
   const [showDcvModal, setShowDcvModal] = useState(false)
   const [rdpCredentials, setRdpCredentials] = useState<any>(null)
@@ -235,11 +233,11 @@ export default function DashboardPage() {
   return (
     <AppShell isAdmin={isAdmin} onSignOut={handleLogout}>
       <div className="max-w-[1600px] mx-auto px-4 py-6 sm:px-6 sm:py-8">
-        <StudioHero onLaunch={() => setShowLaunchModal(true)} />
+        <StudioHero onLaunch={() => router.push('/workstations/launch')} />
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-          
+
           {/* LEFT: Actions */}
-          <StudioFilters activeStatus={filterStatus} onStatusChange={setFilterStatus} onLaunch={() => setShowLaunchModal(true)} onRefresh={() => queryClient.invalidateQueries({ queryKey: ['workstations'] })} />
+          <StudioFilters activeStatus={filterStatus} onStatusChange={setFilterStatus} onLaunch={() => router.push('/workstations/launch')} onRefresh={() => queryClient.invalidateQueries({ queryKey: ['workstations'] })} />
 
           {/* CENTER: Environment View */}
           <div className="space-y-6 lg:col-span-7">
@@ -277,7 +275,7 @@ export default function DashboardPage() {
                   <div className="text-center py-12">
                     <div className="text-gray-400 mb-2">Your creative studio is ready</div>
                     <button
-                      onClick={() => setShowLaunchModal(true)}
+                      onClick={() => router.push('/workstations/launch')}
                       className="text-sm text-blue-600 hover:text-blue-700"
                     >
                       Launch your first creative workstation
@@ -362,16 +360,6 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      <LaunchWorkstationModal
-        isOpen={showLaunchModal}
-        onClose={() => setShowLaunchModal(false)}
-        onSuccess={() => {
-          setShowLaunchModal(false)
-          addActivity({ title: 'Workstation launch accepted', description: 'Your new creative workstation is being provisioned.', status: 'succeeded', category: 'workstation' })
-          analyticsService.trackWorkstationAction('launch')
-          queryClient.invalidateQueries({ queryKey: ['workstations'] })
-        }}
-      />
 
       {confirmDialog && (
         <ConfirmDialog
