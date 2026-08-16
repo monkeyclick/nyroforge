@@ -1,7 +1,8 @@
-export const ADMIN_TABS = ['workstations', 'instance-scope', 'instance-families', 'costs', 'user-management', 'security', 'storage', 'analytics', 'settings', 'bootstrap'] as const
+export const ADMIN_TABS = ['setup-health', 'workstations', 'instance-scope', 'instance-families', 'costs', 'user-management', 'security', 'storage', 'analytics', 'settings', 'bootstrap'] as const
 export type AdminTab = typeof ADMIN_TABS[number]
 
 const LABELS: Record<AdminTab, string> = {
+  'setup-health': 'Setup & health',
   workstations: 'Workstations',
   'instance-scope': 'Instance scope',
   'instance-families': 'Instance catalog',

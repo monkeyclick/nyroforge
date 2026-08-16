@@ -33,6 +33,34 @@ import {
 import { fetchAuthSession, signOut } from 'aws-amplify/auth';
 import { useAuthStore } from '../stores/authStore';
 
+export type DeploymentDoctorStatus = 'pass' | 'warning' | 'fail' | 'skipped';
+
+export interface DeploymentDoctorCheck {
+  id: string;
+  category: string;
+  title: string;
+  status: DeploymentDoctorStatus;
+  required: boolean;
+  message: string;
+  remediation?: string;
+}
+
+export interface DeploymentDoctorSummary {
+  pass: number;
+  warning: number;
+  fail: number;
+  skipped: number;
+  total: number;
+}
+
+export interface DeploymentDoctorReport {
+  generatedAt: string;
+  region: string;
+  status: DeploymentDoctorStatus;
+  summary: DeploymentDoctorSummary;
+  checks: DeploymentDoctorCheck[];
+}
+
 class ApiClient {
   private baseUrl: string;
   private adminApiUrl: string;
@@ -1255,6 +1283,11 @@ class ApiClient {
       method: 'PATCH',
       body: JSON.stringify(data),
     });
+  }
+
+  // Deployment doctor (read-only admin health report)
+  async getDeploymentDoctorReport(): Promise<DeploymentDoctorReport> {
+    return this.request<DeploymentDoctorReport>('/admin/deployment-doctor', { method: 'GET' }, true);
   }
 
   // Instance Family Management (Admin)

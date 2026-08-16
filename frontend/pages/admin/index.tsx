@@ -26,6 +26,9 @@ import AdminSystemInfo from '@/components/admin/AdminSystemInfo'
 import AdminWorkstationFleet from '@/components/admin/AdminWorkstationFleet'
 import type { Workstation } from '@/types'
 import { useActivityStore } from '@/stores/activityStore'
+import DeploymentDoctor from '@/components/admin/DeploymentDoctor'
+
+const ADMIN_SETUP_PREFERENCE_KEY = 'nyroforge.admin.setup-health.completed.v1'
 
 interface AmiValidationResult {
   available: boolean;
@@ -43,7 +46,7 @@ export default function AdminPage() {
   const { user, logout, isAdmin } = useAuthStore()
   const queryClient = useQueryClient()
   const { addActivity, updateActivity } = useActivityStore()
-  const [activeTab, setActiveTab] = useState<AdminTab>('workstations')
+  const [activeTab, setActiveTab] = useState<AdminTab>('setup-health')
   const [userManagementSubTab, setUserManagementSubTab] = useState<'users' | 'groups'>('users')
   const [securityGroups, setSecurityGroups] = useState<any[]>([])
   const [selectedOsVersion, setSelectedOsVersion] = useState('windows-server-2025')
@@ -80,6 +83,9 @@ export default function AdminPage() {
   
   // Load saved settings on mount
   useEffect(() => {
+    if (localStorage.getItem(ADMIN_SETUP_PREFERENCE_KEY) === 'true') {
+      setActiveTab('workstations')
+    }
     const savedGeneralSettings = localStorage.getItem('adminGeneralSettings');
     const savedInstanceDefaults = localStorage.getItem('adminInstanceDefaults');
     
@@ -185,6 +191,15 @@ export default function AdminPage() {
     router.push('/login')
   }
 
+  const handleContinueFromSetup = () => {
+    try {
+      localStorage.setItem(ADMIN_SETUP_PREFERENCE_KEY, 'true')
+    } catch (error) {
+      console.warn('Unable to save the admin setup presentation preference:', error)
+    }
+    setActiveTab('workstations')
+  }
+
   const handleReconcile = async () => {
     if (!confirm('Reconcile EC2 instances with DynamoDB? This will create records for any orphaned instances.')) return
     try {
@@ -234,10 +249,14 @@ export default function AdminPage() {
           <AdminNavigation activeTab={activeTab} onChange={setActiveTab} />
 
           {/* CENTER: Content */}
-          <div className="space-y-6 lg:col-span-7">
-            <AdminSummaryStats summary={summary} />
+          <div className={`space-y-6 ${activeTab === 'setup-health' ? 'lg:col-span-10' : 'lg:col-span-7'}`}>
+            {activeTab !== 'setup-health' && <AdminSummaryStats summary={summary} />}
 
             {/* Content Area */}
+            {activeTab === 'setup-health' && (
+              <DeploymentDoctor onContinue={handleContinueFromSetup} />
+            )}
+
             {activeTab === 'workstations' && (
               <AdminWorkstationFleet
                 workstations={workstations}
@@ -897,7 +916,7 @@ export default function AdminPage() {
             )}
           </div>
 
-          <AdminSystemInfo summary={summary} />
+          {activeTab !== 'setup-health' && <AdminSystemInfo summary={summary} />}
         </div>
       </div>
 
