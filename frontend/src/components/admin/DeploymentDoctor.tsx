@@ -109,6 +109,8 @@ export default function DeploymentDoctor({ onContinue }: DeploymentDoctorProps) 
     queryKey: ['admin-deployment-doctor'],
     queryFn: () => apiClient.getDeploymentDoctorReport(),
     retry: 1,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   })
 
   if (isLoading) {

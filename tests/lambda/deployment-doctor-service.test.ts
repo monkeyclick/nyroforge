@@ -86,7 +86,9 @@ function installPassingAwsResponses(): void {
       case 'DescribeSubnetsCommand':
         return Promise.resolve({ Subnets: [{ SubnetId: 'subnet-1', State: 'available', AvailabilityZone: 'us-west-2a' }] });
       case 'DescribeVpcEndpointsCommand':
-        return Promise.resolve({ VpcEndpoints: [{ VpcEndpointId: 'vpce-1', State: 'Available' }] });
+        return Promise.resolve({ VpcEndpoints: [
+          's3', 'dynamodb', 'ec2', 'ssm', 'ssmmessages', 'ec2messages', 'secretsmanager', 'kms',
+        ].map((service) => ({ VpcEndpointId: `vpce-${service}`, State: 'Available', ServiceName: `com.amazonaws.us-west-2.${service}` })) });
       case 'DescribeInstanceTypeOfferingsCommand':
         return Promise.resolve({ InstanceTypeOfferings: [{ InstanceType: 'g4dn.xlarge' }] });
       case 'DescribeImagesCommand':
@@ -95,9 +97,9 @@ function installPassingAwsResponses(): void {
         return Promise.resolve({
           SecurityGroups: [{
             GroupId: 'sg-1',
+            GroupName: 'NyroForge-workstation-access',
             IpPermissions: [
-              { FromPort: 3389, ToPort: 3389, IpProtocol: 'tcp' },
-              { FromPort: 8443, ToPort: 8443, IpProtocol: 'tcp' },
+              { FromPort: 3389, ToPort: 3389, IpProtocol: 'tcp', IpRanges: [{ CidrIp: '203.0.113.10/32' }] },
             ],
           }],
         });
@@ -113,6 +115,8 @@ function installPassingAwsResponses(): void {
           { Name: '/workstation/config/allowedInstanceTypes' },
           { Name: '/workstation/config/defaultAutoTerminateHours' },
           { Name: '/workstation/config/instanceProfileArn' },
+          { Name: '/workstation/frontend/config' },
+          { Name: '/workstation/frontend/auth' },
         ] });
       case 'DescribeInstanceInformationCommand':
         return Promise.resolve({ InstanceInformationList: [{ InstanceId: 'i-123', PingStatus: 'Online' }] });
@@ -165,12 +169,14 @@ describe('deployment doctor service', () => {
       'cognito-admin',
       'workstation-ami',
       'ssm',
+      'application-config',
       'budget',
       'auto-stop',
       'remote-access',
     ]);
     expect(report.checks.every((check: { status: string }) => check.status === 'pass')).toBe(true);
-    expect(report.summary).toEqual({ total: 10, passed: 10, warnings: 0, failed: 0, skipped: 0 });
+    expect(report.region).toBe('us-west-2');
+    expect(report.summary).toEqual({ total: 11, pass: 11, warning: 0, fail: 0, skipped: 0 });
     expect(response.body.length).toBeLessThan(32_000);
   });
 
@@ -200,7 +206,7 @@ describe('deployment doctor service', () => {
     expect(byId.network.status).toBe('fail');
     expect(byId['gpu-offerings'].status).toBe('pass');
     expect(byId['cognito-admin'].status).toBe('pass');
-    expect(report.summary.failed).toBe(1);
+    expect(report.summary.fail).toBe(1);
   });
 
   it('never leaks exception messages, credentials, tokens, parameter values, or stacks', async () => {

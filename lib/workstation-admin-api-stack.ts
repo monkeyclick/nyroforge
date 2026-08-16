@@ -577,6 +577,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       actions: ['ssm:GetParameters'],
       resources: [
         `arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/workstation/config/*`,
+        `arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/workstation/frontend/*`,
       ],
     }));
     deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({

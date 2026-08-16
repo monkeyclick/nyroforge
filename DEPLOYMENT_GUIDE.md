@@ -511,11 +511,11 @@ npm run doctor -- --region us-west-2
 # Use a named profile and a non-default CDK outputs file
 npm run doctor -- --region us-west-2 --profile sandbox --outputs cdk-outputs.json
 
-# Machine-readable output, with no ANSI or progress text
-npm run doctor -- --json --region us-west-2
+# Machine-readable output, with npm's script banner suppressed
+npm run --silent doctor -- --json --region us-west-2
 ```
 
-The doctor checks local prerequisites, AWS identity/region, VPC/subnets, regional GPU quotas and offerings, Cognito and the `workstation-admin` group, Amazon-owned Windows AMIs, SSM defaults, API/frontend outputs, budgets and auto-termination, and security-group rules for remote access. AWS commands have per-call timeouts and are describe/list/get operations only. Reports redact credential-like output and do not include SSM parameter values.
+The doctor checks local prerequisites, AWS identity/region, VPC/subnets/endpoints, regional GPU quotas and offerings, Cognito and the `workstation-admin` group, Amazon-owned Windows AMIs, SSM defaults, API/frontend outputs, budgets and auto-termination, and security-group rules for remote access. AWS commands have per-call timeouts and are describe/list/get operations only. Reports redact credential-like output and do not include SSM parameter values.
 
 A check can be `pass`, `warning`, `fail`, or `skipped`. Missing optional or pre-deployment configuration is a warning or skipped check rather than a crash. A pass only describes what the command proved—for example, seeing an RDP/DCV security-group rule does not prove end-to-end connectivity.
 

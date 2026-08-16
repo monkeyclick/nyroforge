@@ -291,9 +291,17 @@ async function networkCheck(context: AwsContext, outputs: Record<string, string>
   const subnets = await aws(context, 'ec2', 'describe-subnets', ['--filters', `Name=vpc-id,Values=${vpcId}`]);
   if (subnets.exitCode !== 0) return check('network', 'network', 'VPC and subnets', 'fail', true, failureMessage(subnets), 'Grant read access to EC2 network metadata and verify the VPC.');
   const subnetCount = arrayAt(parseJson(subnets.stdout), 'Subnets').length;
-  return subnetCount > 0
-    ? check('network', 'network', 'VPC and subnets', 'pass', true, `VPC ${vpcId} exists and has ${subnetCount} visible subnet(s).`)
-    : check('network', 'network', 'VPC and subnets', 'fail', true, `VPC ${vpcId} has no visible subnets.`, 'Create or expose subnets suitable for workstation launches.');
+  if (subnetCount === 0) {
+    return check('network', 'network', 'VPC, subnets, and endpoints', 'fail', true, `VPC ${vpcId} has no visible subnets.`, 'Create or expose subnets suitable for workstation launches.');
+  }
+  const endpoints = await aws(context, 'ec2', 'describe-vpc-endpoints', ['--filters', `Name=vpc-id,Values=${vpcId}`, '--max-results', '100']);
+  if (endpoints.exitCode !== 0) {
+    return check('network', 'network', 'VPC, subnets, and endpoints', 'warning', false, `VPC ${vpcId} and ${subnetCount} subnet(s) are visible, but VPC endpoints could not be verified.`, 'Grant ec2:DescribeVpcEndpoints or confirm outbound connectivity for private workstations.');
+  }
+  const endpointCount = arrayAt(parseJson(endpoints.stdout), 'VpcEndpoints').length;
+  return endpointCount > 0
+    ? check('network', 'network', 'VPC, subnets, and endpoints', 'pass', true, `VPC ${vpcId}, ${subnetCount} subnet(s), and ${endpointCount} VPC endpoint(s) are visible.`)
+    : check('network', 'network', 'VPC, subnets, and endpoints', 'warning', false, `VPC ${vpcId} and ${subnetCount} subnet(s) are visible, but no VPC endpoints were found.`, 'Confirm internet/NAT egress or add the endpoints required by private workstations.');
 }
 
 async function gpuCheck(context: AwsContext): Promise<DoctorCheck> {
@@ -354,10 +362,22 @@ async function applicationCheck(context: AwsContext, outputs: Record<string, str
   }
   const apis = await aws(context, 'apigateway', 'get-rest-apis', ['--limit', '100']);
   if (apis.exitCode !== 0) return check('api-frontend', 'application', 'API and frontend configuration', 'warning', false, failureMessage(apis), 'Grant apigateway:GET to verify deployed REST APIs.');
-  const visible = arrayAt(parseJson(apis.stdout), 'items').length;
-  return visible > 0
-    ? check('api-frontend', 'application', 'API and frontend configuration', 'pass', true, `${urls.length} HTTPS application URL(s) are configured and ${visible} REST API(s) are visible. Endpoint reachability was not tested.`)
-    : check('api-frontend', 'application', 'API and frontend configuration', 'fail', true, 'Application URLs are configured, but no REST APIs are visible in this region.', 'Verify API deployment and the selected account and region.');
+  const configuredApiIds = [outputs.apiendpoint, outputs.adminapiurl]
+    .filter(Boolean)
+    .map((url) => {
+      try { return new URL(url).hostname.split('.')[0]; } catch { return ''; }
+    })
+    .filter(Boolean);
+  const visibleIds = new Set(arrayAt<Record<string, unknown>>(parseJson(apis.stdout), 'items')
+    .map((item) => item.id)
+    .filter((id): id is string => typeof id === 'string'));
+  if (configuredApiIds.length === 0) {
+    return check('api-frontend', 'application', 'API and frontend configuration', 'fail', true, 'No API endpoint was present in the deployment outputs.', 'Regenerate CDK outputs and rebuild the frontend with the deployed API endpoints.');
+  }
+  const missingApiIds = configuredApiIds.filter((id) => !visibleIds.has(id));
+  return missingApiIds.length === 0
+    ? check('api-frontend', 'application', 'API and frontend configuration', 'pass', true, `${urls.length} HTTPS application URL(s) are configured and their REST API IDs are visible. Endpoint reachability was not tested.`)
+    : check('api-frontend', 'application', 'API and frontend configuration', 'fail', true, `${missingApiIds.length} configured API endpoint(s) do not match a visible REST API in this region.`, 'Regenerate CDK outputs and verify the selected account and region.');
 }
 
 async function costControlCheck(context: AwsContext, outputs: Record<string, string>, account?: string): Promise<DoctorCheck> {

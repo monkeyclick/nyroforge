@@ -129,7 +129,7 @@ Run the read-only doctor before or after deployment to verify local tools, AWS i
 ```bash
 npm run doctor -- --region us-west-2
 npm run doctor -- --region us-west-2 --profile sandbox --outputs cdk-outputs.json
-npm run doctor -- --json --region us-west-2 > doctor-report.json
+npm run --silent doctor -- --json --region us-west-2 > doctor-report.json
 ```
 
 The doctor only invokes bounded, read-only AWS CLI operations. It does not create, update, or delete resources and does not test end-to-end workstation connectivity. Missing optional or not-yet-deployed configuration is reported as a warning or skipped check. Exit code `0` means no required check failed, `1` means at least one required check failed, and `2` means the command arguments were invalid. Use `npm run doctor -- --help` for all options.

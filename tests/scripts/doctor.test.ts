@@ -6,10 +6,10 @@ const outputs = JSON.stringify({
     UserPoolId: 'us-west-2_pool',
   },
   WorkstationApi: {
-    ApiEndpoint: 'https://api.example.com/api/',
+    ApiEndpoint: 'https://api-1.execute-api.us-west-2.amazonaws.com/api/',
     AutoTerminationRuleArn: 'arn:aws:events:us-west-2:123456789012:rule/auto-stop',
   },
-  WorkstationAdminApi: { AdminApiUrl: 'https://admin.example.com/prod/' },
+  WorkstationAdminApi: { AdminApiUrl: 'https://api-2.execute-api.us-west-2.amazonaws.com/prod/' },
   WorkstationWebsite: { WebsiteUrl: 'https://app.example.com' },
 });
 
@@ -25,6 +25,7 @@ function successfulRunner(): jest.MockedFunction<CommandRunner> {
       'aws sts get-caller-identity': JSON.stringify({ Account: '123456789012', Arn: 'arn:aws:iam::123456789012:user/test', UserId: 'AIDAEXAMPLE' }),
       'aws ec2 describe-vpcs': JSON.stringify({ Vpcs: [{ VpcId: 'vpc-123', State: 'available' }] }),
       'aws ec2 describe-subnets': JSON.stringify({ Subnets: [{ SubnetId: 'subnet-1', AvailableIpAddressCount: 100 }] }),
+      'aws ec2 describe-vpc-endpoints': JSON.stringify({ VpcEndpoints: [{ VpcEndpointId: 'vpce-1', State: 'Available' }] }),
       'aws service-quotas list-service-quotas': JSON.stringify({ Quotas: [{ QuotaName: 'Running On-Demand G and VT instances', Value: 16 }] }),
       'aws ec2 describe-instance-type-offerings': JSON.stringify({ InstanceTypeOfferings: [{ InstanceType: 'g4dn.xlarge' }] }),
       'aws cognito-idp describe-user-pool': JSON.stringify({ UserPool: { Id: 'us-west-2_pool', Status: 'Enabled' } }),
@@ -146,6 +147,7 @@ describe('NyroForge deployment doctor', () => {
     const report = parseReport(result.stdout);
     const allowedOperations = new Set([
       '--version', 'configure:get', 'sts:get-caller-identity', 'ec2:describe-vpcs', 'ec2:describe-subnets',
+      'ec2:describe-vpc-endpoints',
       'service-quotas:list-service-quotas', 'ec2:describe-instance-type-offerings', 'cognito-idp:describe-user-pool',
       'cognito-idp:list-users-in-group', 'ec2:describe-images', 'ssm:get-parameters', 'apigateway:get-rest-apis',
       'budgets:describe-budgets', 'events:describe-rule', 'ec2:describe-security-groups',
