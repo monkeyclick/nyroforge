@@ -534,6 +534,74 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       resources: ['*'], // SES doesn't support resource-level permissions for most operations
     }));
 
+    // --- Deployment Doctor Service ---
+    // This function is intentionally not attached to the VPC and does not use
+    // the broader AWSLambdaVPCAccessExecutionRole. It performs only bounded,
+    // read-only control-plane calls and has no DynamoDB, KMS, Secrets Manager,
+    // or mutation permissions.
+    const deploymentDoctorServiceRole = new iam.Role(this, 'DeploymentDoctorServiceRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+    deploymentDoctorServiceRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: ['*'],
+    }));
+    const deploymentDoctorServiceFunction = new ServiceLambda(this, 'DeploymentDoctorService', {
+      ...lambdaDefaults,
+      functionName: 'workstation-deployment-doctor-service',
+      serviceDir: 'deployment-doctor-service',
+      description: 'Runs bounded read-only deployment diagnostics for administrators',
+      role: deploymentDoctorServiceRole,
+      environment: {
+        ...commonEnv,
+        VPC_ID: vpc.vpcId,
+        USER_POOL_ID: userPool.userPoolId,
+        DEFAULT_AMI_ID: process.env.WORKSTATION_AMI_ID || '',
+      },
+    });
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:DescribeImages',
+        'ec2:DescribeInstanceTypeOfferings',
+        'ec2:DescribeSecurityGroups',
+        'ec2:DescribeSubnets',
+        'ec2:DescribeVpcEndpoints',
+        'ec2:DescribeVpcs',
+      ],
+      resources: ['*'],
+      conditions: {
+        StringEquals: { 'aws:RequestedRegion': cdk.Stack.of(this).region },
+      },
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameters'],
+      resources: [
+        `arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/workstation/config/*`,
+      ],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:DescribeInstanceInformation'],
+      resources: ['*'],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:GetGroup', 'cognito-idp:ListUsersInGroup'],
+      resources: [userPool.userPoolArn],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['servicequotas:GetServiceQuota'],
+      resources: ['*'],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['budgets:ViewBudget'],
+      resources: ['*'],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['events:DescribeRule'],
+      resources: [
+        `arn:aws:events:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:rule/MediaWorkstation-AutoTerminationCheck`,
+      ],
+    }));
+
     // ============================================
     // API Gateway
     // ============================================
@@ -595,6 +663,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const ec2DiscoveryIntegration = new apigateway.LambdaIntegration(ec2DiscoveryServiceFunction);
     const instanceFamilyIntegration = new apigateway.LambdaIntegration(instanceFamilyServiceFunction);
     const userManagementIntegration = new apigateway.LambdaIntegration(userManagementServiceFunction);
+    const deploymentDoctorIntegration = new apigateway.LambdaIntegration(deploymentDoctorServiceFunction);
 
     // ============================================
     // API Resources and Methods
@@ -860,6 +929,12 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const instanceFamiliesResource = adminResource.addResource('instance-families');
     instanceFamiliesResource.addMethod('GET', instanceFamilyIntegration, authorizedMethodOptions);
     instanceFamiliesResource.addMethod('POST', instanceFamilyIntegration, authorizedMethodOptions);
+
+    // /admin/deployment-doctor - read-only deployed environment diagnostics.
+    // API Gateway verifies token identity; the handler separately requires
+    // exact membership in the workstation-admin Cognito group.
+    const deploymentDoctorResource = adminResource.addResource('deployment-doctor');
+    deploymentDoctorResource.addMethod('GET', deploymentDoctorIntegration, authorizedMethodOptions);
 
     // ============================================
     // Outputs
