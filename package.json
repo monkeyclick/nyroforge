@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
+    "doctor": "ts-node scripts/doctor.ts",
     "cdk": "cdk",
     "synth": "cdk synth",
     "deploy": "cdk deploy --all",

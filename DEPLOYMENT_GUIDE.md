@@ -11,8 +11,9 @@ This guide covers everything you need to deploy NyroForge EC2 Workstation Manage
 3. [Manual Deployment](#3-manual-deployment)
 4. [Post-Deployment Configuration](#4-post-deployment-configuration)
 5. [Environment Variables Reference](#5-environment-variables-reference)
-6. [Troubleshooting](#6-troubleshooting)
-7. [Tearing Down the Stack](#7-tearing-down-the-stack)
+6. [Deployment Doctor](#6-deployment-doctor)
+7. [Troubleshooting](#7-troubleshooting)
+8. [Tearing Down the Stack](#8-tearing-down-the-stack)
 
 ---
 
@@ -499,7 +500,36 @@ keeping it lowercase avoids surprises elsewhere.
 
 ---
 
-## 6. Troubleshooting
+## 6. Deployment Doctor
+
+The deployment doctor is a safe, read-only preflight and post-deployment diagnostic. Run it from the repository root after `npm install`:
+
+```bash
+# Use an explicit region (recommended)
+npm run doctor -- --region us-west-2
+
+# Use a named profile and a non-default CDK outputs file
+npm run doctor -- --region us-west-2 --profile sandbox --outputs cdk-outputs.json
+
+# Machine-readable output, with no ANSI or progress text
+npm run doctor -- --json --region us-west-2
+```
+
+The doctor checks local prerequisites, AWS identity/region, VPC/subnets, regional GPU quotas and offerings, Cognito and the `workstation-admin` group, Amazon-owned Windows AMIs, SSM defaults, API/frontend outputs, budgets and auto-termination, and security-group rules for remote access. AWS commands have per-call timeouts and are describe/list/get operations only. Reports redact credential-like output and do not include SSM parameter values.
+
+A check can be `pass`, `warning`, `fail`, or `skipped`. Missing optional or pre-deployment configuration is a warning or skipped check rather than a crash. A pass only describes what the command proved—for example, seeing an RDP/DCV security-group rule does not prove end-to-end connectivity.
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | No required check failed (warnings may remain) |
+| `1` | At least one required check failed |
+| `2` | Invalid command-line arguments |
+
+Run `npm run doctor -- --help` for the complete option reference. The default outputs path is `cdk-outputs.json`; create it during deployment with `cdk deploy --all --outputs-file cdk-outputs.json`.
+
+---
+
+## 7. Troubleshooting
 
 ### Account-level constraints that affect deployment
 
@@ -756,7 +786,7 @@ aws ec2 describe-vpc-endpoints \
 
 ---
 
-## 7. Tearing Down the Stack
+## 8. Tearing Down the Stack
 
 To completely remove all AWS resources created by this project:
 
