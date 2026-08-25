@@ -274,7 +274,12 @@ function parsePropertySet(stream: Buffer): Map<number, string | number> {
         type === VT_LPWSTR
           ? raw.toString('utf16le')
           : raw.toString('utf8');
-      out.set(propertyId, text.replace(/\u0000+$/, '').trim());
+      // OLE property-set strings carry their NUL terminator inside the
+      // declared length. Cut at the first NUL rather than stripping trailing
+      // ones: a crafted MSI could otherwise leave an embedded NUL in a product
+      // name that the review UI goes on to render.
+      const nul = text.indexOf('\u0000');
+      out.set(propertyId, (nul === -1 ? text : text.slice(0, nul)).trim());
     } else if (type === VT_I4 && dataOffset + 4 <= stream.length) {
       out.set(propertyId, stream.readInt32LE(dataOffset));
     } else if (type === VT_I2 && dataOffset + 2 <= stream.length) {
