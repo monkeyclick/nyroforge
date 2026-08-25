@@ -85,6 +85,7 @@ const adminApiStack = new WorkstationAdminApiStack(app, 'WorkstationAdminApi', {
   tables: infraStack.tables,
   userPool: infraStack.userPool,
   kmsKey: infraStack.kmsKey,
+  packagesBucket: infraStack.packagesBucket,
 });
 
 // Frontend stack (Amplify app)

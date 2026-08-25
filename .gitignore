@@ -59,3 +59,8 @@ coverage/
 .cache/
 .parcel-cache/
 cdk.context.json
+
+# .NET build output. Scoped to the service directory on purpose: a bare
+# "bin/" rule would also swallow the CDK entrypoint directory at the repo root.
+src/windows-service/**/[Bb]in/
+src/windows-service/**/[Oo]bj/

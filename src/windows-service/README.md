@@ -38,15 +38,17 @@ WorkstationPackageInstaller.exe (Windows Service)
 ## Requirements
 
 - Windows Server 2019 or later
-- .NET 8.0 Runtime (self-contained build includes runtime)
+- No runtime prerequisite on the workstation: the build is self-contained,
+  so the .NET runtime ships inside the published executable
 - EC2 Instance with IAM role attached
-- Network access to AWS services (DynamoDB, CloudWatch Logs)
+- Network access to AWS services (DynamoDB, CloudWatch Logs, S3)
 
 ## Building
 
 ### Prerequisites
 
-- .NET 8.0 SDK
+- .NET 10.0 SDK or newer (enforced by `src/windows-service/global.json`). .NET 8 reaches end of support in
+  November 2026; .NET 9 is already out of support.
 - PowerShell 5.1 or later
 
 ### Build Command

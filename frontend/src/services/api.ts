@@ -1130,6 +1130,84 @@ class ApiClient {
     }, true);
   }
 
+  // ── Package uploads ────────────────────────────────────────────────────────
+  // Installer binaries go straight from the browser to S3 as a presigned
+  // multipart upload: API Gateway caps request bodies at 10 MB, and a single
+  // presigned PUT tops out at 5 GB with no way to resume.
+
+  async initPackageUpload(input: {
+    fileName: string;
+    fileSizeBytes: number;
+    contentType?: string;
+    name?: string;
+    description?: string;
+    type?: 'driver' | 'application';
+    category?: string;
+  }): Promise<{
+    packageId: string;
+    uploadId: string;
+    bucket: string;
+    key: string;
+    fileName: string;
+    partSizeBytes: number;
+    partCount: number;
+  }> {
+    return this.request('/bootstrap-packages/uploads', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }, true);
+  }
+
+  async getPackageUploadPartUrls(
+    packageId: string,
+    partNumbers: number[]
+  ): Promise<{ parts: Array<{ partNumber: number; url: string }>; expiresInSeconds: number }> {
+    return this.request(`/bootstrap-packages/uploads/${packageId}/parts`, {
+      method: 'POST',
+      body: JSON.stringify({ partNumbers }),
+    }, true);
+  }
+
+  async completePackageUpload(
+    packageId: string,
+    parts: Array<{ partNumber: number; etag: string }>
+  ): Promise<{ packageId: string; status: string }> {
+    return this.request(`/bootstrap-packages/uploads/${packageId}/complete`, {
+      method: 'POST',
+      body: JSON.stringify({ parts }),
+    }, true);
+  }
+
+  async abortPackageUpload(packageId: string): Promise<void> {
+    await this.request(`/bootstrap-packages/uploads/${packageId}`, {
+      method: 'DELETE',
+    }, true);
+  }
+
+  async listBootstrapPackagesByStatus(status: string): Promise<{
+    packages: Array<any>;
+    summary: Record<string, number>;
+  }> {
+    return this.request(`/bootstrap-packages?status=${encodeURIComponent(status)}`, {}, true);
+  }
+
+  /** Approve, reject, or trial-install an uploaded package. Admin only. */
+  async reviewBootstrapPackage(
+    packageId: string,
+    input: {
+      action: 'approve' | 'reject' | 'verify' | 'reanalyze';
+      installCommand?: string;
+      installArgs?: string;
+      reviewNotes?: string;
+      workstationId?: string;
+    }
+  ): Promise<any> {
+    return this.request(`/bootstrap-packages/${packageId}/review`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }, true);
+  }
+
   // Phase 4: Post-Boot Package Installation API Methods
 
   /**

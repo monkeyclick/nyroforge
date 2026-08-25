@@ -1,3 +1,5 @@
+using Amazon.S3;
+using Amazon.S3.Transfer;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Diagnostics;
@@ -17,18 +19,21 @@ public class PackageInstallerService
     private readonly ServiceConfiguration _config;
     private readonly SecurityConfiguration _securityConfig;
     private readonly HttpClient _httpClient;
+    private readonly IAmazonS3 _s3Client;
 
     public PackageInstallerService(
         ILogger<PackageInstallerService> logger,
         CloudWatchLogsService cloudWatchLogs,
         IOptions<ServiceConfiguration> configuration,
         SecurityConfiguration securityConfig,
-        IHttpClientFactory httpClientFactory)
+        IHttpClientFactory httpClientFactory,
+        IAmazonS3 s3Client)
     {
         _logger = logger;
         _cloudWatchLogs = cloudWatchLogs;
         _config = configuration.Value;
         _securityConfig = securityConfig;
+        _s3Client = s3Client;
         _httpClient = httpClientFactory.CreateClient();
         _httpClient.Timeout = TimeSpan.FromMinutes(_config.InstallTimeoutMinutes);
     }
@@ -52,7 +57,10 @@ public class PackageInstallerService
             _cloudWatchLogs.LogInstallation(package.PackageName, "Starting installation");
 
             // Step 1: Download installer
-            _cloudWatchLogs.LogInstallation(package.PackageName, $"Downloading from {package.DownloadUrl}");
+            var downloadSource = package.IsS3Source
+                ? $"s3://{package.S3Bucket}/{package.S3Key}"
+                : package.DownloadUrl;
+            _cloudWatchLogs.LogInstallation(package.PackageName, $"Downloading from {downloadSource}");
             var installerPath = await DownloadInstallerAsync(package, tempDir, cancellationToken);
 
             // Step 2: Execute installer
@@ -128,6 +136,15 @@ public class PackageInstallerService
         string tempDir,
         CancellationToken cancellationToken)
     {
+        // Admin-uploaded packages are fetched from the deployment's own bucket
+        // with the instance profile's credentials. No presigned URL means
+        // nothing expires while a workstation sits stopped, and no host
+        // allowlist entry is needed for the bucket's regional endpoint.
+        if (package.IsS3Source)
+        {
+            return await DownloadFromS3Async(package, tempDir, cancellationToken);
+        }
+
         // Security: reject disallowed URLs/hosts before making any network call
         ValidateDownloadUrl(package);
 
@@ -184,6 +201,76 @@ public class PackageInstallerService
     }
 
     /// <summary>
+    /// Download an installer from the packages bucket using instance profile
+    /// credentials. TransferUtility issues ranged parallel GETs, which matters
+    /// for the multi-GB installers this path exists to carry.
+    /// </summary>
+    private async Task<string> DownloadFromS3Async(
+        PackageQueueItem package,
+        string tempDir,
+        CancellationToken cancellationToken)
+    {
+        var key = package.S3Key!;
+        var fileName = SanitizeFileName(Path.GetFileName(key));
+        var installerPath = Path.Combine(tempDir, fileName);
+
+        try
+        {
+            _logger.LogInformation(
+                "Downloading s3://{Bucket}/{Key} for {PackageName}",
+                package.S3Bucket, key, package.PackageName);
+
+            using var transfer = new TransferUtility(_s3Client);
+            await transfer.DownloadAsync(
+                new TransferUtilityDownloadRequest
+                {
+                    // IsS3Source has already established both are non-empty;
+                    // the project has nullable reference types enabled.
+                    BucketName = package.S3Bucket!,
+                    Key = key,
+                    FilePath = installerPath,
+                },
+                cancellationToken);
+
+            var info = new FileInfo(installerPath);
+            _logger.LogInformation("Downloaded {FileName} ({Size} bytes)", fileName, info.Length);
+            _cloudWatchLogs.LogInstallation(
+                package.PackageName,
+                $"Downloaded {info.Length} bytes from S3");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error downloading installer from S3 for {PackageName}", package.PackageName);
+            throw new InvalidOperationException($"Failed to download installer from S3: {ex.Message}", ex);
+        }
+
+        // Same integrity gate as the HTTP path. Uploaded packages always carry
+        // a hash computed server-side, so this is never skipped for them.
+        await VerifyInstallerIntegrityAsync(package, installerPath, cancellationToken);
+
+        return installerPath;
+    }
+
+    /// <summary>
+    /// Strip anything from an S3 key's last segment that could escape the temp
+    /// directory or upset the shell once it reaches an install command.
+    /// </summary>
+    private static string SanitizeFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "installer.bin";
+        }
+
+        var cleaned = new string(name
+            .Where(c => !Path.GetInvalidFileNameChars().Contains(c) && c != '"' && c != '\'')
+            .ToArray())
+            .Trim();
+
+        return string.IsNullOrWhiteSpace(cleaned) ? "installer.bin" : cleaned;
+    }
+
+    /// <summary>
     /// Validate the download URL against the security policy (HTTPS + host allowlist)
     /// before any network request is made.
     /// </summary>
@@ -216,9 +303,14 @@ public class PackageInstallerService
     }
 
     /// <summary>
-    /// Match a host against an allowlist pattern. A leading "*." matches the apex
-    /// domain and any subdomain (e.g. "*.s3.amazonaws.com"); otherwise an exact,
-    /// case-insensitive host match is required.
+    /// Match a host against an allowlist pattern.
+    ///
+    /// A leading "*." matches the apex domain as well as any subdomain, so
+    /// "*.example.com" covers both example.com and a.example.com. A "*"
+    /// anywhere else matches any run of characters, which is what makes a
+    /// region-agnostic pattern like "*.s3.*.amazonaws.com" possible — the
+    /// previous exact-suffix-only matcher hardcoded us-west-2 and rejected
+    /// every bucket endpoint in any other region.
     /// </summary>
     private static bool IsHostAllowed(string host, string pattern)
     {
@@ -227,14 +319,31 @@ public class PackageInstallerService
             return false;
         }
 
+        if (!pattern.Contains('*'))
+        {
+            return host.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // "*.suffix" should also match the apex domain itself.
         if (pattern.StartsWith("*.", StringComparison.Ordinal))
         {
             var suffix = pattern.Substring(2);
-            return host.Equals(suffix, StringComparison.OrdinalIgnoreCase)
-                || host.EndsWith("." + suffix, StringComparison.OrdinalIgnoreCase);
+            if (!suffix.Contains('*') &&
+                host.Equals(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
         }
 
-        return host.Equals(pattern, StringComparison.OrdinalIgnoreCase);
+        var regex = "^" + string.Join(
+            ".*",
+            pattern.Split('*').Select(System.Text.RegularExpressions.Regex.Escape)) + "$";
+
+        return System.Text.RegularExpressions.Regex.IsMatch(
+            host,
+            regex,
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase,
+            TimeSpan.FromMilliseconds(200));
     }
 
     /// <summary>
@@ -321,7 +430,7 @@ public class PackageInstallerService
         {
             var processStartInfo = new ProcessStartInfo
             {
-                FileName = package.InstallCommand,
+                FileName = ResolveInstallCommand(package, installerPath),
                 Arguments = BuildInstallArguments(package, installerPath),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -391,6 +500,29 @@ public class PackageInstallerService
     }
 
     /// <summary>
+    /// Resolve the executable to launch.
+    ///
+    /// `InstallCommand` becomes ProcessStartInfo.FileName, which must name a
+    /// real executable — a PowerShell cmdlet such as "Start-Process" throws
+    /// Win32Exception here. The generated recipes therefore use the literal
+    /// "{installer}" to mean "run the downloaded artifact itself", which is
+    /// substituted below. The path is deliberately NOT quoted: with
+    /// UseShellExecute=false the value is passed to CreateProcess verbatim, and
+    /// surrounding quotes would become part of the filename.
+    /// </summary>
+    private string ResolveInstallCommand(PackageQueueItem package, string installerPath)
+    {
+        var command = package.InstallCommand?.Trim();
+
+        if (string.IsNullOrEmpty(command) || command == "{installer}")
+        {
+            return installerPath;
+        }
+
+        return command.Replace("{installer}", installerPath);
+    }
+
+    /// <summary>
     /// Build installation arguments
     /// </summary>
     private string BuildInstallArguments(PackageQueueItem package, string installerPath)
@@ -400,8 +532,12 @@ public class PackageInstallerService
         // Replace {installer} placeholder with actual path
         args = args.Replace("{installer}", $"\"{installerPath}\"");
 
-        // For msiexec, ensure installArgs is wrapped in quotes if it contains /i
-        if (package.InstallCommand.Equals("msiexec", StringComparison.OrdinalIgnoreCase))
+        // For msiexec, ensure installArgs is wrapped in quotes if it contains /i.
+        // Accept both "msiexec" and "msiexec.exe" — the generated recipes use
+        // the latter because ProcessStartInfo.FileName needs a real executable.
+        var command = package.InstallCommand?.Trim() ?? string.Empty;
+        if (command.Equals("msiexec", StringComparison.OrdinalIgnoreCase) ||
+            command.Equals("msiexec.exe", StringComparison.OrdinalIgnoreCase))
         {
             if (!args.Contains("/i") && !args.Contains("/qn"))
             {

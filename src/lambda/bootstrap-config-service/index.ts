@@ -1,14 +1,18 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
-import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, PutItemCommand, GetItemCommand, UpdateItemCommand, DeleteItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
+import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
 import { requireAdmin } from '../shared/auth';
 import { logEvent } from '../shared/logging';
 import { corsHeaders } from '../shared/http';
 import { scanAllItems } from '../shared/dynamo';
+import { effectiveStatus, PackageAnalysis, PackageStatus, PackageVerification } from '../shared/packages';
 
 const dynamoClient = new DynamoDBClient({});
+const s3Client = new S3Client({});
 const BOOTSTRAP_TABLE = process.env.BOOTSTRAP_PACKAGES_TABLE!;
+const QUEUE_TABLE = process.env.PACKAGE_QUEUE_TABLE || '';
 
 export interface BootstrapPackage {
   packageId: string;
@@ -33,6 +37,20 @@ export interface BootstrapPackage {
     size?: string;
     notes?: string;
   };
+  // Populated for uploaded packages; absent on hand-entered URL packages.
+  source?: 'url' | 's3';
+  s3Bucket?: string;
+  s3Key?: string;
+  fileName?: string;
+  fileSizeBytes?: number;
+  status?: PackageStatus;
+  uploadedBy?: string;
+  uploadedAt?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  reviewNotes?: string;
+  analysis?: PackageAnalysis;
+  verification?: PackageVerification;
   createdAt: string;
   updatedAt: string;
 }
@@ -59,7 +77,7 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
         if (pathParameters?.packageId) {
           return await getPackage(pathParameters.packageId, headers);
         } else {
-          return await listPackages(headers);
+          return await listPackages(headers, event.queryStringParameters?.status || undefined);
         }
 
       case 'POST': {
@@ -152,6 +170,11 @@ async function createPackage(data: Partial<BootstrapPackage>, headers: any): Pro
     order: data.order || 100,
     estimatedInstallTimeMinutes: data.estimatedInstallTimeMinutes || 5,
     metadata: data.metadata || {},
+    // Hand-entered URL packages are curated by an admin at creation time, so
+    // they are approved on arrival. Uploaded packages never come through here —
+    // package-upload-service creates those with status 'uploading'.
+    source: 'url',
+    status: 'approved',
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -194,6 +217,11 @@ async function getPackage(packageId: string, headers: any): Promise<APIGatewayPr
   pkg.isRequired = pkg.isRequired === 'true' || pkg.isRequired === true;
   pkg.isEnabled = pkg.isEnabled === 'true' || pkg.isEnabled === true;
 
+  const verification = await hydrateVerification(pkg);
+  if (verification) {
+    pkg.verification = verification;
+  }
+
   return {
     statusCode: 200,
     headers,
@@ -201,10 +229,70 @@ async function getPackage(packageId: string, headers: any): Promise<APIGatewayPr
   };
 }
 
-async function listPackages(headers: any): Promise<APIGatewayProxyResult> {
-  const items = await scanAllItems(dynamoClient, {
-    TableName: BOOTSTRAP_TABLE,
-  });
+/**
+ * A trial install reports its outcome through the package queue, which is what
+ * the Windows installer service writes to. Read the live queue row rather than
+ * duplicating status onto the package record, so the review UI always shows
+ * what actually happened on the workstation.
+ */
+async function hydrateVerification(pkg: any): Promise<PackageVerification | undefined> {
+  const stored = pkg.verification as PackageVerification | undefined;
+  if (!stored?.workstationId || !QUEUE_TABLE) return stored;
+  // Terminal results never change; no need to re-read the queue.
+  if (stored.status !== 'running') return stored;
+
+  // The queue is partitioned by instance ARN; the verify run recorded the exact
+  // key it wrote, so there is nothing to reconstruct. Rows from before that
+  // change fall back to the bare-instance-id form.
+  const partitionKey = stored.queuePartitionKey || `workstation#${stored.workstationId}`;
+
+  try {
+    const res = await dynamoClient.send(new GetItemCommand({
+      TableName: QUEUE_TABLE,
+      Key: marshall({
+        PK: partitionKey,
+        SK: `package#${pkg.packageId}#verify`,
+      }),
+    }));
+    if (!res.Item) return stored;
+
+    const item = unmarshall(res.Item) as any;
+    const status =
+      item.status === 'completed' ? 'passed'
+      : item.status === 'failed' ? 'failed'
+      : 'running';
+
+    return {
+      ...stored,
+      status,
+      completedAt: item.completedAt || item.installedAt,
+      exitCodeMessage: item.errorMessage,
+    };
+  } catch (error) {
+    console.error('Could not read verification status from the package queue', error);
+    return stored;
+  }
+}
+
+async function listPackages(headers: any, statusFilter?: string): Promise<APIGatewayProxyResult> {
+  let items: Record<string, any>[];
+
+  if (statusFilter) {
+    // StatusIndex exists so the review queue is a Query, not a full-table Scan
+    // that grows with the catalog.
+    const result = await dynamoClient.send(new QueryCommand({
+      TableName: BOOTSTRAP_TABLE,
+      IndexName: 'StatusIndex',
+      KeyConditionExpression: '#s = :status',
+      ExpressionAttributeNames: { '#s': 'status' },
+      ExpressionAttributeValues: marshall({ ':status': statusFilter }),
+    }));
+    items = (result.Items || []).map(item => unmarshall(item));
+  } else {
+    items = await scanAllItems(dynamoClient, {
+      TableName: BOOTSTRAP_TABLE,
+    });
+  }
 
   const packages = items
     .map(item => {
@@ -226,6 +314,16 @@ async function listPackages(headers: any): Promise<APIGatewayProxyResult> {
         required: packages.filter(p => p.isRequired).length,
         optional: packages.filter(p => !p.isRequired && p.isEnabled).length,
         disabled: packages.filter(p => !p.isEnabled).length,
+        // Uploads waiting on an admin. Packages predating the upload feature
+        // carry no status and count as approved.
+        needsReview: packages.filter(p => {
+          const status = effectiveStatus(p);
+          return status === 'needs_review' || status === 'analysis_failed';
+        }).length,
+        uploading: packages.filter(p => {
+          const status = effectiveStatus(p);
+          return status === 'uploading' || status === 'analyzing';
+        }).length,
       }
     }),
   };
@@ -233,7 +331,36 @@ async function listPackages(headers: any): Promise<APIGatewayProxyResult> {
 
 async function updatePackage(packageId: string, data: Partial<BootstrapPackage>, headers: any): Promise<APIGatewayProxyResult> {
   const timestamp = new Date().toISOString();
-  
+
+  // Enabling a package is what makes it selectable for installation, so it is
+  // gated on approval here rather than only in the UI. `status`, `s3Key`,
+  // `source` and `expectedSha256` are deliberately absent from
+  // `updateableFields` below: they are owned by the upload and analysis
+  // pipeline, and letting this endpoint set them would route around review.
+  if (data.isEnabled === true || (data.isEnabled as unknown) === 'true') {
+    const current = await dynamoClient.send(new GetItemCommand({
+      TableName: BOOTSTRAP_TABLE,
+      Key: marshall({ packageId }),
+    }));
+    if (!current.Item) {
+      return {
+        statusCode: 404,
+        headers,
+        body: JSON.stringify({ message: 'Package not found' }),
+      };
+    }
+    const status = effectiveStatus(unmarshall(current.Item) as any);
+    if (status !== 'approved') {
+      return {
+        statusCode: 409,
+        headers,
+        body: JSON.stringify({
+          message: `Cannot enable a package with status '${status}'. Approve it in the review queue first.`,
+        }),
+      };
+    }
+  }
+
   const updateExpressions: string[] = [];
   const expressionAttributeNames: Record<string, string> = {};
   const expressionAttributeValues: Record<string, any> = { ':updatedAt': timestamp };
@@ -291,6 +418,23 @@ async function updatePackage(packageId: string, data: Partial<BootstrapPackage>,
 }
 
 async function deletePackage(packageId: string, headers: any): Promise<APIGatewayProxyResult> {
+  // Read first so the uploaded artifact can be removed with the catalog row;
+  // otherwise deleting a package orphans a multi-GB object in S3 that nothing
+  // references and nothing will ever clean up.
+  const existing = await dynamoClient.send(new GetItemCommand({
+    TableName: BOOTSTRAP_TABLE,
+    Key: marshall({ packageId }),
+  }));
+
+  if (existing.Item) {
+    const pkg = unmarshall(existing.Item) as any;
+    if (pkg.s3Bucket && pkg.s3Key) {
+      await s3Client
+        .send(new DeleteObjectCommand({ Bucket: pkg.s3Bucket, Key: pkg.s3Key }))
+        .catch((error) => console.error('Failed to delete package artifact from S3', error));
+    }
+  }
+
   await dynamoClient.send(new DeleteItemCommand({
     TableName: BOOTSTRAP_TABLE,
     Key: marshall({ packageId }),

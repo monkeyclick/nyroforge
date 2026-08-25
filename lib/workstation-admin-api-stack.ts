@@ -5,6 +5,8 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
 import { PROJECT_TAG } from './constants';
 import { ServiceLambda } from './service-lambda';
@@ -33,6 +35,8 @@ interface WorkstationAdminApiStackProps extends cdk.StackProps {
   };
   userPool: cognito.IUserPool;
   kmsKey: kms.IKey;
+  /** Bucket holding uploaded bootstrap package installers. */
+  packagesBucket: s3.IBucket;
 }
 
 export class WorkstationAdminApiStack extends cdk.Stack {
@@ -41,7 +45,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: WorkstationAdminApiStackProps) {
     super(scope, id, props);
 
-    const { vpc, tables, userPool, kmsKey } = props;
+    const { vpc, tables, userPool, kmsKey, packagesBucket } = props;
 
     /**
      * Create a dedicated execution role for a single admin service Lambda.
@@ -106,6 +110,8 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       BOOTSTRAP_PACKAGES_TABLE: tables.bootstrapPackages.tableName,
       ANALYTICS_TABLE: tables.analytics.tableName,
       GROUP_PACKAGE_BINDINGS_TABLE: tables.groupPackageBindings.tableName,
+      PACKAGE_QUEUE_TABLE: tables.packageQueue.tableName,
+      PACKAGES_BUCKET: packagesBucket.bucketName,
       // New tables for user deletion and password management
       DELETED_USERS_TABLE: tables.deletedUsers.tableName,
       PASSWORD_RESET_TABLE: tables.passwordResetRecords.tableName,
@@ -114,6 +120,9 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       SES_FROM_EMAIL: process.env.SES_FROM_EMAIL || 'noreply@example.com', // Override via SES_FROM_EMAIL env var
       USER_POOL_ID: userPool.userPoolId,
       KMS_KEY_ID: kmsKey.keyId,
+      // Needed to build the instance ARN the package queue is partitioned
+      // by, for invocations that do not carry an API Gateway request context.
+      DEPLOY_ACCOUNT_ID: cdk.Stack.of(this).account,
       VPC_ID: vpc.vpcId,
     };
 
@@ -332,7 +341,104 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       role: bootstrapConfigServiceRole,
     });
     tables.bootstrapPackages.grantReadWriteData(bootstrapConfigServiceFunction);
+    // Reads the live outcome of a trial install when serving a single package.
+    tables.packageQueue.grantReadData(bootstrapConfigServiceFunction);
+    // Deleting a catalog entry also removes its uploaded artifact, so an
+    // orphaned multi-GB object is not left behind paying rent.
+    packagesBucket.grantDelete(bootstrapConfigServiceFunction);
     grantKmsDecrypt(bootstrapConfigServiceFunction);
+
+    // --- Package Analyzer ---
+    // Streams an uploaded installer once to compute its SHA-256 and fingerprint
+    // the installer framework. Long timeout and large ephemeral storage: a
+    // multi-GB artifact is written to /tmp so archive entries can be inspected.
+    const packageAnalyzerRole = createFunctionRole('PackageAnalyzer');
+    const packageAnalyzerFunction = new ServiceLambda(this, 'PackageAnalyzer', {
+      ...lambdaDefaults,
+      functionName: 'workstation-package-analyzer',
+      serviceDir: 'package-analyzer',
+      description: 'Hashes and fingerprints uploaded installers',
+      role: packageAnalyzerRole,
+      timeout: cdk.Duration.minutes(15),
+      memorySize: 2048,
+      ephemeralStorageSize: cdk.Size.gibibytes(10),
+    });
+    tables.bootstrapPackages.grantReadWriteData(packageAnalyzerFunction);
+    // Emails the admin group when a package lands in the review queue, and the
+    // uploader when analysis could not identify their installer.
+    packageAnalyzerFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ses:SendEmail'],
+      resources: ['*'],
+    }));
+    packageAnalyzerFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:ListUsersInGroup'],
+      resources: [userPool.userPoolArn],
+    }));
+    // Reads only the unreviewed prefix — it never needs approved artifacts.
+    packageAnalyzerFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObject'],
+      resources: [`${packagesBucket.bucketArn}/quarantine/*`],
+    }));
+    grantKmsDecrypt(packageAnalyzerFunction);
+
+    // --- Package Upload Service ---
+    // Owns the artifact lifecycle: multipart upload, abort, and the review
+    // actions that promote an object from `quarantine/` to `packages/`.
+    const packageUploadServiceRole = createFunctionRole('PackageUploadService');
+    const packageUploadServiceFunction = new ServiceLambda(this, 'PackageUploadService', {
+      ...lambdaDefaults,
+      functionName: 'workstation-package-upload-service',
+      serviceDir: 'package-upload-service',
+      description: 'Manages uploads, review and promotion of bootstrap packages',
+      role: packageUploadServiceRole,
+      // Promoting a >5 GiB artifact runs a multipart copy part-by-part in
+      // process. Parts go 8-wide, but a 20 GB upload is still 20 server-side
+      // copies, so give it the full Lambda ceiling rather than a tight bound.
+      timeout: cdk.Duration.minutes(15),
+      environment: {
+        ...commonEnv,
+        ANALYZER_FUNCTION_NAME: packageAnalyzerFunction.functionName,
+      },
+    });
+    tables.bootstrapPackages.grantReadWriteData(packageUploadServiceFunction);
+    tables.workstations.grantReadData(packageUploadServiceFunction);
+    // Queues a trial install for the verify action.
+    tables.packageQueue.grantReadWriteData(packageUploadServiceFunction);
+    // Migrates group bindings forward when a new version supersedes an old one.
+    tables.groupPackageBindings.grantReadWriteData(packageUploadServiceFunction);
+    packageAnalyzerFunction.grantInvoke(packageUploadServiceFunction);
+    packageUploadServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        's3:PutObject',
+        's3:GetObject',
+        's3:DeleteObject',
+        's3:AbortMultipartUpload',
+        's3:ListMultipartUploadParts',
+      ],
+      resources: [
+        `${packagesBucket.bucketArn}/quarantine/*`,
+        `${packagesBucket.bucketArn}/packages/*`,
+        `${packagesBucket.bucketArn}/verify/*`,
+      ],
+    }));
+    packageUploadServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:ListBucketMultipartUploads'],
+      resources: [packagesBucket.bucketArn],
+    }));
+    // GuardDuty Malware Protection publishes its verdict as an object tag; the
+    // approve handler reads it and refuses to publish a flagged artifact.
+    packageUploadServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['s3:GetObjectTagging'],
+      resources: [`${packagesBucket.bucketArn}/quarantine/*`],
+    }));
+    // Tells the uploader what an admin decided about their package.
+    packageUploadServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ses:SendEmail'],
+      resources: ['*'],
+    }));
+    // Presigned PUTs are signed with this role's credentials, and the bucket
+    // encrypts with the CMK, so the role needs to be able to use the key.
+    grantKmsDecrypt(packageUploadServiceFunction);
 
     // --- Group Package Service ---
     // BootstrapPackages and Workstations are only ever read (GetItem) by
@@ -618,18 +724,26 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       authorizationType: apigateway.AuthorizationType.COGNITO,
     };
 
-    // Lambda integrations
-    const cognitoAdminIntegration = new apigateway.LambdaIntegration(cognitoAdminServiceFunction);
-    const groupManagementIntegration = new apigateway.LambdaIntegration(groupManagementServiceFunction);
-    const securityGroupIntegration = new apigateway.LambdaIntegration(securityGroupServiceFunction);
-    const amiValidationIntegration = new apigateway.LambdaIntegration(amiValidationServiceFunction);
-    const instanceTypeIntegration = new apigateway.LambdaIntegration(instanceTypeServiceFunction);
-    const bootstrapConfigIntegration = new apigateway.LambdaIntegration(bootstrapConfigServiceFunction);
-    const groupPackageIntegration = new apigateway.LambdaIntegration(groupPackageServiceFunction);
-    const storageIntegration = new apigateway.LambdaIntegration(storageServiceFunction);
-    const ec2DiscoveryIntegration = new apigateway.LambdaIntegration(ec2DiscoveryServiceFunction);
-    const instanceFamilyIntegration = new apigateway.LambdaIntegration(instanceFamilyServiceFunction);
-    const userManagementIntegration = new apigateway.LambdaIntegration(userManagementServiceFunction);
+    // Lambda integrations.
+    //
+    // allowTestInvoke:false suppresses the extra AWS::Lambda::Permission that
+    // CDK adds per method for API Gateway's console "Test" button. At ~78
+    // methods that second permission was ~half of this stack's CloudFormation
+    // resources, pushing it against the hard 500-resource limit; dropping it
+    // costs only the console test feature, which the deployed API never uses.
+    const integrationOptions: apigateway.LambdaIntegrationOptions = { allowTestInvoke: false };
+
+    const cognitoAdminIntegration = new apigateway.LambdaIntegration(cognitoAdminServiceFunction, integrationOptions);
+    const groupManagementIntegration = new apigateway.LambdaIntegration(groupManagementServiceFunction, integrationOptions);
+    const securityGroupIntegration = new apigateway.LambdaIntegration(securityGroupServiceFunction, integrationOptions);
+    const amiValidationIntegration = new apigateway.LambdaIntegration(amiValidationServiceFunction, integrationOptions);
+    const instanceTypeIntegration = new apigateway.LambdaIntegration(instanceTypeServiceFunction, integrationOptions);
+    const bootstrapConfigIntegration = new apigateway.LambdaIntegration(bootstrapConfigServiceFunction, integrationOptions);
+    const groupPackageIntegration = new apigateway.LambdaIntegration(groupPackageServiceFunction, integrationOptions);
+    const storageIntegration = new apigateway.LambdaIntegration(storageServiceFunction, integrationOptions);
+    const ec2DiscoveryIntegration = new apigateway.LambdaIntegration(ec2DiscoveryServiceFunction, integrationOptions);
+    const instanceFamilyIntegration = new apigateway.LambdaIntegration(instanceFamilyServiceFunction, integrationOptions);
+    const userManagementIntegration = new apigateway.LambdaIntegration(userManagementServiceFunction, integrationOptions);
 
     // ============================================
     // API Resources and Methods
@@ -820,11 +934,36 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     bootstrapPackagesResource.addMethod('GET', bootstrapConfigIntegration, authorizedMethodOptions);
     bootstrapPackagesResource.addMethod('POST', bootstrapConfigIntegration, authorizedMethodOptions);
 
+    // /bootstrap-packages/uploads — declared before {packageId} for clarity;
+    // API Gateway matches the literal segment ahead of the path parameter
+    // regardless of declaration order.
+    const packageUploadIntegration = new apigateway.LambdaIntegration(packageUploadServiceFunction, integrationOptions);
+    const packageUploadsResource = bootstrapPackagesResource.addResource('uploads');
+    packageUploadsResource.addMethod('POST', packageUploadIntegration, authorizedMethodOptions);
+
+    // /bootstrap-packages/uploads/{packageId}
+    const packageUploadResource = packageUploadsResource.addResource('{packageId}');
+    packageUploadResource.addMethod('DELETE', packageUploadIntegration, authorizedMethodOptions);
+
+    // /bootstrap-packages/uploads/{packageId}/parts
+    const packageUploadPartsResource = packageUploadResource.addResource('parts');
+    packageUploadPartsResource.addMethod('POST', packageUploadIntegration, authorizedMethodOptions);
+
+    // /bootstrap-packages/uploads/{packageId}/complete
+    const packageUploadCompleteResource = packageUploadResource.addResource('complete');
+    packageUploadCompleteResource.addMethod('POST', packageUploadIntegration, authorizedMethodOptions);
+
     // /bootstrap-packages/{packageId}
     const bootstrapPackageResource = bootstrapPackagesResource.addResource('{packageId}');
     bootstrapPackageResource.addMethod('GET', bootstrapConfigIntegration, authorizedMethodOptions);
     bootstrapPackageResource.addMethod('PUT', bootstrapConfigIntegration, authorizedMethodOptions);
     bootstrapPackageResource.addMethod('DELETE', bootstrapConfigIntegration, authorizedMethodOptions);
+
+    // /bootstrap-packages/{packageId}/review — approve, reject or trial-install.
+    // One resource rather than three: the admin API stack is close to the
+    // CloudFormation 500-resource ceiling.
+    const bootstrapPackageReviewResource = bootstrapPackageResource.addResource('review');
+    bootstrapPackageReviewResource.addMethod('POST', packageUploadIntegration, authorizedMethodOptions);
 
     // /storage resource
     const storageResource = this.adminApi.root.addResource('storage');

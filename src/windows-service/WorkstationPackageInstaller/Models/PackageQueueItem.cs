@@ -26,9 +26,32 @@ public class PackageQueueItem
     public string PackageName { get; set; } = string.Empty;
 
     /// <summary>
-    /// Download URL for the package installer
+    /// Where the installer bytes come from: "url" for an HTTPS download,
+    /// "s3" for an object fetched with the instance's own credentials.
+    /// Absent on queue items written before uploads existed, which are URLs.
+    /// </summary>
+    public string? Source { get; set; }
+
+    /// <summary>
+    /// Download URL for the package installer. Empty for S3-sourced packages.
     /// </summary>
     public string DownloadUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Bucket holding the installer when <see cref="Source"/> is "s3".
+    /// </summary>
+    public string? S3Bucket { get; set; }
+
+    /// <summary>
+    /// Object key of the installer when <see cref="Source"/> is "s3".
+    /// </summary>
+    public string? S3Key { get; set; }
+
+    /// <summary>
+    /// True when this item should be fetched from S3 rather than over HTTP.
+    /// </summary>
+    public bool IsS3Source =>
+        !string.IsNullOrWhiteSpace(S3Bucket) && !string.IsNullOrWhiteSpace(S3Key);
 
     /// <summary>
     /// Expected SHA-256 hash (hex) of the downloaded installer, used to verify
@@ -112,11 +135,18 @@ public class PackageQueueItem
     public long? Ttl { get; set; }
 
     /// <summary>
-    /// Get the instance ID from the partition key
+    /// Get the instance ID from the partition key.
+    ///
+    /// The key is `workstation#{instanceArn}` since the queue was re-keyed so
+    /// the instance role could be scoped by `${ec2:SourceInstanceARN}`; the
+    /// instance id is the last ARN segment. Rows predating that change hold a
+    /// bare instance id, which the same parse returns unchanged.
     /// </summary>
     public string GetInstanceId()
     {
-        return PK.Replace("workstation#", "");
+        var value = PK.Replace("workstation#", string.Empty);
+        var slash = value.LastIndexOf('/');
+        return slash >= 0 ? value[(slash + 1)..] : value;
     }
 
     /// <summary>

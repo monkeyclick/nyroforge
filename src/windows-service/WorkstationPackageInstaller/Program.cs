@@ -1,5 +1,7 @@
+using Amazon;
 using Amazon.CloudWatchLogs;
 using Amazon.DynamoDBv2;
+using Amazon.S3;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -12,6 +14,12 @@ public class Program
 {
     public static void Main(string[] args)
     {
+        // AWS SDK for .NET v4 leaves response collections null by default where
+        // v3 initialised them to empty ones. Restoring the v3 behaviour makes
+        // every `response.Items`-style read across this service safe rather
+        // than relying on having found each one by inspection.
+        AWSConfigs.InitializeCollections = true;
+
         CreateHostBuilder(args).Build().Run();
     }
 
@@ -60,6 +68,17 @@ public class Program
                         RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(awsConfig.Region)
                     };
                     return new AmazonCloudWatchLogsClient(config);
+                });
+
+                // Resolves instance profile credentials automatically; used to
+                // fetch admin-uploaded installers from the packages bucket.
+                services.AddSingleton<IAmazonS3>(sp =>
+                {
+                    var config = new AmazonS3Config
+                    {
+                        RegionEndpoint = Amazon.RegionEndpoint.GetBySystemName(awsConfig.Region)
+                    };
+                    return new AmazonS3Client(config);
                 });
 
                 // HTTP Client

@@ -22,7 +22,9 @@ const lambdaFunctions = [
   'group-package-service',
   'storage-service',
   'ec2-discovery-service',
-  'instance-family-service'
+  'instance-family-service',
+  'package-upload-service',
+  'package-analyzer'
 ];
 
 const buildLambda = async (functionName) => {

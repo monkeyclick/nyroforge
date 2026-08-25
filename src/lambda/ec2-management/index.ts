@@ -5,6 +5,7 @@ import { isAdmin as isCognitoAdmin } from '../shared/auth';
 import { logEvent } from '../shared/logging';
 import { scanAllItems, queryAllItems } from '../shared/dynamo';
 import { describeInstancesByIds, describeInstancesByFilters } from '../shared/ec2';
+import { instanceArn, queuePartitionKey } from '../shared/packages';
 import { SecretsManagerClient, CreateSecretCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SSMClient, GetParameterCommand, SendCommandCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
@@ -25,6 +26,7 @@ const GROUPS_TABLE = process.env.GROUPS_TABLE!;
 const AUDIT_LOGS_TABLE = process.env.AUDIT_TABLE!;
 const BOOTSTRAP_PACKAGES_TABLE = process.env.BOOTSTRAP_PACKAGES_TABLE || 'WorkstationBootstrapPackages';
 const PACKAGE_QUEUE_TABLE = process.env.PACKAGE_QUEUE_TABLE || 'WorkstationPackageQueue';
+const REGION = process.env.AWS_REGION || 'us-west-2';
 const GROUP_PACKAGE_BINDINGS_TABLE = process.env.GROUP_PACKAGE_BINDINGS_TABLE || 'GroupPackageBindings';
 
 // Types for RBAC
@@ -178,6 +180,11 @@ interface BootstrapPackage {
   installCommand: string;
   installArgs?: string;
   expectedSha256?: string;
+  /** 'url' downloads over HTTPS; 's3' uses instance-profile credentials. */
+  source?: 'url' | 's3';
+  s3Bucket?: string;
+  s3Key?: string;
+  status?: string;
   requiresGpu?: boolean;
   supportedGpuFamilies?: string[];
   osVersions: string[];
@@ -471,13 +478,29 @@ async function getUserGroupPackages(userId: string): Promise<GroupPackageInfo[]>
 }
 
 /**
+ * The AWS account id, needed to build the instance ARN the package queue is
+ * partitioned by. API Gateway supplies the API owner's account on every
+ * request; DEPLOY_ACCOUNT_ID is injected by the stack as a fallback for
+ * invocations that do not come through API Gateway.
+ */
+function resolveAccountId(event: APIGatewayProxyEvent): string {
+  const fromRequest = event.requestContext?.accountId;
+  const accountId = fromRequest || process.env.DEPLOY_ACCOUNT_ID || '';
+  if (!accountId) {
+    throw new Error('Cannot determine AWS account id for the package queue partition key');
+  }
+  return accountId;
+}
+
+/**
  * Create package queue items in DynamoDB for post-boot installation
  */
 async function createPackageQueueItems(
   instanceId: string,
   packages: BootstrapPackage[],
   userId: string,
-  groupIds: string[]
+  groupIds: string[],
+  accountId: string
 ): Promise<void> {
   console.log(`[createPackageQueueItems] Creating ${packages.length} queue items for instance ${instanceId}`);
   
@@ -486,12 +509,28 @@ async function createPackageQueueItems(
     const ttl = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60); // 30 days
 
     for (const pkg of packages) {
+      // Uploaded packages are only installable once an admin has approved
+      // them. Packages predating the upload feature carry no status and are
+      // treated as approved.
+      if (pkg.status && pkg.status !== 'approved') {
+        console.warn(
+          `[createPackageQueueItems] Skipping package ${pkg.packageId} with status '${pkg.status}'`
+        );
+        continue;
+      }
+
       const queueItem = {
-        PK: `workstation#${instanceId}`,
+        // Partitioned by instance ARN so the workstation instance role can be
+        // scoped with a dynamodb:LeadingKeys condition on
+        // ${ec2:SourceInstanceARN}; see workstation-infrastructure-stack.ts.
+        PK: queuePartitionKey(instanceArn(REGION, accountId, instanceId)),
         SK: `package#${pkg.packageId}#${pkg.order}`,
         packageId: pkg.packageId,
         packageName: pkg.name,
-        downloadUrl: pkg.downloadUrl,
+        source: pkg.source === 's3' ? 's3' : 'url',
+        s3Bucket: pkg.s3Bucket,
+        s3Key: pkg.s3Key,
+        downloadUrl: pkg.downloadUrl || '',
         installCommand: pkg.installCommand,
         installArgs: pkg.installArgs || '',
         expectedSha256: pkg.expectedSha256,
@@ -1165,7 +1204,7 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
         console.log(`Creating ${postBootPackages.length} package queue items for post-boot installation...`);
         // Extract unique group IDs from the group packages we retrieved earlier
         // Use the user's group IDs we retrieved earlier
-        await createPackageQueueItems(instanceId, postBootPackages, userId, userGroupIds);
+        await createPackageQueueItems(instanceId, postBootPackages, userId, userGroupIds, resolveAccountId(event));
         console.log('✅ Package queue items created successfully');
       } catch (error) {
         console.error('⚠️ Failed to create package queue items:', error);

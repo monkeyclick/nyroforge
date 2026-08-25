@@ -10,6 +10,13 @@ import { corsHeaders } from '../shared/http';
 import { requireAdmin, isAdmin } from '../shared/auth';
 import { queryAllItems } from '../shared/dynamo';
 import { logEvent } from '../shared/logging';
+import {
+  effectiveStatus,
+  instanceArn,
+  isInstallable,
+  legacyQueuePartitionKey,
+  queuePartitionKey,
+} from '../shared/packages';
 
 const dynamodb = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-west-2' });
 
@@ -72,6 +79,85 @@ async function requireWorkstationAccess(event: any, workstationId: string): Prom
   return isOwner || isShared ? null : deny();
 }
 
+/**
+ * The package queue is partitioned by EC2 instance ARN, not workstation id.
+ *
+ * The Windows installer service (PackageQueueService.cs) builds the same key
+ * from its own instance identity, and the workstation instance role is scoped
+ * with a `dynamodb:LeadingKeys` condition on `${ec2:SourceInstanceARN}` — which
+ * only lines up if the key is the ARN.
+ *
+ * This service previously wrote and read `WORKSTATION#{workstationId}`, a
+ * different partition entirely from what the installer service polls, so
+ * packages an admin added were queued where no workstation ever looked while
+ * packages queued at launch were invisible to this API.
+ */
+const REGION = process.env.AWS_REGION || 'us-west-2';
+
+/** Both key shapes for an instance: current ARN form, then the legacy bare id. */
+function queuePartitionKeys(instanceId: string, accountId: string): string[] {
+  const keys = [queuePartitionKey(instanceArn(REGION, accountId, instanceId))];
+  // Rows written before the ARN re-keying live up to 30 days under the table
+  // TTL; keep reading them until they age out.
+  keys.push(legacyQueuePartitionKey(instanceId));
+  return keys;
+}
+
+function resolveAccountId(event: any): string {
+  return event?.requestContext?.accountId || process.env.DEPLOY_ACCOUNT_ID || '';
+}
+
+/** Resolve a workstation id to the EC2 instance id that owns its queue. */
+async function resolveInstanceId(workstationId: string): Promise<string | null> {
+  if (!WORKSTATIONS_TABLE) {
+    console.error('WORKSTATIONS_TABLE_NAME is not configured');
+    return null;
+  }
+  try {
+    const res = await dynamodb.send(new GetItemCommand({
+      TableName: WORKSTATIONS_TABLE,
+      Key: marshall({ PK: `WORKSTATION#${workstationId}`, SK: 'METADATA' }),
+    }));
+    if (!res.Item) return null;
+    const record = unmarshall(res.Item);
+    return record.instanceId || null;
+  } catch (err) {
+    console.error('Error resolving instance id for workstation:', err);
+    return null;
+  }
+}
+
+/** Read every queue row for an instance across both key shapes. */
+async function readQueueItems(instanceId: string, accountId: string): Promise<any[]> {
+  const results = await Promise.all(
+    queuePartitionKeys(instanceId, accountId).map((pk) =>
+      queryAllItems(dynamodb, {
+        TableName: QUEUE_TABLE,
+        KeyConditionExpression: 'PK = :pk',
+        ExpressionAttributeValues: marshall({ ':pk': pk }),
+      })
+    )
+  );
+  return results.flat();
+}
+
+/**
+ * Find a queued package by packageId within an instance's partition.
+ *
+ * The sort key is not a single fixed shape — ec2-management writes
+ * `package#{packageId}#{order}` at launch while admin-queued items historically
+ * used `package#{packageId}` — so retry/remove locate the item by attribute
+ * rather than reconstructing a key that may not exist.
+ */
+async function findQueueItem(
+  instanceId: string,
+  packageId: string,
+  accountId: string
+): Promise<any | null> {
+  const items = await readQueueItems(instanceId, accountId);
+  return items.find((item: any) => item.packageId === packageId) || null;
+}
+
 interface GroupPackageBinding {
   PK: string; // GROUP#<groupId>
   SK: string; // PACKAGE#<packageId>
@@ -92,6 +178,10 @@ interface PackageQueueItem {
   workstationId: string;
   packageId: string;
   packageName: string;
+  /** 'url' downloads over HTTPS; 's3' uses instance-profile credentials. */
+  source?: 'url' | 's3';
+  s3Bucket?: string;
+  s3Key?: string;
   downloadUrl: string;
   installCommand: string;
   installArgs: string;
@@ -150,7 +240,7 @@ export const handler = async (event: any) => {
       const workstationId = pathParams.workstationId || extractFromPath(path, 'workstations');
       const denied = await requireWorkstationAccess(event, workstationId);
       if (denied) return denied;
-      return await getPackageInstallationStatus(workstationId);
+      return await getPackageInstallationStatus(workstationId, resolveAccountId(event));
     }
 
     if (httpMethod === 'POST' && path.includes('/workstations/') && path.includes('/packages/') && path.includes('/retry')) {
@@ -158,7 +248,7 @@ export const handler = async (event: any) => {
       const packageId = pathParams.packageId || extractFromPath(path, 'packages');
       const denied = await requireWorkstationAccess(event, workstationId);
       if (denied) return denied;
-      return await retryPackageInstallation(workstationId, packageId);
+      return await retryPackageInstallation(workstationId, packageId, resolveAccountId(event));
     }
     
     // Group package-binding CRUD (admin API) is admin-only; the user-facing
@@ -201,7 +291,7 @@ export const handler = async (event: any) => {
       const workstationId = pathParams.workstationId || extractFromPath(path, 'workstations');
       const denied = await requireWorkstationAccess(event, workstationId);
       if (denied) return denied;
-      return await addPackagesToWorkstation(workstationId, body);
+      return await addPackagesToWorkstation(workstationId, body, resolveAccountId(event));
     }
 
     if (httpMethod === 'DELETE' && path.includes('/workstations/') && path.includes('/packages/')) {
@@ -209,7 +299,7 @@ export const handler = async (event: any) => {
       const packageId = pathParams.packageId || extractFromPath(path, 'packages');
       const denied = await requireWorkstationAccess(event, workstationId);
       if (denied) return denied;
-      return await removeQueuedPackage(workstationId, packageId);
+      return await removeQueuedPackage(workstationId, packageId, resolveAccountId(event));
     }
 
     return {
@@ -300,17 +390,22 @@ async function getUserGroupPackages(event: any): Promise<any> {
 /**
  * Get installation status for a workstation's packages
  */
-async function getPackageInstallationStatus(workstationId: string): Promise<any> {
+async function getPackageInstallationStatus(workstationId: string, accountId: string): Promise<any> {
   try {
-    // Paginated query: follow LastEvaluatedKey so large queues are not truncated.
-    const packages = await queryAllItems(dynamodb, {
-      TableName: QUEUE_TABLE,
-      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
-      ExpressionAttributeValues: marshall({
-        ':pk': `WORKSTATION#${workstationId}`,
-        ':sk': 'PACKAGE#'
-      })
-    });
+    const instanceId = await resolveInstanceId(workstationId);
+    if (!instanceId) {
+      return {
+        statusCode: 404,
+        headers: corsHeaders(),
+        body: JSON.stringify({ error: 'Workstation not found' })
+      };
+    }
+
+    // Reads both partition shapes and follows LastEvaluatedKey, so neither a
+    // large queue nor a pre-re-keying row goes missing. No SK filter — the
+    // partition holds only package rows, and their sort keys come in more than
+    // one historical shape.
+    const packages = await readQueueItems(instanceId, accountId);
 
     // Calculate summary
     const summary = {
@@ -343,13 +438,30 @@ async function getPackageInstallationStatus(workstationId: string): Promise<any>
 /**
  * Retry a failed package installation
  */
-async function retryPackageInstallation(workstationId: string, packageId: string): Promise<any> {
+async function retryPackageInstallation(workstationId: string, packageId: string, accountId: string): Promise<any> {
   try {
+    const instanceId = await resolveInstanceId(workstationId);
+    if (!instanceId) {
+      return {
+        statusCode: 404,
+        headers: corsHeaders(),
+        body: JSON.stringify({ error: 'Workstation not found' })
+      };
+    }
+    const existing = await findQueueItem(instanceId, packageId, accountId);
+    if (!existing) {
+      return {
+        statusCode: 404,
+        headers: corsHeaders(),
+        body: JSON.stringify({ error: 'Queued package not found' })
+      };
+    }
+
     const command = new UpdateItemCommand({
       TableName: QUEUE_TABLE,
       Key: marshall({
-        PK: `WORKSTATION#${workstationId}`,
-        SK: `PACKAGE#${packageId}`
+        PK: existing.PK,
+        SK: existing.SK
       }),
       UpdateExpression: 'SET #status = :pending, #errorMessage = :empty, #startedAt = :empty, #completedAt = :empty',
       ExpressionAttributeNames: {
@@ -617,7 +729,7 @@ async function removePackageFromGroup(groupId: string, packageId: string): Promi
 /**
  * Add packages to workstation queue (admin)
  */
-async function addPackagesToWorkstation(workstationId: string, data: any): Promise<any> {
+async function addPackagesToWorkstation(workstationId: string, data: any, accountId: string): Promise<any> {
   try {
     const { packageIds } = data;
 
@@ -629,7 +741,18 @@ async function addPackagesToWorkstation(workstationId: string, data: any): Promi
       };
     }
 
+    const instanceId = await resolveInstanceId(workstationId);
+    if (!instanceId) {
+      return {
+        statusCode: 404,
+        headers: corsHeaders(),
+        body: JSON.stringify({ error: 'Workstation not found' })
+      };
+    }
+
     const ttl = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60); // 30 days
+    const skipped: { packageId: string; reason: string }[] = [];
+    let added = 0;
 
     for (const packageId of packageIds) {
       // Get package details
@@ -649,18 +772,33 @@ async function addPackagesToWorkstation(workstationId: string, data: any): Promi
 
       const packageData = unmarshall(packageResult.Item);
 
+      // An uploaded package that no admin has approved must never reach a
+      // workstation — approval is the only thing standing between a
+      // user-supplied binary and SYSTEM-level execution.
+      if (!isInstallable(packageData)) {
+        skipped.push({
+          packageId,
+          reason: `Package is '${effectiveStatus(packageData)}', not approved`
+        });
+        continue;
+      }
+
+      const installOrder = packageData.order || 50;
       const queueItem: PackageQueueItem = {
-        PK: `WORKSTATION#${workstationId}`,
-        SK: `PACKAGE#${packageId}`,
-        workstationId,
+        PK: queuePartitionKey(instanceArn(REGION, accountId, instanceId)),
+        SK: `package#${packageId}#${installOrder}`,
+        workstationId: instanceId,
         packageId,
         packageName: packageData.name,
-        downloadUrl: packageData.downloadUrl,
+        source: packageData.source === 's3' ? 's3' : 'url',
+        s3Bucket: packageData.s3Bucket,
+        s3Key: packageData.s3Key,
+        downloadUrl: packageData.downloadUrl || '',
         installCommand: packageData.installCommand,
         installArgs: packageData.installArgs || '',
         expectedSha256: packageData.expectedSha256,
         status: 'pending',
-        installOrder: packageData.order || 50,
+        installOrder,
         required: false,
         retryCount: 0,
         maxRetries: 3,
@@ -675,14 +813,16 @@ async function addPackagesToWorkstation(workstationId: string, data: any): Promi
       });
 
       await dynamodb.send(command);
+      added += 1;
     }
 
     return {
       statusCode: 201,
       headers: corsHeaders(),
-      body: JSON.stringify({ 
-        success: true, 
-        added: packageIds.length 
+      body: JSON.stringify({
+        success: true,
+        added,
+        skipped
       })
     };
   } catch (error: any) {
@@ -698,13 +838,30 @@ async function addPackagesToWorkstation(workstationId: string, data: any): Promi
 /**
  * Remove a queued package (admin)
  */
-async function removeQueuedPackage(workstationId: string, packageId: string): Promise<any> {
+async function removeQueuedPackage(workstationId: string, packageId: string, accountId: string): Promise<any> {
   try {
+    const instanceId = await resolveInstanceId(workstationId);
+    if (!instanceId) {
+      return {
+        statusCode: 404,
+        headers: corsHeaders(),
+        body: JSON.stringify({ error: 'Workstation not found' })
+      };
+    }
+    const existing = await findQueueItem(instanceId, packageId, accountId);
+    if (!existing) {
+      return {
+        statusCode: 404,
+        headers: corsHeaders(),
+        body: JSON.stringify({ error: 'Queued package not found' })
+      };
+    }
+
     const command = new DeleteItemCommand({
       TableName: QUEUE_TABLE,
       Key: marshall({
-        PK: `WORKSTATION#${workstationId}`,
-        SK: `PACKAGE#${packageId}`
+        PK: existing.PK,
+        SK: existing.SK
       })
     });
 

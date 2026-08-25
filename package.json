@@ -24,6 +24,7 @@
     "@aws-sdk/client-cognito-identity-provider": "^3.1088.0",
     "@aws-sdk/client-efs": "^3.1078.0",
     "@aws-sdk/client-fsx": "^3.1078.0",
+    "@aws-sdk/client-lambda": "^3.1116.0",
     "@aws-sdk/client-s3": "^3.1078.0",
     "@aws-sdk/client-ses": "^3.1088.0",
     "@aws-sdk/s3-request-presigner": "^3.1078.0",

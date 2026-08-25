@@ -16,6 +16,15 @@ public class PackageQueueService
     private readonly IAmazonDynamoDB _dynamoDb;
     private readonly string _tableName;
     private readonly string _instanceId;
+    private readonly string _partitionKey;
+
+    /// <summary>
+    /// Capability version of this installer service, written onto every queue
+    /// row it touches. 2.0.0 is the first version that can fetch a package from
+    /// S3 with instance-profile credentials; earlier versions only understand
+    /// downloadUrl and would fail on an uploaded package.
+    /// </summary>
+    public const string ServiceVersion = "2.0.0";
 
     public PackageQueueService(
         ILogger<PackageQueueService> logger,
@@ -25,7 +34,33 @@ public class PackageQueueService
         _logger = logger;
         _dynamoDb = dynamoDb;
         _tableName = configuration.Value.AWS.DynamoDB.PackageQueueTableName;
-        _instanceId = GetInstanceIdFromMetadata();
+        var identity = GetInstanceIdentityFromMetadata();
+        _instanceId = identity.InstanceId;
+        _partitionKey = BuildPartitionKey(identity);
+    }
+
+    /// <summary>
+    /// Partition key for this instance's queue.
+    ///
+    /// The key is the instance ARN, not the bare instance id, because the
+    /// workstation instance role scopes DynamoDB access with a
+    /// `dynamodb:LeadingKeys` condition on `${ec2:SourceInstanceARN}` — the only
+    /// IAM condition key that identifies the calling instance, and one that
+    /// expands to a full ARN. Any other key shape makes that condition
+    /// unmatchable, and a policy variable that fails to resolve denies the
+    /// request rather than ignoring the condition.
+    ///
+    /// Falls back to the bare instance id when the identity document is
+    /// unavailable, which matches how rows were keyed before this change.
+    /// </summary>
+    private static string BuildPartitionKey(InstanceIdentity identity)
+    {
+        if (string.IsNullOrEmpty(identity.Region) || string.IsNullOrEmpty(identity.AccountId))
+        {
+            return $"workstation#{identity.InstanceId}";
+        }
+
+        return $"workstation#arn:aws:ec2:{identity.Region}:{identity.AccountId}:instance/{identity.InstanceId}";
     }
 
     /// <summary>
@@ -35,7 +70,7 @@ public class PackageQueueService
     {
         try
         {
-            var pk = $"workstation#{_instanceId}";
+            var pk = _partitionKey;
 
             var request = new QueryRequest
             {
@@ -53,9 +88,16 @@ public class PackageQueueService
                 }
             };
 
+            _logger.LogDebug(
+                "Polling package queue for {InstanceId} (partition {PartitionKey})",
+                _instanceId, _partitionKey);
+
             var response = await _dynamoDb.QueryAsync(request, cancellationToken);
             
-            var packages = response.Items
+            // Belt and braces alongside AWSConfigs.InitializeCollections in
+            // Program.cs: in SDK v4 an empty result set yields a null Items
+            // rather than an empty list.
+            var packages = (response.Items ?? new List<Dictionary<string, AttributeValue>>())
                 .Select(MapToPackageQueueItem)
                 .OrderBy(p => p.InstallOrder)
                 .ToList();
@@ -85,7 +127,10 @@ public class PackageQueueService
                     { "PK", new AttributeValue { S = package.PK } },
                     { "SK", new AttributeValue { S = package.SK } }
                 },
-                UpdateExpression = "SET #status = :installing, lastAttemptAt = :now, retryCount = :retryCount",
+                // installerVersion lets the approve handler in
+                // package-upload-service tell whether the fleet is new enough
+                // to understand S3-sourced packages before one is published.
+                UpdateExpression = "SET #status = :installing, lastAttemptAt = :now, retryCount = :retryCount, installerVersion = :version",
                 ExpressionAttributeNames = new Dictionary<string, string>
                 {
                     { "#status", "status" }
@@ -94,7 +139,8 @@ public class PackageQueueService
                 {
                     { ":installing", new AttributeValue { S = "installing" } },
                     { ":now", new AttributeValue { S = DateTime.UtcNow.ToString("O") } },
-                    { ":retryCount", new AttributeValue { N = package.RetryCount.ToString() } }
+                    { ":retryCount", new AttributeValue { N = package.RetryCount.ToString() } },
+                    { ":version", new AttributeValue { S = ServiceVersion } }
                 }
             };
 
@@ -286,13 +332,18 @@ public class PackageQueueService
             SK = item["SK"].S,
             PackageId = item["packageId"].S,
             PackageName = item["packageName"].S,
-            DownloadUrl = item["downloadUrl"].S,
+            Source = item.ContainsKey("source") ? item["source"].S : null,
+            DownloadUrl = item.ContainsKey("downloadUrl") ? item["downloadUrl"].S : string.Empty,
+            S3Bucket = item.ContainsKey("s3Bucket") ? item["s3Bucket"].S : null,
+            S3Key = item.ContainsKey("s3Key") ? item["s3Key"].S : null,
             ExpectedSha256 = item.ContainsKey("expectedSha256") ? item["expectedSha256"].S : null,
             InstallCommand = item["installCommand"].S,
             InstallArgs = item.ContainsKey("installArgs") ? item["installArgs"].S : null,
             Status = Enum.Parse<PackageStatus>(item["status"].S, true),
             InstallOrder = int.Parse(item["installOrder"].N),
-            Required = item.ContainsKey("required") && item["required"].BOOL,
+            // AttributeValue.BOOL is bool? in SDK v4 (value types became
+            // nullable), so it cannot be used directly as a bool operand.
+            Required = item.ContainsKey("required") && item["required"].BOOL == true,
             RetryCount = item.ContainsKey("retryCount") ? int.Parse(item["retryCount"].N) : 0,
             MaxRetries = item.ContainsKey("maxRetries") ? int.Parse(item["maxRetries"].N) : 3,
             LastAttemptAt = item.ContainsKey("lastAttemptAt") ? DateTime.Parse(item["lastAttemptAt"].S) : null,
@@ -307,9 +358,17 @@ public class PackageQueueService
     }
 
     /// <summary>
-    /// Get EC2 instance ID from metadata service (IMDSv2)
+    /// Identity of the instance this service is running on.
     /// </summary>
-    private string GetInstanceIdFromMetadata()
+    private sealed record InstanceIdentity(string InstanceId, string Region, string AccountId);
+
+    /// <summary>
+    /// Read instance id, region and account id from IMDSv2.
+    ///
+    /// The instance identity document carries all three in one request, which
+    /// is what lets the queue partition key be built as a full instance ARN.
+    /// </summary>
+    private InstanceIdentity GetInstanceIdentityFromMetadata()
     {
         try
         {
@@ -321,19 +380,29 @@ public class PackageQueueService
             var tokenResponse = client.SendAsync(tokenRequest).GetAwaiter().GetResult();
             var token = tokenResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
 
-            // IMDSv2: Use token to get instance ID
-            var metadataRequest = new HttpRequestMessage(HttpMethod.Get, "http://169.254.169.254/latest/meta-data/instance-id");
-            metadataRequest.Headers.Add("X-aws-ec2-metadata-token", token);
-            var metadataResponse = client.SendAsync(metadataRequest).GetAwaiter().GetResult();
-            var instanceId = metadataResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult().Trim();
+            var documentRequest = new HttpRequestMessage(
+                HttpMethod.Get,
+                "http://169.254.169.254/latest/dynamic/instance-identity/document");
+            documentRequest.Headers.Add("X-aws-ec2-metadata-token", token);
+            var documentResponse = client.SendAsync(documentRequest).GetAwaiter().GetResult();
+            var json = documentResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
 
-            _logger.LogInformation("Retrieved instance ID from metadata: {InstanceId}", instanceId);
-            return instanceId;
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            var instanceId = root.GetProperty("instanceId").GetString() ?? string.Empty;
+            var region = root.GetProperty("region").GetString() ?? string.Empty;
+            var accountId = root.GetProperty("accountId").GetString() ?? string.Empty;
+
+            _logger.LogInformation(
+                "Retrieved instance identity from metadata: {InstanceId} in {Region}",
+                instanceId, region);
+
+            return new InstanceIdentity(instanceId, region, accountId);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to get instance ID from IMDS, using fallback");
-            return Environment.MachineName;
+            _logger.LogWarning(ex, "Failed to get instance identity from IMDS, using fallback");
+            return new InstanceIdentity(Environment.MachineName, string.Empty, string.Empty);
         }
     }
 }

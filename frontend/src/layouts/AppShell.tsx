@@ -1,6 +1,6 @@
 import { ReactNode, useState } from 'react'
 import { useRouter } from 'next/router'
-import { BellIcon, FilmIcon, HomeIcon, UserCircleIcon } from '@heroicons/react/24/outline'
+import { ArrowUpTrayIcon, BellIcon, FilmIcon, HomeIcon, UserCircleIcon } from '@heroicons/react/24/outline'
 import ThemeToggle from '@/components/ThemeToggle'
 import { ActivityCenter } from '@/components/activity'
 import { useActivityStore } from '@/stores/activityStore'
@@ -44,6 +44,9 @@ export default function AppShell({ children, title, isAdmin = false, showStudioN
                   <HomeIcon className="h-4 w-4" /><span className="hidden md:inline">Studio</span>
                 </button>
               )}
+              <button onClick={() => router.push('/packages')} className={`nav-pill ${router.pathname === '/packages' ? 'nav-pill-active' : ''}`} aria-current={router.pathname === '/packages' ? 'page' : undefined}>
+                <ArrowUpTrayIcon className="h-4 w-4" /><span className="hidden md:inline">Software</span>
+              </button>
               {isAdmin && (
                 <button onClick={() => router.push('/admin')} className={`nav-pill ${router.pathname === '/admin' ? 'nav-pill-active' : ''}`}>Operations</button>
               )}

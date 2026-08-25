@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '../../services/api';
 import ConfirmDialog from '../ConfirmDialog';
+import PackageUploadWizard from './PackageUploadWizard';
 
 interface BootstrapPackage {
   packageId: string;
@@ -27,11 +28,32 @@ interface BootstrapPackage {
   };
   createdAt: string;
   updatedAt: string;
+  // Present on uploaded packages; absent on hand-entered URL packages.
+  source?: 'url' | 's3';
+  fileName?: string;
+  fileSizeBytes?: number;
+  status?: string;
+  uploadedBy?: string;
+  expectedSha256?: string;
 }
+
+/** A package predating the upload feature has no status and was admin-curated. */
+function effectiveStatus(pkg: BootstrapPackage): string {
+  return pkg.status || 'approved';
+}
+
+const STATUS_BADGES: Record<string, { label: string; className: string }> = {
+  uploading: { label: 'Uploading', className: 'bg-gray-100 text-gray-700' },
+  analyzing: { label: 'Analyzing', className: 'bg-blue-100 text-blue-800' },
+  needs_review: { label: 'Needs review', className: 'bg-amber-100 text-amber-800' },
+  analysis_failed: { label: 'Analysis failed', className: 'bg-red-100 text-red-800' },
+  rejected: { label: 'Rejected', className: 'bg-gray-200 text-gray-600' },
+};
 
 export const BootstrapPackageManagement: React.FC = () => {
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
   const [editingPackage, setEditingPackage] = useState<BootstrapPackage | null>(null);
   const [filter, setFilter] = useState<'all' | 'required' | 'optional' | 'disabled'>('all');
   const [searchTerm, setSearchTerm] = useState('');
@@ -98,6 +120,21 @@ export const BootstrapPackageManagement: React.FC = () => {
     setPendingDelete({ packageId, name });
   };
 
+  if (showUpload) {
+    return (
+      <PackageUploadWizard
+        onClose={() => {
+          setShowUpload(false);
+          queryClient.invalidateQueries({ queryKey: ['admin-bootstrap-packages'] });
+        }}
+        onUploaded={() => {
+          setShowUpload(false);
+          queryClient.invalidateQueries({ queryKey: ['admin-bootstrap-packages'] });
+        }}
+      />
+    );
+  }
+
   if (showForm) {
     return (
       <BootstrapPackageForm
@@ -140,12 +177,20 @@ export const BootstrapPackageManagement: React.FC = () => {
             Manage drivers and applications available during workstation setup
           </p>
         </div>
-        <button
-          onClick={handleNew}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-        >
-          + Add Package
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowUpload(true)}
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          >
+            Upload installer
+          </button>
+          <button
+            onClick={handleNew}
+            className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+          >
+            Add from URL
+          </button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -271,9 +316,19 @@ export const BootstrapPackageManagement: React.FC = () => {
                         Required
                       </span>
                     )}
-                    {!pkg.isEnabled && (
+                    {!pkg.isEnabled && effectiveStatus(pkg) === 'approved' && (
                       <span className="text-xs px-2 py-1 rounded-full font-medium bg-gray-200 text-gray-600">
                         Disabled
+                      </span>
+                    )}
+                    {STATUS_BADGES[effectiveStatus(pkg)] && (
+                      <span className={`text-xs px-2 py-1 rounded-full font-medium ${STATUS_BADGES[effectiveStatus(pkg)].className}`}>
+                        {STATUS_BADGES[effectiveStatus(pkg)].label}
+                      </span>
+                    )}
+                    {pkg.source === 's3' && (
+                      <span className="text-xs px-2 py-1 rounded-full font-medium bg-indigo-100 text-indigo-800">
+                        Uploaded
                       </span>
                     )}
                   </div>
@@ -283,6 +338,8 @@ export const BootstrapPackageManagement: React.FC = () => {
                     <span>Install Time: {pkg.estimatedInstallTimeMinutes} min</span>
                     {pkg.metadata?.size && <span>Size: {pkg.metadata.size}</span>}
                     {pkg.metadata?.vendor && <span>Vendor: {pkg.metadata.vendor}</span>}
+                    {pkg.fileName && <span>File: {pkg.fileName}</span>}
+                    {pkg.uploadedBy && <span>Uploaded by: {pkg.uploadedBy}</span>}
                     {pkg.requiresGpu && <span className="text-purple-600">Requires GPU</span>}
                   </div>
                   {pkg.metadata?.notes && (
@@ -305,7 +362,15 @@ export const BootstrapPackageManagement: React.FC = () => {
                         isEnabled: !pkg.isEnabled,
                       })
                     }
-                    className={`px-3 py-1 text-sm rounded transition-colors ${
+                    // The catalog API refuses to enable an unapproved package;
+                    // disable the control rather than offer a call that 409s.
+                    disabled={effectiveStatus(pkg) !== 'approved'}
+                    title={
+                      effectiveStatus(pkg) !== 'approved'
+                        ? 'Approve this package in Package review before enabling it'
+                        : undefined
+                    }
+                    className={`px-3 py-1 text-sm rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                       pkg.isEnabled
                         ? 'text-gray-600 hover:text-gray-800 hover:bg-gray-100'
                         : 'text-green-600 hover:text-green-800 hover:bg-green-50'
@@ -363,7 +428,10 @@ const BootstrapPackageForm: React.FC<BootstrapPackageFormProps> = ({
     type: pkg?.type || 'application',
     category: pkg?.category || 'utility',
     downloadUrl: pkg?.downloadUrl || '',
-    installCommand: pkg?.installCommand || 'Start-Process',
+    // NOT 'Start-Process': installCommand becomes ProcessStartInfo.FileName on
+    // the workstation, and a PowerShell cmdlet there throws Win32Exception.
+    // '{installer}' means "run the downloaded file itself".
+    installCommand: pkg?.installCommand || '{installer}',
     installArgs: pkg?.installArgs || '',
     requiresGpu: pkg?.requiresGpu || false,
     supportedGpuFamilies: pkg?.supportedGpuFamilies || [],
@@ -550,14 +618,21 @@ const BootstrapPackageForm: React.FC<BootstrapPackageFormProps> = ({
             <label className="block text-sm font-medium text-gray-700 mb-1">
               Install Command *
             </label>
-            <input
-              type="text"
+            <select
               required
               value={formData.installCommand}
               onChange={(e) => setFormData(prev => ({ ...prev, installCommand: e.target.value }))}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg"
-              placeholder="Start-Process"
-            />
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
+            >
+              <option value="{installer}">{'{installer}'} — run the downloaded file</option>
+              <option value="msiexec.exe">msiexec.exe</option>
+              <option value="powershell.exe">powershell.exe</option>
+              <option value="cmd.exe">cmd.exe</option>
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              This becomes the executable the workstation launches, so it must be a real program —
+              not a PowerShell cmdlet.
+            </p>
           </div>
 
           <div>
@@ -587,8 +662,11 @@ const BootstrapPackageForm: React.FC<BootstrapPackageFormProps> = ({
             value={formData.installArgs}
             onChange={(e) => setFormData(prev => ({ ...prev, installArgs: e.target.value }))}
             className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono text-sm"
-            placeholder='-FilePath "C:\\Temp\\installer.exe" -ArgumentList "/S" -Wait'
+            placeholder="/S    or    /i {installer} /qn /norestart"
           />
+          <p className="mt-1 text-xs text-gray-500">
+            {'{installer}'} is replaced with the quoted path of the downloaded file.
+          </p>
         </div>
 
         {/* OS Versions */}

@@ -3,6 +3,8 @@ import { marshall } from '@aws-sdk/util-dynamodb';
 // Tables not covered by jest.setup.ts, needed before the handler module loads.
 process.env.GROUP_PACKAGE_BINDINGS_TABLE = 'test-group-package-bindings-table';
 process.env.PACKAGE_QUEUE_TABLE = 'test-package-queue-table';
+process.env.DEPLOY_ACCOUNT_ID = '111122223333';
+process.env.AWS_REGION = 'us-west-2';
 
 // Mock AWS SDK clients - must be before imports
 jest.mock('@aws-sdk/client-dynamodb', () => {
@@ -77,27 +79,42 @@ describe('Group Package Service Lambda', () => {
   describe('GET /workstations/{id}/packages', () => {
     it('returns 200 with all items merged across a paginated Query (LastEvaluatedKey)', async () => {
       const item1 = marshall({
-        PK: 'WORKSTATION#ws-001',
-        SK: 'PACKAGE#pkg-1',
-        workstationId: 'ws-001',
+        PK: 'workstation#arn:aws:ec2:us-west-2:111122223333:instance/i-0abc123',
+        SK: 'package#pkg-1#1',
+        workstationId: 'i-0abc123',
         packageId: 'pkg-1',
         packageName: 'Package One',
         status: 'completed',
         installOrder: 1,
       });
       const item2 = marshall({
-        PK: 'WORKSTATION#ws-001',
-        SK: 'PACKAGE#pkg-2',
-        workstationId: 'ws-001',
+        PK: 'workstation#arn:aws:ec2:us-west-2:111122223333:instance/i-0abc123',
+        SK: 'package#pkg-2#2',
+        workstationId: 'i-0abc123',
         packageId: 'pkg-2',
         packageName: 'Package Two',
         status: 'pending',
         installOrder: 2,
       });
-      const pageKey = marshall({ PK: 'WORKSTATION#ws-001', SK: 'PACKAGE#pkg-1' });
+      const pageKey = marshall({ PK: 'workstation#arn:aws:ec2:us-west-2:111122223333:instance/i-0abc123', SK: 'package#pkg-1#1' });
 
       mockDynamoSend.mockImplementation((command: any) => {
+        if (command.constructor.name === 'GetItemCommand') {
+          return Promise.resolve({
+            Item: marshall({
+              PK: 'WORKSTATION#ws-001',
+              SK: 'METADATA',
+              workstationId: 'ws-001',
+              instanceId: 'i-0abc123',
+            }),
+          });
+        }
         if (command.constructor.name === 'QueryCommand') {
+          // Reads span two partitions: the current instance-ARN key and the
+          // legacy bare-instance-id key, which still holds unexpired rows.
+          if (command.input.ExpressionAttributeValues[':pk'].S !== 'workstation#arn:aws:ec2:us-west-2:111122223333:instance/i-0abc123') {
+            return Promise.resolve({ Items: [] });
+          }
           if (!command.input.ExclusiveStartKey) {
             return Promise.resolve({ Items: [item1], LastEvaluatedKey: pageKey });
           }
@@ -122,6 +139,51 @@ describe('Group Package Service Lambda', () => {
       expect(body.summary.total).toBe(2);
       expect(body.summary.completed).toBe(1);
       expect(body.summary.pending).toBe(1);
+    });
+
+    it('queries the instance-ARN partition the installer service actually reads', async () => {
+      // The Windows service queries PK = "workstation#{instanceArn}", and the
+      // instance role is scoped by ${ec2:SourceInstanceARN}. Reading
+      // "WORKSTATION#{workstationId}" instead returns an empty, unrelated
+      // partition, which is how launch-queued packages became invisible here.
+      mockDynamoSend.mockImplementation((command: any) => {
+        if (command.constructor.name === 'GetItemCommand') {
+          return Promise.resolve({
+            Item: marshall({
+              PK: 'WORKSTATION#ws-001',
+              SK: 'METADATA',
+              workstationId: 'ws-001',
+              instanceId: 'i-0abc123',
+            }),
+          });
+        }
+        return Promise.resolve({ Items: [] });
+      });
+
+      await handler(makeEvent({
+        httpMethod: 'GET',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+      }));
+
+      const queried = mockDynamoSend.mock.calls
+        .filter(([c]: any[]) => c.constructor.name === 'QueryCommand')
+        .map(([c]: any[]) => c.input.ExpressionAttributeValues[':pk'].S);
+
+      expect(queried).toContain('workstation#arn:aws:ec2:us-west-2:111122223333:instance/i-0abc123');
+      // Legacy rows written before the re-keying are still read until they
+      // age out under the queue table's 30-day TTL.
+      expect(queried).toContain('workstation#i-0abc123');
+    });
+
+    it('404s when the workstation has no instance to read a queue for', async () => {
+      mockDynamoSend.mockImplementation(() => Promise.resolve({}));
+      const result = await handler(makeEvent({
+        httpMethod: 'GET',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+      }));
+      expect(result.statusCode).toBe(404);
     });
   });
 
@@ -235,7 +297,10 @@ describe('Group Package Service Lambda', () => {
 
     /** GetItem on the workstations table returns a workstation owned by OWNER;
      *  GetItem on the packages table returns a package definition. */
-    function mockWorkstationAndPackage(assignedUsers: string[] = []) {
+    function mockWorkstationAndPackage(
+      assignedUsers: string[] = [],
+      packageOverrides: Record<string, any> = {}
+    ) {
       mockDynamoSend.mockImplementation((command: any) => {
         const name = command.constructor.name;
         if (name === 'GetItemCommand' && command.input.TableName === 'test-workstations-table') {
@@ -244,6 +309,9 @@ describe('Group Package Service Lambda', () => {
               PK: 'WORKSTATION#ws-001',
               SK: 'METADATA',
               workstationId: 'ws-001',
+              // The package queue is partitioned by instance id, so every
+              // queue operation resolves the workstation to its instance.
+              instanceId: 'i-0abc123',
               userId: OWNER,
               assignedUsers,
             }),
@@ -257,11 +325,20 @@ describe('Group Package Service Lambda', () => {
               downloadUrl: 'https://example.com/pkg1.exe',
               installCommand: 'pkg1.exe /S',
               order: 10,
-            }),
+              ...packageOverrides,
+            }, { removeUndefinedValues: true }),
           });
         }
         if (name === 'QueryCommand') {
-          return Promise.resolve({ Items: [] });
+          // An existing queued item, so retry/remove have something to find.
+          return Promise.resolve({
+            Items: [marshall({
+              PK: 'workstation#arn:aws:ec2:us-west-2:111122223333:instance/i-0abc123',
+              SK: 'package#pkg-1#10',
+              packageId: 'pkg-1',
+              status: 'failed',
+            })],
+          });
         }
         return Promise.resolve({});
       });
@@ -291,6 +368,88 @@ describe('Group Package Service Lambda', () => {
         ([c]: any[]) => c.constructor.name === 'PutItemCommand' && c.input.TableName === 'test-package-queue-table'
       );
       expect(put).toBeDefined();
+    });
+
+    it('writes the queue item into the instance partition with the installer-service key shape', async () => {
+      mockWorkstationAndPackage();
+      await handler(userEvent(OWNER, {
+        httpMethod: 'POST',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+        body: JSON.stringify({ packageIds: ['pkg-1'] }),
+      }));
+
+      const put = mockDynamoSend.mock.calls.find(
+        ([c]: any[]) => c.constructor.name === 'PutItemCommand'
+          && c.input.TableName === 'test-package-queue-table'
+      );
+      const item = put![0].input.Item;
+      expect(item.PK.S).toBe('workstation#arn:aws:ec2:us-west-2:111122223333:instance/i-0abc123');
+      expect(item.SK.S).toBe('package#pkg-1#10');
+    });
+
+    it('carries S3 source fields through to the queue for uploaded packages', async () => {
+      mockWorkstationAndPackage([], {
+        source: 's3',
+        s3Bucket: 'test-packages-bucket',
+        s3Key: 'packages/pkg-1/Resolve.zip',
+        downloadUrl: '',
+        status: 'approved',
+      });
+
+      await handler(userEvent(OWNER, {
+        httpMethod: 'POST',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+        body: JSON.stringify({ packageIds: ['pkg-1'] }),
+      }));
+
+      const put = mockDynamoSend.mock.calls.find(
+        ([c]: any[]) => c.constructor.name === 'PutItemCommand'
+          && c.input.TableName === 'test-package-queue-table'
+      );
+      expect(put![0].input.Item.source.S).toBe('s3');
+      expect(put![0].input.Item.s3Key.S).toBe('packages/pkg-1/Resolve.zip');
+    });
+
+    it.each(['uploading', 'analyzing', 'needs_review', 'rejected', 'analysis_failed'])(
+      'refuses to queue a package in status %s',
+      async (status) => {
+        mockWorkstationAndPackage([], { status });
+
+        const result = await handler(userEvent(OWNER, {
+          httpMethod: 'POST',
+          path: '/workstations/ws-001/packages',
+          pathParameters: { workstationId: 'ws-001' },
+          body: JSON.stringify({ packageIds: ['pkg-1'] }),
+        }));
+
+        // Reported rather than silently dropped, but nothing is queued: an
+        // unapproved binary must never reach a workstation.
+        expect(result.statusCode).toBe(201);
+        const body = JSON.parse(result.body);
+        expect(body.added).toBe(0);
+        expect(body.skipped[0].reason).toContain(status);
+
+        const put = mockDynamoSend.mock.calls.find(
+          ([c]: any[]) => c.constructor.name === 'PutItemCommand'
+            && c.input.TableName === 'test-package-queue-table'
+        );
+        expect(put).toBeUndefined();
+      }
+    );
+
+    it('still queues a legacy package that has no status field', async () => {
+      // Packages predating uploads carry no status and were curated by an
+      // admin at creation; they must keep working untouched.
+      mockWorkstationAndPackage([], { status: undefined });
+      const result = await handler(userEvent(OWNER, {
+        httpMethod: 'POST',
+        path: '/workstations/ws-001/packages',
+        pathParameters: { workstationId: 'ws-001' },
+        body: JSON.stringify({ packageIds: ['pkg-1'] }),
+      }));
+      expect(JSON.parse(result.body).added).toBe(1);
     });
 
     it('rejects another non-admin user with 403 and writes nothing', async () => {

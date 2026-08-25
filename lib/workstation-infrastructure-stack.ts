@@ -3,7 +3,9 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as guardduty from 'aws-cdk-lib/aws-guardduty';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 
@@ -65,6 +67,14 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
   public userPool: cognito.UserPool;
   public userPoolClient: cognito.UserPoolClient;
   public readonly kmsKey: kms.Key;
+  /**
+   * Holds admin-uploaded installer binaries for bootstrap packages. Two
+   * prefixes with different reachability: `quarantine/` (freshly uploaded,
+   * unreviewed) and `packages/` (admin-approved). The workstation instance
+   * role can read `packages/*` and nothing else, so promoting an object
+   * between prefixes is what actually makes it installable.
+   */
+  public packagesBucket: s3.Bucket;
   public readonly workstationSecurityGroup: ec2.SecurityGroup;
   private readonly removalPolicy: cdk.RemovalPolicy;
 
@@ -130,6 +140,10 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
 
     // Create SSM Parameters for configuration
     this.createSSMParameters();
+
+    // Bootstrap package artifact storage. Must precede createIAMRoles(): the
+    // workstation instance role grants read on this bucket's approved prefix.
+    this.createPackagesBucket(isProd);
 
     // Create IAM roles and policies
     this.createIAMRoles();
@@ -656,6 +670,25 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
       },
     });
 
+    // Drives the admin review queue: list every upload awaiting review
+    // (status = 'needs_review') oldest-first, without scanning the catalog.
+    //
+    // Sorted by createdAt rather than uploadedAt because DynamoDB omits an item
+    // from an index when a key attribute is missing, and hand-entered URL
+    // packages have no uploadedAt — they would silently vanish from any
+    // status query.
+    bootstrapPackagesTable.addGlobalSecondaryIndex({
+      indexName: 'StatusIndex',
+      partitionKey: {
+        name: 'status',
+        type: dynamodb.AttributeType.STRING,
+      },
+      sortKey: {
+        name: 'createdAt',
+        type: dynamodb.AttributeType.STRING,
+      },
+    });
+
     // Analytics events table
     const analyticsTable = new dynamodb.Table(this, 'AnalyticsTable', {
       tableName: 'UserAnalytics',
@@ -1159,6 +1192,172 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
     });
   }
 
+  /**
+   * S3 bucket for admin-uploaded bootstrap package installers.
+   *
+   * Deliberately NOT the enterprise transfer bucket: that one carries
+   * expiration lifecycle rules and `autoDeleteObjects: true` outside prod,
+   * either of which would silently delete a multi-GB installer that the
+   * package catalog still points at.
+   *
+   * Layout — the prefix boundary is the security boundary:
+   *   quarantine/{packageId}/{fileName}  uploaded, unreviewed. No workstation
+   *                                      can read this prefix.
+   *   packages/{packageId}/{fileName}    admin-approved. The workstation
+   *                                      instance role has GetObject here.
+   */
+  private createPackagesBucket(isProd: boolean): void {
+    this.packagesBucket = new s3.Bucket(this, 'PackagesBucket', {
+      bucketName: `workstation-packages-${cdk.Stack.of(this).account}-${cdk.Stack.of(this).region}`,
+      // Same CMK the workstation instance role can already decrypt, so an
+      // approved installer needs no extra key grant to be downloadable.
+      encryption: s3.BucketEncryption.KMS,
+      encryptionKey: this.kmsKey,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: true,
+      // Always RETAIN, even in dev. Re-uploading a 4 GB installer because a
+      // dev stack was torn down is a genuinely bad afternoon.
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      lifecycleRules: [
+        {
+          // A browser that closes mid-upload leaves orphaned parts that are
+          // billed as storage but invisible in ListObjects.
+          id: 'abort-incomplete-multipart-uploads',
+          abortIncompleteMultipartUploadAfter: cdk.Duration.days(7),
+        },
+        {
+          // Uploads nobody ever reviewed shouldn't accumulate forever.
+          id: 'expire-unreviewed-quarantine',
+          prefix: 'quarantine/',
+          expiration: cdk.Duration.days(14),
+        },
+        {
+          id: 'expire-superseded-package-versions',
+          prefix: 'packages/',
+          noncurrentVersionExpiration: cdk.Duration.days(90),
+        },
+        {
+          // Trial-install copies are staged here so a workstation can read
+          // them; they are deleted after the run and swept up shortly after.
+          id: 'expire-verification-copies',
+          prefix: 'verify/',
+          expiration: cdk.Duration.days(2),
+        },
+      ],
+      cors: [
+        {
+          // Browser uploads go straight to S3 (API Gateway caps bodies at
+          // 10 MB). ETag must be exposed or the browser cannot read the part
+          // ETags it has to send back to CompleteMultipartUpload.
+          allowedMethods: [
+            s3.HttpMethods.PUT,
+            s3.HttpMethods.POST,
+            s3.HttpMethods.HEAD,
+            s3.HttpMethods.GET,
+          ],
+          allowedOrigins: process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : ['*'],
+          allowedHeaders: ['*'],
+          exposedHeaders: ['ETag'],
+          maxAge: 3600,
+        },
+      ],
+    });
+
+    cdk.Tags.of(this.packagesBucket).add('Name', 'workstation-packages');
+
+    new ssm.StringParameter(this, 'PackagesBucketNameParam', {
+      parameterName: '/workstation/config/packagesBucket',
+      stringValue: this.packagesBucket.bucketName,
+      description: 'S3 bucket holding bootstrap package installers',
+    });
+
+    new cdk.CfnOutput(this, 'PackagesBucketName', {
+      value: this.packagesBucket.bucketName,
+      description: 'S3 bucket holding bootstrap package installers',
+      exportName: 'WorkstationPackagesBucketName',
+    });
+
+    this.createMalwareProtection();
+
+    // isProd is accepted for symmetry with the other stateful resources even
+    // though this bucket is RETAIN in every environment; referencing it keeps
+    // the signature honest if that policy is ever relaxed.
+    void isProd;
+  }
+
+  /**
+   * GuardDuty Malware Protection for the quarantine prefix.
+   *
+   * Any authenticated user can now upload an executable into this account, so
+   * the binaries get scanned before an admin can publish them. GuardDuty tags
+   * each object with `GuardDutyMalwareScanStatus`, and package-upload-service
+   * refuses to approve anything tagged THREATS_FOUND.
+   *
+   * Scoped to `quarantine/` because that is where unreviewed uploads land;
+   * objects only reach `packages/` after passing this gate. Opt out with
+   * ENABLE_MALWARE_SCANNING=false — GuardDuty must be enabled in the account
+   * for the plan to deploy.
+   */
+  private createMalwareProtection(): void {
+    if (process.env.ENABLE_MALWARE_SCANNING === 'false') {
+      return;
+    }
+
+    const scanRole = new iam.Role(this, 'PackagesMalwareScanRole', {
+      assumedBy: new iam.ServicePrincipal('malware-protection-plan.guardduty.amazonaws.com'),
+      description: 'Lets GuardDuty scan and tag uploaded bootstrap packages',
+    });
+
+    scanRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        's3:GetObject',
+        's3:GetObjectVersion',
+        's3:GetObjectTagging',
+        's3:GetObjectVersionTagging',
+        's3:PutObjectTagging',
+        's3:PutObjectVersionTagging',
+      ],
+      resources: [`${this.packagesBucket.bucketArn}/quarantine/*`],
+    }));
+    scanRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['s3:ListBucket', 's3:GetBucketLocation'],
+      resources: [this.packagesBucket.bucketArn],
+    }));
+    // Objects are SSE-KMS; GuardDuty cannot read them without the key.
+    scanRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['kms:GenerateDataKey', 'kms:Decrypt'],
+      resources: [this.kmsKey.keyArn],
+    }));
+    scanRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'events:PutRule',
+        'events:DeleteRule',
+        'events:PutTargets',
+        'events:RemoveTargets',
+        'events:DescribeRule',
+        'events:ListTargetsByRule',
+      ],
+      resources: [
+        `arn:aws:events:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtection*`,
+      ],
+    }));
+
+    new guardduty.CfnMalwareProtectionPlan(this, 'PackagesMalwareProtectionPlan', {
+      role: scanRole.roleArn,
+      protectedResource: {
+        s3Bucket: {
+          bucketName: this.packagesBucket.bucketName,
+          objectPrefixes: ['quarantine/'],
+        },
+      },
+      actions: {
+        // Tagging is what package-upload-service reads at approval time.
+        tagging: { status: 'ENABLED' },
+      },
+    });
+  }
+
   private createIAMRoles(): void {
     // EC2 Instance Role for workstations
     const workstationInstanceRole = new iam.Role(this, 'WorkstationInstanceRole', {
@@ -1190,7 +1389,18 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
       resources: [this.kmsKey.keyArn],
     }));
 
-    // Phase 1: Allow workstation to access its own package queue
+    // Allow a workstation to read and update ITS OWN package queue partition.
+    //
+    // The queue is partitioned by instance ARN specifically so this condition
+    // can be written. `ec2:SourceInstanceARN` is the only IAM condition key
+    // that identifies the calling instance, and it expands to a full ARN — so
+    // the partition key has to be the ARN for the two to line up.
+    //
+    // An earlier version of this statement used the same condition against a
+    // bare-instance-id key layout. It could never match, and because a policy
+    // variable that fails to resolve fails closed, it denied every request the
+    // installer service made. Changing the key format is what makes the
+    // intended scoping actually enforceable.
     workstationInstanceRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -1203,7 +1413,7 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
         `${this.tables.packageQueue.tableArn}/index/*`,
       ],
       conditions: {
-        'ForAllValues:StringLike': {
+        'ForAllValues:StringEquals': {
           'dynamodb:LeadingKeys': ['workstation#${ec2:SourceInstanceARN}'],
         },
       },
@@ -1247,6 +1457,26 @@ export class WorkstationInfrastructureStack extends cdk.Stack {
       resources: [
         'arn:aws:s3:::ec2-windows-nvidia-drivers',
         'arn:aws:s3:::ec2-windows-nvidia-drivers/*',
+      ],
+    }));
+
+    // Allow the package installer service to download ADMIN-APPROVED uploaded
+    // installers using instance profile credentials (no presigned URL, so
+    // nothing expires while a workstation sits stopped).
+    //
+    // Scoped to `packages/*` on purpose: `quarantine/*` holds binaries that no
+    // admin has reviewed yet, and this deliberate omission is what stops an
+    // unreviewed upload from ever executing on a workstation. kms:Decrypt on
+    // the CMK is already granted above, which covers the SSE-KMS object.
+    workstationInstanceRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [
+        `${this.packagesBucket.bucketArn}/packages/*`,
+        // Trial installs of a not-yet-approved package. An admin explicitly
+        // stages a single object here and names the workstation to run it on;
+        // objects expire after 2 days via lifecycle rule.
+        `${this.packagesBucket.bucketArn}/verify/*`,
       ],
     }));
 

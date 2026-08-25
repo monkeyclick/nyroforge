@@ -188,6 +188,9 @@ export class WorkstationApiStack extends cdk.Stack {
         GROUP_PACKAGE_BINDINGS_TABLE: props.tables.groupPackageBindings.tableName,
         USER_POOL_ID: props.userPool.userPoolId,
         KMS_KEY_ID: props.kmsKey.keyId,
+        // Needed to build the instance ARN the package queue is partitioned
+        // by, for invocations that do not carry an API Gateway request context.
+        DEPLOY_ACCOUNT_ID: cdk.Stack.of(this).account,
         VPC_ID: props.vpc.vpcId,
       },
       vpc: props.vpc,

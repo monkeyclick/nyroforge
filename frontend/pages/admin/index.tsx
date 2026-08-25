@@ -8,6 +8,7 @@ import { useAuthStore } from '@/stores/authStore'
 import SecurityManagement from '@/components/admin/SecurityManagement'
 import CostAnalytics from '@/components/admin/CostAnalytics'
 import BootstrapPackageManagement from '@/components/admin/BootstrapPackageManagement'
+import PackageReviewQueue from '@/components/admin/PackageReviewQueue'
 import AnalyticsDashboard from '@/components/admin/AnalyticsDashboard'
 import CognitoGroupsList from '@/components/admin/CognitoGroupsList'
 import EnhancedUserEditModal from '@/components/admin/EnhancedUserEditModal'
@@ -44,6 +45,19 @@ export default function AdminPage() {
   const queryClient = useQueryClient()
   const { addActivity, updateActivity } = useActivityStore()
   const [activeTab, setActiveTab] = useState<AdminTab>('workstations')
+
+  // Drives the review-queue badge so an admin sees waiting uploads without
+  // opening the tab. Polled rather than pushed: the analyzer finishes
+  // asynchronously, minutes after the upload does.
+  const { data: packageCatalog } = useQuery({
+    queryKey: ['admin-bootstrap-packages'],
+    queryFn: () => apiClient.getAdminBootstrapPackages(),
+    enabled: !!user && isAdmin,
+    refetchInterval: 60000,
+  })
+  const pendingPackageReviews = ((packageCatalog as any)?.packages || []).filter(
+    (pkg: any) => pkg.status === 'needs_review' || pkg.status === 'analysis_failed'
+  ).length
   const [userManagementSubTab, setUserManagementSubTab] = useState<'users' | 'groups'>('users')
   const [securityGroups, setSecurityGroups] = useState<any[]>([])
   const [selectedOsVersion, setSelectedOsVersion] = useState('windows-server-2025')
@@ -231,7 +245,11 @@ export default function AdminPage() {
       <div className="max-w-full mx-auto px-6 py-6">
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
           
-          <AdminNavigation activeTab={activeTab} onChange={setActiveTab} />
+          <AdminNavigation
+            activeTab={activeTab}
+            onChange={setActiveTab}
+            badges={{ 'package-review': pendingPackageReviews }}
+          />
 
           {/* CENTER: Content */}
           <div className="space-y-6 lg:col-span-7">
@@ -894,6 +912,10 @@ export default function AdminPage() {
 
             {activeTab === 'bootstrap' && (
               <BootstrapPackageManagement />
+            )}
+
+            {activeTab === 'package-review' && (
+              <PackageReviewQueue />
             )}
           </div>
 
