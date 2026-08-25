@@ -27,7 +27,7 @@ const path = require('path');
 
 const CONTEXT_KEY  = 'nyroforge:vpc-endpoints';
 const CONTEXT_FILE = path.join(__dirname, '..', 'cdk.context.json');
-const STACK_NAME   = 'WorkstationInfrastructureStack';
+const STACK_NAME   = 'WorkstationInfrastructure';
 
 // ---------------------------------------------------------------------------
 // Helpers

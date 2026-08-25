@@ -130,7 +130,6 @@ LAMBDA_FUNCTIONS=(
     "security-group-service"
     "cognito-admin-service"
     "ami-validation-service"
-    "instance-type-service"
     "bootstrap-config-service"
     "analytics-service"
     "user-attribute-change-processor"
@@ -215,27 +214,58 @@ echo "✅ Frontend stack deployed"
 
 echo ""
 echo "========================================="
-echo "Step 11: Deploying Website Stack"
+echo "Step 11: Initializing Admin System"
 echo "========================================="
 
-echo "Deploying WorkstationWebsite..."
-npx cdk deploy WorkstationWebsite --require-approval never
+# init-admin-system.js requires USER_POOL_ID. It used to run before the outputs
+# were fetched and without exporting anything, so it aborted every time with
+# "USER_POOL_ID environment variable is required".
+USER_POOL_ID=$(aws cloudformation describe-stacks \
+    --stack-name WorkstationInfrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' \
+    --output text --region "${AWS_REGION:-$(aws configure get region)}" 2>/dev/null || echo "")
 
-echo "✅ Website stack deployed"
+if [ -z "$USER_POOL_ID" ]; then
+    echo "❌ Could not read UserPoolId from WorkstationInfrastructure outputs"
+    exit 1
+fi
+export USER_POOL_ID
+
+echo "Running admin system initialization..."
+node scripts/init-admin-system.js
+echo "✅ Admin system initialized"
 
 echo ""
 echo "========================================="
-echo "Step 12: Initializing Admin System"
+echo "Step 12: Seeding Bootstrap Packages"
 echo "========================================="
 
-echo "Running admin system initialization..."
-if [ -f "scripts/init-admin-system.js" ]; then
-    node scripts/init-admin-system.js
-    echo "✅ Admin system initialized"
-else
-    echo "⚠️  Warning: scripts/init-admin-system.js not found, skipping initialization"
-    echo "You may need to create admin users manually"
-fi
+# Without this the catalog is empty, so workstations launch with no GPU driver
+# and no DCV remote-access server.
+BOOTSTRAP_PACKAGES_TABLE=$(aws cloudformation describe-stacks \
+    --stack-name WorkstationInfrastructure \
+    --query 'Stacks[0].Outputs[?OutputKey==`BootstrapPackagesTableName`].OutputValue' \
+    --output text --region "${AWS_REGION:-$(aws configure get region)}" 2>/dev/null || echo "")
+export BOOTSTRAP_PACKAGES_TABLE="${BOOTSTRAP_PACKAGES_TABLE:-WorkstationBootstrapPackages}"
+
+node scripts/seed-bootstrap-packages.js
+node scripts/seed-dcv-package.js
+echo "✅ Package catalog seeded"
+
+echo ""
+echo "========================================="
+echo "Step 12b: Deploying Website and Web UI"
+echo "========================================="
+
+# The website's content is the compiled UI, which inlines the API and Cognito
+# IDs at build time — so it can only be built now, not before Step 8.
+echo "Deploying WorkstationWebsite..."
+npx cdk deploy WorkstationWebsite --require-approval never
+
+echo "Building and publishing the web UI..."
+./scripts/deploy-frontend.sh
+
+echo "✅ Website and web UI deployed"
 
 echo ""
 echo "========================================="
@@ -267,7 +297,7 @@ USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
 # Get CloudFront URL
 CLOUDFRONT_URL=$(aws cloudformation describe-stacks \
     --stack-name WorkstationWebsite \
-    --query 'Stacks[0].Outputs[?OutputKey==`WebsiteURL`].OutputValue' \
+    --query 'Stacks[0].Outputs[?OutputKey==`WebsiteUrl`].OutputValue' \
     --output text 2>/dev/null || echo "Not available")
 
 echo "========================================="

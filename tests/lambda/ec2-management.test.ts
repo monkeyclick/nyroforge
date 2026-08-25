@@ -22,6 +22,7 @@ import { EC2Client } from '@aws-sdk/client-ec2';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { SSMClient } from '@aws-sdk/client-ssm';
+import { unmarshall } from '@aws-sdk/util-dynamodb';
 
 const mockEC2Send = jest.fn();
 const mockDynamoSend = jest.fn();
@@ -139,6 +140,7 @@ describe('EC2 Management Lambda', () => {
         region: 'us-west-2',
         instanceType: 'g4dn.xlarge',
         osVersion: 'Windows Server 2019',
+        friendlyName: "Alice's Render Box",
         authMethod: 'local',
         localAdminConfig: { username: 'Administrator' },
         autoTerminateHours: 24,
@@ -156,9 +158,9 @@ describe('EC2 Management Lambda', () => {
         headers: { 'X-Forwarded-For': '1.2.3.4' },
       };
 
-      // SSM: allowed instance types, then instance profile ARN
+      // SSM: allowed instance families (expanded to types via shared/instanceFamilies), then instance profile ARN
       mockSSMSend
-        .mockResolvedValueOnce({ Parameter: { Value: JSON.stringify(['g4dn.xlarge', 'g5.xlarge']) } })
+        .mockResolvedValueOnce({ Parameter: { Value: JSON.stringify(['g4dn', 'g5']) } })
         .mockResolvedValueOnce({ Parameter: { Value: 'arn:aws:iam::123456789012:instance-profile/WorkstationProfile' } });
 
       // EC2: subnets, security groups, AMIs, then run instances
@@ -198,6 +200,21 @@ describe('EC2 Management Lambda', () => {
       expect(body.workstationId).toBeDefined();
       expect(body.instanceId).toBe('i-newinstance123');
       expect(body.status).toBe('launching');
+
+      // friendlyName should become the EC2 instance's Name tag...
+      const runInstancesCall = mockEC2Send.mock.calls.find(
+        ([command]: any[]) => command.constructor.name === 'RunInstancesCommand'
+      );
+      const nameTag = runInstancesCall[0].input.TagSpecifications
+        .find((spec: any) => spec.ResourceType === 'instance').Tags
+        .find((tag: any) => tag.Key === 'Name');
+      expect(nameTag.Value).toBe("Alice's Render Box");
+
+      // ...and be stored on the workstation record for the dashboard to display.
+      const putItemCall = mockDynamoSend.mock.calls.find(
+        ([command]: any[]) => command.constructor.name === 'PutItemCommand' && command.input.Item.PK
+      );
+      expect(unmarshall(putItemCall[0].input.Item).friendlyName).toBe("Alice's Render Box");
     });
 
     it('should reject invalid instance type', async () => {
@@ -220,7 +237,7 @@ describe('EC2 Management Lambda', () => {
       };
 
       mockSSMSend.mockResolvedValueOnce({
-        Parameter: { Value: JSON.stringify(['g4dn.xlarge', 'g5.xlarge']) },
+        Parameter: { Value: JSON.stringify(['g4dn', 'g5']) },
       });
 
       const result = await handler(event as APIGatewayProxyEvent, mockContext);

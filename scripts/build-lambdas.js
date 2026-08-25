@@ -14,7 +14,6 @@ const lambdaFunctions = [
   'security-group-service',
   'cognito-admin-service',
   'ami-validation-service',
-  'instance-type-service',
   'bootstrap-config-service',
   'analytics-service',
   'user-attribute-change-processor',
@@ -24,7 +23,8 @@ const lambdaFunctions = [
   'ec2-discovery-service',
   'instance-family-service',
   'package-upload-service',
-  'package-analyzer'
+  'package-analyzer',
+  'deployment-doctor-service'
 ];
 
 const buildLambda = async (functionName) => {

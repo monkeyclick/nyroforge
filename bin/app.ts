@@ -20,11 +20,18 @@ const env = {
 // Determine environment type
 const environmentType = (process.env.ENVIRONMENT || 'dev') as 'dev' | 'staging' | 'prod';
 
+// Optional stack-name prefix, empty by default so existing deployments keep the
+// stack names (and therefore every logical ID) they already have. Set it —
+// alongside NYROFORGE_RESOURCE_PREFIX, see lib/constants.ts — to stand up a
+// second isolated environment in the same account and region.
+const stackPrefix = process.env.STACK_PREFIX ?? '';
+const stackName = (base: string) => `${stackPrefix}${base}`;
+
 // Core infrastructure stack (VPC, DynamoDB, Cognito, IAM)
 // NOTE: VPC resources are set to RETAIN by default to prevent deletion failures
 // when external resources (EKS clusters, Lambda ENIs) are using the subnets.
 // Set RETAIN_VPC_ON_DELETE=false to disable this behavior.
-const infraStack = new WorkstationInfrastructureStack(app, 'WorkstationInfrastructure', {
+const infraStack = new WorkstationInfrastructureStack(app, stackName('WorkstationInfrastructure'), {
   env,
   description: 'Core infrastructure for Media Workstation Automation System',
   // Retain VPC resources on delete to prevent "subnet has dependencies" errors
@@ -38,7 +45,7 @@ const infraStack = new WorkstationInfrastructureStack(app, 'WorkstationInfrastru
 });
 
 // Enterprise Storage stack (EFS, FSx, S3 Transfer)
-const storageStack = new EnterpriseStorageStack(app, 'WorkstationStorage', {
+const storageStack = new EnterpriseStorageStack(app, stackName('WorkstationStorage'), {
   env,
   description: 'Enterprise storage solutions for Media Workstation System',
   vpc: infraStack.vpc,
@@ -68,7 +75,7 @@ const storageStack = new EnterpriseStorageStack(app, 'WorkstationStorage', {
 });
 
 // API stack (Lambda functions, API Gateway - core user-facing endpoints)
-const apiStack = new WorkstationApiStack(app, 'WorkstationApi', {
+const apiStack = new WorkstationApiStack(app, stackName('WorkstationApi'), {
   env,
   description: 'API services for Media Workstation Automation System',
   vpc: infraStack.vpc,
@@ -78,7 +85,7 @@ const apiStack = new WorkstationApiStack(app, 'WorkstationApi', {
 });
 
 // Admin API stack (Lambda functions, API Gateway - admin endpoints)
-const adminApiStack = new WorkstationAdminApiStack(app, 'WorkstationAdminApi', {
+const adminApiStack = new WorkstationAdminApiStack(app, stackName('WorkstationAdminApi'), {
   env,
   description: 'Admin API services for Media Workstation Automation System',
   vpc: infraStack.vpc,
@@ -88,8 +95,8 @@ const adminApiStack = new WorkstationAdminApiStack(app, 'WorkstationAdminApi', {
   packagesBucket: infraStack.packagesBucket,
 });
 
-// Frontend stack (Amplify app)
-const frontendStack = new WorkstationFrontendStack(app, 'WorkstationFrontend', {
+// Frontend runtime configuration (Parameter Store)
+const frontendStack = new WorkstationFrontendStack(app, stackName('WorkstationFrontend'), {
   env,
   description: 'Frontend application for Media Workstation Automation System',
   userPool: infraStack.userPool,
@@ -98,7 +105,7 @@ const frontendStack = new WorkstationFrontendStack(app, 'WorkstationFrontend', {
 });
 
 // Website stack (S3 + CloudFront for web interface)
-const websiteStack = new WorkstationWebsiteStack(app, 'WorkstationWebsite', {
+const websiteStack = new WorkstationWebsiteStack(app, stackName('WorkstationWebsite'), {
   env,
   description: 'Static website hosting for Media Workstation Management UI',
 });
@@ -109,6 +116,12 @@ apiStack.addDependency(infraStack);
 adminApiStack.addDependency(infraStack);
 frontendStack.addDependency(apiStack);
 frontendStack.addDependency(adminApiStack);
+// The website's content is the compiled UI, which inlines the API and Cognito
+// values at build time. Ordering it last means `cdk deploy --all` publishes it
+// after those endpoints exist, so a rebuilt bundle is never uploaded ahead of
+// the backend it points at.
+websiteStack.addDependency(apiStack);
+websiteStack.addDependency(infraStack);
 
 // Add tags to all stacks. The Project tag value is the single source of truth
 // in lib/constants.ts — IAM tag-condition scoping in the API stacks depends on

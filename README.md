@@ -92,21 +92,47 @@ aws configure
 ```
 
 The script will:
-- ✅ Verify all prerequisites (Node.js, npm, AWS CLI, CDK)
-- ✅ Install dependencies automatically
-- ✅ Prompt for configuration (region, admin email, domain settings)
-- ✅ Bootstrap and deploy CDK stacks
-- ✅ Create admin user with temporary password
-- ✅ Configure system parameters
+- ✅ Verify all prerequisites (Node.js, npm, AWS CLI, CDK bootstrap version)
+- ✅ Install dependencies and build the Lambda bundles
+- ✅ Prompt for configuration (region, admin email and name)
+- ✅ Deploy the backend CDK stacks
+- ✅ Create the admin user and add them to the `workstation-admin` group
+- ✅ Seed the bootstrap package catalog (GPU driver, DCV, common apps)
+- ✅ Build the web UI against the deployed endpoints and publish it
 - ✅ Save deployment information to `deployment-info.txt`
 
 **Deployment time:** ~20-25 minutes
 
+The script runs in two phases, because the web UI compiles the API Gateway and
+Cognito IDs into its bundle at build time — so it can only be built after the
+backend exists. Every step is idempotent: if it fails it tells you which step,
+and you can just re-run it.
+
 After deployment completes, check `deployment-info.txt` for:
 - CloudFront URL for accessing the application
-- Admin username and temporary password
 - API endpoint URL
 - User Pool ID
+
+The admin temporary password is printed to the terminal only — save it before
+closing the session.
+
+To rebuild and republish only the web UI later:
+
+```bash
+./scripts/deploy-frontend.sh
+```
+
+### Deployment doctor
+
+Run the read-only doctor before or after deployment to verify local tools, AWS identity and region, networking, GPU capacity, Cognito administration, Windows AMI availability, SSM configuration, application endpoints, cost controls, and remote-access rules:
+
+```bash
+npm run doctor -- --region us-west-2
+npm run doctor -- --region us-west-2 --profile sandbox --outputs cdk-outputs.json
+npm run --silent doctor -- --json --region us-west-2 > doctor-report.json
+```
+
+The doctor only invokes bounded, read-only AWS CLI operations. It does not create, update, or delete resources and does not test end-to-end workstation connectivity. Missing optional or not-yet-deployed configuration is reported as a warning or skipped check. Exit code `0` means no required check failed, `1` means at least one required check failed, and `2` means the command arguments were invalid. Use `npm run doctor -- --help` for all options.
 
 ### Manual Deploy (Advanced Users)
 
@@ -116,33 +142,39 @@ git clone https://github.com/monkeyclick/nyroforge.git
 cd nyroforge
 npm install
 
-# 2. Configure AWS
+# 2. Build the Lambda bundles (required — dist/ is gitignored, and every
+#    Lambda's CDK asset points at dist/lambda/<service>)
+npm run build:lambdas
+
+# 3. Configure AWS
 export CDK_DEFAULT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 export CDK_DEFAULT_REGION=us-west-2
+export AWS_REGION=$CDK_DEFAULT_REGION
 
-# 3. Bootstrap and deploy
+# 4. Bootstrap and deploy the backend
 cdk bootstrap
-cdk deploy --all --outputs-file cdk-outputs.json
+cdk deploy WorkstationInfrastructure WorkstationStorage \
+  WorkstationApi WorkstationAdminApi WorkstationFrontend \
+  --outputs-file cdk-outputs.json
 
-# 4. Create admin user
-USER_POOL_ID=$(cat cdk-outputs.json | jq -r '.WorkstationInfrastructure.UserPoolId')
-ADMIN_PASSWORD=$(openssl rand -base64 16 | tr -d '+/=' | head -c 16)'!A1'
-aws cognito-idp admin-create-user \
-  --user-pool-id $USER_POOL_ID \
-  --username admin@yourcompany.com \
-  --user-attributes Name=email,Value=admin@yourcompany.com \
-  --temporary-password "$ADMIN_PASSWORD" \
-  --message-action SUPPRESS
-echo "Temporary password: $ADMIN_PASSWORD"
-echo "⚠️  Save this password - change it on first login."
+# 5. Create the admin user (given_name and family_name are required attributes)
+USER_POOL_ID=$(jq -r '.WorkstationInfrastructure.UserPoolId' cdk-outputs.json)
+USER_POOL_ID="$USER_POOL_ID" ADMIN_EMAIL=admin@yourcompany.com \
+  ADMIN_FIRST_NAME=System ADMIN_LAST_NAME=Administrator \
+  node scripts/init-admin-system.js
 
-aws cognito-idp admin-add-user-to-group \
-  --user-pool-id $USER_POOL_ID \
-  --username admin@yourcompany.com \
-  --group-name workstation-admin
+# 6. Seed the bootstrap package catalog — without it, workstations launch with
+#    no GPU driver and no DCV remote-access server
+export BOOTSTRAP_PACKAGES_TABLE=$(jq -r '.WorkstationInfrastructure.BootstrapPackagesTableName' cdk-outputs.json)
+node scripts/seed-bootstrap-packages.js
+node scripts/seed-dcv-package.js
+
+# 7. Build and publish the web UI
+cdk deploy WorkstationWebsite --require-approval never
+./scripts/deploy-frontend.sh
 ```
 
-> **Note:** Passwords must be at least 8 characters and include uppercase, lowercase, numbers, and special characters. Never commit real passwords to source control.
+> **Note:** Passwords must be at least 12 characters and include uppercase, lowercase, numbers, and special characters. Never commit real passwords to source control.
 
 **Deployment time:** ~20 minutes
 

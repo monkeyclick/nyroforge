@@ -4,6 +4,10 @@ node_modules/
 # CDK
 cdk.out/
 .cdk.staging/
+cdk-outputs*.json
+
+# Deployment artifacts (deploy-one-click.sh)
+deployment-info.txt
 
 
 # Environment variables

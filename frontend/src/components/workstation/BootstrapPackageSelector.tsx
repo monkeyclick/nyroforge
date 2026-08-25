@@ -241,14 +241,20 @@ export const BootstrapPackageSelector: React.FC<BootstrapPackageSelectorProps> =
 
     return (
       <div key={pkg.packageId}>
-        <div className="flex items-center gap-2 py-1 hover:bg-white rounded px-1 group">
+        <div
+          className={`flex items-center gap-2 py-1 rounded px-1 group ${
+            isChecked ? 'bg-violet-50' : 'hover:bg-white'
+          }`}
+        >
           <input
             type="checkbox"
             id={pkg.packageId}
             checked={isChecked}
             disabled={isDisabled}
             onChange={() => handlePackageToggle(pkg)}
-            className={`w-4 h-4 shrink-0 ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+            className={`w-4 h-4 shrink-0 rounded ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'} ${
+              isChecked ? 'ring-2 ring-violet-500' : ''
+            }`}
             title={isDisabled ? 'This package is required and cannot be deselected' : ''}
           />
           <label
@@ -258,7 +264,10 @@ export const BootstrapPackageSelector: React.FC<BootstrapPackageSelectorProps> =
             }`}
           >
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span>{pkg.name}</span>
+              {isChecked && (
+                <span className="text-violet-600 font-bold" aria-hidden="true">✓</span>
+              )}
+              <span className={isChecked ? 'font-semibold text-violet-900' : ''}>{pkg.name}</span>
               {pkg.metadata?.version && (
                 <span className="text-gray-500">v{pkg.metadata.version}</span>
               )}

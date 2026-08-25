@@ -6,6 +6,7 @@ import { logEvent } from '../shared/logging';
 import { scanAllItems, queryAllItems } from '../shared/dynamo';
 import { describeInstancesByIds, describeInstancesByFilters } from '../shared/ec2';
 import { instanceArn, queuePartitionKey } from '../shared/packages';
+import { getAllowedInstanceTypes } from '../shared/instanceFamilies';
 import { SecretsManagerClient, CreateSecretCommand, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { SSMClient, GetParameterCommand, SendCommandCommand } from '@aws-sdk/client-ssm';
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
@@ -91,6 +92,7 @@ interface LaunchWorkstationRequest {
   region: string;
   instanceType: string;
   osVersion: string;
+  friendlyName?: string;
   authMethod: 'domain' | 'local';
   domainConfig?: {
     domainName: string;
@@ -193,6 +195,23 @@ interface BootstrapPackage {
   order: number;
   estimatedInstallTimeMinutes: number;
   metadata?: Record<string, any>;
+}
+
+// WorkstationBootstrapPackages stores isRequired as the STRING "true"/"false"
+// (verified against every live catalog entry), not a DynamoDB BOOL — despite the
+// `boolean` type above. A naive `pkg.isRequired` truthy check treats the string
+// "false" as truthy (any non-empty string is), so every package silently matched
+// as required regardless of its actual flag. Coerce explicitly instead.
+function isPackageRequired(pkg: BootstrapPackage): boolean {
+  return (pkg.isRequired as unknown) === true || (pkg.isRequired as unknown) === 'true';
+}
+
+// `isEnabled` has the same string-vs-boolean hazard: it is a real boolean on
+// most rows, but older seed data wrote the string "true". A bare truthy check
+// would let a disabled row stored as "false" through, installing software an
+// admin had switched off.
+function isPackageEnabled(pkg: BootstrapPackage): boolean {
+  return (pkg.isEnabled as unknown) === true || (pkg.isEnabled as unknown) === 'true';
 }
 
 interface WorkstationRecord {
@@ -503,7 +522,7 @@ async function createPackageQueueItems(
   accountId: string
 ): Promise<void> {
   console.log(`[createPackageQueueItems] Creating ${packages.length} queue items for instance ${instanceId}`);
-  
+
   try {
     const timestamp = new Date().toISOString();
     const ttl = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60); // 30 days
@@ -536,7 +555,7 @@ async function createPackageQueueItems(
         expectedSha256: pkg.expectedSha256,
         status: 'pending',
         installOrder: pkg.order,
-        required: pkg.isRequired,
+        required: isPackageRequired(pkg),
         retryCount: 0,
         maxRetries: 3,
         createdAt: timestamp,
@@ -878,7 +897,7 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
   try {
     // Validate instance type
     console.log('Validating instance type...');
-    const allowedTypes = await getAllowedInstanceTypes();
+    const allowedTypes = await getAllowedInstanceTypes(ssmClient);
     console.log('Allowed instance types:', allowedTypes);
     
     if (!allowedTypes.includes(request.instanceType)) {
@@ -963,7 +982,7 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
     // Split packages: UserData (critical) vs Post-boot
     const criticalCategories = ['driver', 'dcv', 'monitoring'];
     const userDataPackages = allPackages.filter(pkg =>
-      pkg.isRequired ||
+      isPackageRequired(pkg) ||
       pkg.type === 'driver' ||
       criticalCategories.includes(pkg.category?.toLowerCase() || '')
     );
@@ -1032,7 +1051,7 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
         
         // Merge tags: system defaults first, user tags override on conflict, deduplicate by key
         const systemTags = [
-          { Key: 'Name', Value: `MediaWorkstation-${workstationId}` },
+          { Key: 'Name', Value: request.friendlyName?.trim() || `MediaWorkstation-${workstationId}` },
           { Key: 'CostCenter', Value: costAllocationTags.CostCenter },
           { Key: 'Environment', Value: costAllocationTags.Environment },
           { Key: 'Project', Value: costAllocationTags.Project },
@@ -1154,6 +1173,7 @@ async function launchWorkstation(request: LaunchWorkstationRequest, userId: stri
       instanceId,
       userId,
       userRole: 'user',
+      friendlyName: request.friendlyName?.trim() || undefined,
       region: request.region,
       availabilityZone: runResult.Instances?.[0]?.Placement?.AvailabilityZone || '',
       instanceType: request.instanceType,
@@ -2484,20 +2504,6 @@ async function updateWorkstation(workstationId: string, updateRequest: UpdateWor
 }
 
 // Helper functions
-async function getAllowedInstanceTypes(): Promise<string[]> {
-  try {
-    const getCommand = new GetParameterCommand({
-      Name: '/workstation/config/allowedInstanceTypes',
-    });
-
-    const result = await ssmClient.send(getCommand);
-    return JSON.parse(result.Parameter?.Value || '[]');
-  } catch (error) {
-    console.warn('Could not fetch allowed instance types from SSM, using defaults');
-    // Return default types if SSM parameter doesn't exist
-    return ['g4dn.xlarge', 'g4dn.2xlarge', 'g5.xlarge', 'g5.2xlarge', 'g6.xlarge'];
-  }
-}
 
 async function getLatestWindowsAMI(osVersion: string): Promise<string | null> {
   // Handle multiple format variations
@@ -2653,7 +2659,7 @@ async function getBootstrapPackages(instanceType: string, osVersion: string, sel
     });
 
     const allPackages = (items as BootstrapPackage[])
-      .filter(pkg => pkg.isEnabled); // Only enabled packages
+      .filter(isPackageEnabled); // Only enabled packages
 
     // Determine if this is a GPU instance
     const isGpuInstance = instanceType.startsWith('g4') || instanceType.startsWith('g5') || instanceType.startsWith('g6');
@@ -2681,7 +2687,7 @@ async function getBootstrapPackages(instanceType: string, osVersion: string, sel
       }
 
       // Include if required OR if user selected it
-      if (pkg.isRequired || selectedPackageIds.includes(pkg.packageId)) {
+      if (isPackageRequired(pkg) || selectedPackageIds.includes(pkg.packageId)) {
         packages.push(pkg);
       }
     }
@@ -2704,18 +2710,24 @@ function generateUserDataScript(request: LaunchWorkstationRequest, workstationId
       return `try { ${pkg.installArgs || pkg.installCommand} } catch { }`;
     }
     
-    // Replace INSTALLER_PATH placeholder in installArgs with actual download path
-    let installArgs = pkg.installArgs ? pkg.installArgs.replace(/INSTALLER_PATH/g, downloadPath) : '';
-    
-    // For msiexec commands, the installArgs should be quoted as a single string
-    if (pkg.installCommand && pkg.installCommand.includes('msiexec') && installArgs && !installArgs.startsWith('"')) {
-      installArgs = `"${installArgs}"`;
-    }
-    
+    // Every catalog entry stores a full command in `installCommand` with a
+    // `${INSTALLER}` placeholder for the downloaded file's path (verified against
+    // all 12 live entries in WorkstationBootstrapPackages — `installArgs` is null
+    // on every one of them). Substitute it here. This previously only replaced a
+    // separate `INSTALLER_PATH` placeholder inside `installArgs`, which no real
+    // catalog entry populates — so `${INSTALLER}` was left as literal, meaningless
+    // text in the generated PowerShell (e.g. `Start-Process -FilePath '${INSTALLER}'`),
+    // Start-Process/msiexec failed immediately on the empty/invalid path, and the
+    // surrounding try/catch swallowed it silently — every package silently failed
+    // to install, on every launch.
+    const resolvedInstallCommand = pkg.installCommand.split('${INSTALLER}').join(downloadPath);
+    // Kept for any future catalog entry that uses the older installArgs-based convention.
+    const legacyArgs = pkg.installArgs ? pkg.installArgs.replace(/INSTALLER_PATH/g, downloadPath) : '';
+
     return `
 try {
   Invoke-WebRequest -Uri "${pkg.downloadUrl}" -OutFile "${downloadPath}" -UseBasicParsing
-  ${pkg.installCommand} ${installArgs}
+  ${resolvedInstallCommand} ${legacyArgs}
   if (Test-Path "${downloadPath}") { Remove-Item "${downloadPath}" -Force }
 } catch { }`;
   }).join('\n');

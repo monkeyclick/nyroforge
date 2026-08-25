@@ -9,7 +9,9 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
 
-const client = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-west-2' });
+const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'us-west-2';
+
+const client = new DynamoDBClient({ region: REGION });
 const docClient = DynamoDBDocumentClient.from(client);
 
 const TABLE_NAME = process.env.BOOTSTRAP_PACKAGES_TABLE || 'WorkstationBootstrapPackages';
@@ -21,8 +23,13 @@ const dcvPackage = {
   type: 'application',
   category: 'remote-access',
   downloadUrl: 'https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-server-x64-Release.msi',
-  installCommand: 'Start-Process msiexec.exe -ArgumentList',
-  installArgs: '/i INSTALLER_PATH /quiet /norestart ADDLOCAL=ALL',
+  // Full command with the ${INSTALLER} placeholder the launcher substitutes.
+  // This used to split the command across installCommand/installArgs and use an
+  // INSTALLER_PATH placeholder that nothing substitutes, so the generated
+  // PowerShell was `Start-Process msiexec.exe -ArgumentList /i INSTALLER_PATH …`
+  // — msiexec failed instantly and DCV was never installed on any workstation.
+  installCommand: 'Start-Process -FilePath msiexec.exe -ArgumentList "/i ${INSTALLER} /quiet /norestart ADDLOCAL=ALL" -Wait',
+  installArgs: null,
   requiresGpu: false,
   supportedGpuFamilies: [], // Works with or without GPU
   osVersions: [
@@ -32,7 +39,7 @@ const dcvPackage = {
     'windows-server-2016'
   ],
   isRequired: 'false', // Optional package, user can choose RDP or DCV (stored as string for GSI)
-  isEnabled: 'true', // Stored as string for GSI compatibility
+  isEnabled: true, // Not a GSI key — a real boolean, so the launcher's isEnabled filter works
   order: 15, // Install after drivers but before applications
   estimatedInstallTimeMinutes: 5,
   metadata: {
@@ -60,7 +67,7 @@ async function seedDcvPackage() {
   console.log('Amazon DCV Bootstrap Package Seeding Script');
   console.log('='.repeat(80));
   console.log(`Target Table: ${TABLE_NAME}`);
-  console.log(`AWS Region: ${process.env.AWS_REGION || 'us-west-2'}`);
+  console.log(`AWS Region: ${REGION}`);
   console.log('');
 
   try {
@@ -85,7 +92,8 @@ async function seedDcvPackage() {
     console.log('Package Configuration:');
     console.log(`  - Installation Order: ${dcvPackage.order}`);
     console.log(`  - Estimated Install Time: ${dcvPackage.estimatedInstallTimeMinutes} minutes`);
-    console.log(`  - Required: ${dcvPackage.isRequired ? 'Yes' : 'No (Optional)'}`);
+    // isRequired is the STRING "false" here, which is truthy — compare it.
+    console.log(`  - Required: ${dcvPackage.isRequired === 'true' ? 'Yes' : 'No (Optional)'}`);
     console.log(`  - Enabled: ${dcvPackage.isEnabled ? 'Yes' : 'No'}`);
     console.log('');
     console.log('Supported OS Versions:');

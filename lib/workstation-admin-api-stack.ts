@@ -8,7 +8,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
-import { PROJECT_TAG } from './constants';
+import { PROJECT_TAG, resourceName } from './constants';
 import { ServiceLambda } from './service-lambda';
 
 interface WorkstationAdminApiStackProps extends cdk.StackProps {
@@ -147,7 +147,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const cognitoAdminServiceRole = createFunctionRole('CognitoAdminService');
     const cognitoAdminServiceFunction = new ServiceLambda(this, 'CognitoAdminService', {
       ...lambdaDefaults,
-      functionName: 'workstation-cognito-admin-service',
+      functionName: resourceName('workstation-cognito-admin-service'),
       serviceDir: 'cognito-admin-service',
       description: 'Handles Cognito user and group administration',
       role: cognitoAdminServiceRole,
@@ -184,7 +184,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const groupManagementServiceRole = createFunctionRole('GroupManagementService');
     const groupManagementServiceFunction = new ServiceLambda(this, 'GroupManagementService', {
       ...lambdaDefaults,
-      functionName: 'workstation-group-management-service',
+      functionName: resourceName('workstation-group-management-service'),
       serviceDir: 'group-management-service',
       description: 'Handles group management operations',
       role: groupManagementServiceRole,
@@ -208,7 +208,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const securityGroupServiceRole = createFunctionRole('SecurityGroupService');
     const securityGroupServiceFunction = new ServiceLambda(this, 'SecurityGroupService', {
       ...lambdaDefaults,
-      functionName: 'workstation-security-group-service',
+      functionName: resourceName('workstation-security-group-service'),
       serviceDir: 'security-group-service',
       description: 'Handles security group management',
       role: securityGroupServiceRole,
@@ -281,7 +281,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const amiValidationServiceRole = createFunctionRole('AmiValidationService');
     const amiValidationServiceFunction = new ServiceLambda(this, 'AmiValidationService', {
       ...lambdaDefaults,
-      functionName: 'workstation-ami-validation-service',
+      functionName: resourceName('workstation-ami-validation-service'),
       serviceDir: 'ami-validation-service',
       description: 'Validates AMI IDs and retrieves AMI information',
       role: amiValidationServiceRole,
@@ -296,46 +296,12 @@ export class WorkstationAdminApiStack extends cdk.Stack {
       }
     }));
 
-    // --- Instance Type Service ---
-    // No DynamoDB access. Only ec2:DescribeInstanceTypes (DescribeImages is
-    // not called by this handler). SSM statement copied as-is from the
-    // shared role (Get/Put/Delete on /workstation/*) even though this
-    // handler only exercises Get/Put — Delete is kept to match the existing
-    // grantable statement rather than splitting a single policy mid-action.
-    // No SecureString/KMS-encrypted params are involved (the parameter this
-    // handler writes is a plain String type), so no KMS grant is needed.
-    const instanceTypeServiceRole = createFunctionRole('InstanceTypeService');
-    const instanceTypeServiceFunction = new ServiceLambda(this, 'InstanceTypeService', {
-      ...lambdaDefaults,
-      functionName: 'workstation-instance-type-service',
-      serviceDir: 'instance-type-service',
-      description: 'Manages allowed instance types',
-      role: instanceTypeServiceRole,
-    });
-    instanceTypeServiceFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['ec2:DescribeInstanceTypes'],
-      resources: ['*'],
-      conditions: {
-        'StringEquals': {
-          'aws:RequestedRegion': cdk.Stack.of(this).region,
-        }
-      }
-    }));
-    instanceTypeServiceFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: [
-        'ssm:GetParameter',
-        'ssm:PutParameter',
-        'ssm:DeleteParameter',
-      ],
-      resources: [ssmWorkstationParameterArn],
-    }));
-
     // --- Bootstrap Config Service ---
     // Only ever touches the BootstrapPackages table.
     const bootstrapConfigServiceRole = createFunctionRole('BootstrapConfigService');
     const bootstrapConfigServiceFunction = new ServiceLambda(this, 'BootstrapConfigService', {
       ...lambdaDefaults,
-      functionName: 'workstation-bootstrap-config-service',
+      functionName: resourceName('workstation-bootstrap-config-service'),
       serviceDir: 'bootstrap-config-service',
       description: 'Manages bootstrap package configurations',
       role: bootstrapConfigServiceRole,
@@ -446,7 +412,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const groupPackageServiceRole = createFunctionRole('GroupPackageService');
     const groupPackageServiceFunction = new ServiceLambda(this, 'GroupPackageService', {
       ...lambdaDefaults,
-      functionName: 'workstation-group-package-service',
+      functionName: resourceName('workstation-group-package-service'),
       serviceDir: 'group-package-service',
       description: 'Manages group-specific package assignments',
       role: groupPackageServiceRole,
@@ -463,7 +429,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     // SSM parameters under /workstation/storage/* for the EFS file system
     // and access point IDs (falling back to SSM for the transfer bucket
     // name too), so it needs the same /workstation/* SSM statement as
-    // instance-type-service/instance-family-service — the original grant
+    // instance-family-service — the original grant
     // matrix omitted this, but the handler cannot fetch its own config
     // without it. Those SSM parameters are plain String type (see
     // lib/enterprise-storage-construct.ts / enterprise-storage-stack.ts:
@@ -471,7 +437,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const storageServiceRole = createFunctionRole('StorageService');
     const storageServiceFunction = new ServiceLambda(this, 'StorageService', {
       ...lambdaDefaults,
-      functionName: 'workstation-storage-service',
+      functionName: resourceName('workstation-storage-service'),
       serviceDir: 'storage-service',
       description: 'Handles storage management operations',
       role: storageServiceRole,
@@ -544,7 +510,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const ec2DiscoveryServiceRole = createFunctionRole('Ec2DiscoveryService');
     const ec2DiscoveryServiceFunction = new ServiceLambda(this, 'Ec2DiscoveryService', {
       ...lambdaDefaults,
-      functionName: 'workstation-ec2-discovery-service',
+      functionName: resourceName('workstation-ec2-discovery-service'),
       serviceDir: 'ec2-discovery-service',
       description: 'Discovers and imports existing EC2 instances',
       role: ec2DiscoveryServiceRole,
@@ -586,11 +552,11 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     // helper). Workstations is read-WRITE, not read-only as the original
     // matrix assumed: saveInstanceFamilyConfig() stores the instance-family
     // allowlist as an item in the Workstations table (PutItem with
-    // PK=CONFIG#INSTANCE_FAMILIES). SSM statement mirrors instance-type-service.
+    // PK=CONFIG#INSTANCE_FAMILIES).
     const instanceFamilyServiceRole = createFunctionRole('InstanceFamilyService');
     const instanceFamilyServiceFunction = new ServiceLambda(this, 'InstanceFamilyService', {
       ...lambdaDefaults,
-      functionName: 'workstation-instance-family-service',
+      functionName: resourceName('workstation-instance-family-service'),
       serviceDir: 'instance-family-service',
       description: 'Manages allowed EC2 instance families for deployments',
       role: instanceFamilyServiceRole,
@@ -639,7 +605,7 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const userManagementServiceRole = createFunctionRole('UserManagementService');
     const userManagementServiceFunction = new ServiceLambda(this, 'UserManagementService', {
       ...lambdaDefaults,
-      functionName: 'workstation-user-management-service',
+      functionName: resourceName('workstation-user-management-service'),
       serviceDir: 'user-management-service',
       description: 'Handles user deletion (soft/hard) and password management operations',
       timeout: cdk.Duration.seconds(60), // Longer timeout for deletion operations
@@ -672,6 +638,75 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     userManagementServiceFunction.addToRolePolicy(new iam.PolicyStatement({
       actions: ['ses:SendEmail'],
       resources: ['*'], // SES doesn't support resource-level permissions for most operations
+    }));
+
+    // --- Deployment Doctor Service ---
+    // This function is intentionally not attached to the VPC and does not use
+    // the broader AWSLambdaVPCAccessExecutionRole. It performs only bounded,
+    // read-only control-plane calls and has no DynamoDB, KMS, Secrets Manager,
+    // or mutation permissions.
+    const deploymentDoctorServiceRole = new iam.Role(this, 'DeploymentDoctorServiceRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+    });
+    deploymentDoctorServiceRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: ['*'],
+    }));
+    const deploymentDoctorServiceFunction = new ServiceLambda(this, 'DeploymentDoctorService', {
+      ...lambdaDefaults,
+      functionName: 'workstation-deployment-doctor-service',
+      serviceDir: 'deployment-doctor-service',
+      description: 'Runs bounded read-only deployment diagnostics for administrators',
+      role: deploymentDoctorServiceRole,
+      environment: {
+        ...commonEnv,
+        VPC_ID: vpc.vpcId,
+        USER_POOL_ID: userPool.userPoolId,
+        DEFAULT_AMI_ID: process.env.WORKSTATION_AMI_ID || '',
+      },
+    });
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:DescribeImages',
+        'ec2:DescribeInstanceTypeOfferings',
+        'ec2:DescribeSecurityGroups',
+        'ec2:DescribeSubnets',
+        'ec2:DescribeVpcEndpoints',
+        'ec2:DescribeVpcs',
+      ],
+      resources: ['*'],
+      conditions: {
+        StringEquals: { 'aws:RequestedRegion': cdk.Stack.of(this).region },
+      },
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameters'],
+      resources: [
+        `arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/workstation/config/*`,
+        `arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter/workstation/frontend/*`,
+      ],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:DescribeInstanceInformation'],
+      resources: ['*'],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['cognito-idp:GetGroup', 'cognito-idp:ListUsersInGroup'],
+      resources: [userPool.userPoolArn],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['servicequotas:GetServiceQuota'],
+      resources: ['*'],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['budgets:ViewBudget'],
+      resources: ['*'],
+    }));
+    deploymentDoctorServiceFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['events:DescribeRule'],
+      resources: [
+        `arn:aws:events:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:rule/MediaWorkstation-AutoTerminationCheck`,
+      ],
     }));
 
     // ============================================
@@ -737,13 +772,13 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     const groupManagementIntegration = new apigateway.LambdaIntegration(groupManagementServiceFunction, integrationOptions);
     const securityGroupIntegration = new apigateway.LambdaIntegration(securityGroupServiceFunction, integrationOptions);
     const amiValidationIntegration = new apigateway.LambdaIntegration(amiValidationServiceFunction, integrationOptions);
-    const instanceTypeIntegration = new apigateway.LambdaIntegration(instanceTypeServiceFunction, integrationOptions);
     const bootstrapConfigIntegration = new apigateway.LambdaIntegration(bootstrapConfigServiceFunction, integrationOptions);
     const groupPackageIntegration = new apigateway.LambdaIntegration(groupPackageServiceFunction, integrationOptions);
     const storageIntegration = new apigateway.LambdaIntegration(storageServiceFunction, integrationOptions);
     const ec2DiscoveryIntegration = new apigateway.LambdaIntegration(ec2DiscoveryServiceFunction, integrationOptions);
     const instanceFamilyIntegration = new apigateway.LambdaIntegration(instanceFamilyServiceFunction, integrationOptions);
     const userManagementIntegration = new apigateway.LambdaIntegration(userManagementServiceFunction, integrationOptions);
+    const deploymentDoctorIntegration = new apigateway.LambdaIntegration(deploymentDoctorServiceFunction, integrationOptions);
 
     // ============================================
     // API Resources and Methods
@@ -919,16 +954,6 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     validateAmiResource.addMethod('GET', amiValidationIntegration, authorizedMethodOptions);
     validateAmiResource.addMethod('POST', amiValidationIntegration, authorizedMethodOptions);
 
-    // /instance-types resource
-    const instanceTypesResource = this.adminApi.root.addResource('instance-types');
-    instanceTypesResource.addMethod('GET', instanceTypeIntegration, authorizedMethodOptions);
-    instanceTypesResource.addMethod('PUT', instanceTypeIntegration, authorizedMethodOptions);
-
-    // /instance-types/discover
-    const discoverInstanceTypesResource = instanceTypesResource.addResource('discover');
-    discoverInstanceTypesResource.addMethod('POST', instanceTypeIntegration, authorizedMethodOptions);
-    discoverInstanceTypesResource.addMethod('GET', instanceTypeIntegration, authorizedMethodOptions);
-
     // /bootstrap-packages resource
     const bootstrapPackagesResource = this.adminApi.root.addResource('bootstrap-packages');
     bootstrapPackagesResource.addMethod('GET', bootstrapConfigIntegration, authorizedMethodOptions);
@@ -1045,6 +1070,12 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     instanceFamiliesResource.addMethod('GET', instanceFamilyIntegration, authorizedMethodOptions);
     instanceFamiliesResource.addMethod('POST', instanceFamilyIntegration, authorizedMethodOptions);
 
+    // /admin/deployment-doctor - read-only deployed environment diagnostics.
+    // API Gateway verifies token identity; the handler separately requires
+    // exact membership in the workstation-admin Cognito group.
+    const deploymentDoctorResource = adminResource.addResource('deployment-doctor');
+    deploymentDoctorResource.addMethod('GET', deploymentDoctorIntegration, authorizedMethodOptions);
+
     // ============================================
     // Outputs
     // ============================================
@@ -1052,13 +1083,13 @@ export class WorkstationAdminApiStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AdminApiUrl', {
       value: this.adminApi.url,
       description: 'Admin API Gateway URL',
-      exportName: 'WorkstationAdminApiUrl',
+      exportName: resourceName('WorkstationAdminApiUrl'),
     });
 
     new cdk.CfnOutput(this, 'AdminApiId', {
       value: this.adminApi.restApiId,
       description: 'Admin API Gateway ID',
-      exportName: 'WorkstationAdminApiId',
+      exportName: resourceName('WorkstationAdminApiId'),
     });
   }
 }

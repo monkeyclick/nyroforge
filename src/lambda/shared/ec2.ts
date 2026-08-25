@@ -1,4 +1,4 @@
-import { DescribeInstancesCommand, EC2Client, Filter, Instance } from '@aws-sdk/client-ec2';
+import { DescribeInstancesCommand, DescribeInstanceTypesCommand, EC2Client, Filter, Instance, InstanceTypeInfo as Ec2InstanceTypeInfo } from '@aws-sdk/client-ec2';
 
 /**
  * Shared EC2 DescribeInstances helpers.
@@ -57,4 +57,40 @@ export async function describeInstancesByFilters(
     nextToken = result.NextToken;
   } while (nextToken);
   return instances;
+}
+
+/** DescribeInstanceTypes rejects more than 100 values in a single filter. */
+const INSTANCE_TYPES_CHUNK_SIZE = 100;
+
+/**
+ * Describe instance types by name without letting one unavailable type poison
+ * the batch, and without hitting EC2's 100-item list limit. Uses an
+ * `instance-type` filter (rather than the `InstanceTypes` list param) for the
+ * same reason describeInstancesByIds uses an instance-id filter: the strict
+ * list param throws InvalidInstanceType for the WHOLE call if any single
+ * entry isn't sold in the caller's region (e.g. legacy families like `dl1`/
+ * `p3` aren't offered everywhere) — a real failure hit expanding an
+ * admin-selected family list that covers everything from GPU to burstable
+ * families. The filter form just omits types that don't match instead.
+ * Also chunked to stay under the 100-value filter limit, and follows
+ * NextToken in case a chunk spans more than one page.
+ */
+export async function describeInstanceTypesBatched(
+  client: EC2Client,
+  instanceTypes: string[]
+): Promise<Ec2InstanceTypeInfo[]> {
+  const results: Ec2InstanceTypeInfo[] = [];
+  for (let i = 0; i < instanceTypes.length; i += INSTANCE_TYPES_CHUNK_SIZE) {
+    const chunk = instanceTypes.slice(i, i + INSTANCE_TYPES_CHUNK_SIZE);
+    let nextToken: string | undefined;
+    do {
+      const result = await client.send(new DescribeInstanceTypesCommand({
+        Filters: [{ Name: 'instance-type', Values: chunk }],
+        NextToken: nextToken,
+      }));
+      results.push(...(result.InstanceTypes || []));
+      nextToken = result.NextToken;
+    } while (nextToken);
+  }
+  return results;
 }

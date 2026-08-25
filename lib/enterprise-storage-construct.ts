@@ -16,6 +16,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as backup from 'aws-cdk-lib/aws-backup';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
+import { resourceName } from './constants';
 
 //==============================================================================
 // Type Definitions & Interfaces
@@ -497,7 +498,7 @@ export class EnterpriseStorageConstruct extends Construct {
     }));
     
     new kms.Alias(this, 'StorageKmsKeyAlias', {
-      aliasName: `alias/${this.projectName}-storage`,
+      aliasName: `alias/${resourceName(this.projectName)}-storage`,
       targetKey: key,
     });
     
@@ -510,7 +511,7 @@ export class EnterpriseStorageConstruct extends Construct {
   
   private createAlarmTopic(props: EnterpriseStorageProps): sns.Topic {
     const topic = new sns.Topic(this, 'StorageAlarmTopic', {
-      topicName: `${this.projectName}-storage-alarms`,
+      topicName: resourceName(`${this.projectName}-storage-alarms`),
       displayName: `${this.projectName} Storage Alarms`,
     });
     
@@ -1029,7 +1030,7 @@ export class EnterpriseStorageConstruct extends Construct {
     let logsBucket: s3.Bucket | undefined;
     if (config.enableAccessLogging !== false) {
       logsBucket = new s3.Bucket(this, 'TransferLogsBucket', {
-        bucketName: `${this.projectName}-transfer-logs-${cdk.Stack.of(this).account}`,
+        bucketName: resourceName(`${this.projectName}-transfer-logs-${cdk.Stack.of(this).account}`).toLowerCase(),
         encryption: s3.BucketEncryption.S3_MANAGED,
         blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
         enforceSSL: true,
@@ -1087,7 +1088,7 @@ export class EnterpriseStorageConstruct extends Construct {
     }
     
     const bucket = new s3.Bucket(this, 'TransferBucket', {
-      bucketName: `${this.projectName}-transfer-${cdk.Stack.of(this).account}`,
+      bucketName: resourceName(`${this.projectName}-transfer-${cdk.Stack.of(this).account}`).toLowerCase(),
       encryption: s3.BucketEncryption.KMS,
       encryptionKey: this.kmsKey,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -1330,7 +1331,7 @@ export class EnterpriseStorageConstruct extends Construct {
     }
     
     return new cloudwatch.Dashboard(this, 'StorageDashboard', {
-      dashboardName: `${this.projectName}-storage`,
+      dashboardName: resourceName(`${this.projectName}-storage`),
       widgets: widgets.length > 0 ? [widgets] : undefined,
     });
   }
@@ -1391,14 +1392,14 @@ export class EnterpriseStorageConstruct extends Construct {
     new cdk.CfnOutput(this, 'StorageSecurityGroupId', {
       value: this.outputs.storageSecurityGroup.securityGroupId,
       description: 'Security group ID for storage access',
-      exportName: `${this.projectName}-StorageSecurityGroupId`,
+      exportName: resourceName(`${this.projectName}-StorageSecurityGroupId`),
     });
     
     if (this.outputs.efsFileSystem) {
       new cdk.CfnOutput(this, 'EfsFileSystemId', {
         value: this.outputs.efsFileSystem.fileSystemId,
         description: 'EFS File System ID',
-        exportName: `${this.projectName}-EfsFileSystemId`,
+        exportName: resourceName(`${this.projectName}-EfsFileSystemId`),
       });
     }
     
@@ -1406,7 +1407,7 @@ export class EnterpriseStorageConstruct extends Construct {
       new cdk.CfnOutput(this, 'FsxWindowsFileSystemId', {
         value: this.outputs.fsxWindowsFileSystem.ref,
         description: 'FSx Windows File System ID',
-        exportName: `${this.projectName}-FsxWindowsId`,
+        exportName: resourceName(`${this.projectName}-FsxWindowsId`),
       });
     }
     
@@ -1414,7 +1415,7 @@ export class EnterpriseStorageConstruct extends Construct {
       new cdk.CfnOutput(this, 'FsxLustreFileSystemId', {
         value: this.outputs.fsxLustreFileSystem.ref,
         description: 'FSx Lustre File System ID',
-        exportName: `${this.projectName}-FsxLustreId`,
+        exportName: resourceName(`${this.projectName}-FsxLustreId`),
       });
     }
     
@@ -1422,7 +1423,7 @@ export class EnterpriseStorageConstruct extends Construct {
       new cdk.CfnOutput(this, 'FsxOntapFileSystemId', {
         value: this.outputs.fsxOntapFileSystem.ref,
         description: 'FSx ONTAP File System ID',
-        exportName: `${this.projectName}-FsxOntapId`,
+        exportName: resourceName(`${this.projectName}-FsxOntapId`),
       });
     }
     
@@ -1430,7 +1431,7 @@ export class EnterpriseStorageConstruct extends Construct {
       new cdk.CfnOutput(this, 'FsxOpenZfsFileSystemId', {
         value: this.outputs.fsxOpenZfsFileSystem.ref,
         description: 'FSx OpenZFS File System ID',
-        exportName: `${this.projectName}-FsxOpenZfsId`,
+        exportName: resourceName(`${this.projectName}-FsxOpenZfsId`),
       });
     }
     
@@ -1438,7 +1439,7 @@ export class EnterpriseStorageConstruct extends Construct {
       new cdk.CfnOutput(this, 'TransferBucketName', {
         value: this.outputs.transferBucket.bucketName,
         description: 'S3 Transfer Bucket Name',
-        exportName: `${this.projectName}-TransferBucketName`,
+        exportName: resourceName(`${this.projectName}-TransferBucketName`),
       });
     }
   }

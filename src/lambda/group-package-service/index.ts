@@ -94,13 +94,26 @@ async function requireWorkstationAccess(event: any, workstationId: string): Prom
  */
 const REGION = process.env.AWS_REGION || 'us-west-2';
 
-/** Both key shapes for an instance: current ARN form, then the legacy bare id. */
-function queuePartitionKeys(instanceId: string, accountId: string): string[] {
-  const keys = [queuePartitionKey(instanceArn(REGION, accountId, instanceId))];
-  // Rows written before the ARN re-keying live up to 30 days under the table
-  // TTL; keep reading them until they age out.
-  keys.push(legacyQueuePartitionKey(instanceId));
-  return keys;
+/**
+ * Every key shape a queue row for this workstation might carry: the current
+ * ARN form first, then the two legacy ones.
+ *
+ * Rows written before the ARN re-keying live up to 30 days under the table
+ * TTL, so both older shapes stay readable until they age out:
+ *   - `workstation#{instanceId}` — what ec2-management wrote originally.
+ *   - `WORKSTATION#{workstationId}` — what this service wrote, and what
+ *     ec2-management was changed to write on main before the two fixes met.
+ */
+function queuePartitionKeys(
+  instanceId: string,
+  workstationId: string,
+  accountId: string
+): string[] {
+  return [
+    queuePartitionKey(instanceArn(REGION, accountId, instanceId)),
+    legacyQueuePartitionKey(instanceId),
+    `WORKSTATION#${workstationId}`,
+  ];
 }
 
 function resolveAccountId(event: any): string {
@@ -127,10 +140,14 @@ async function resolveInstanceId(workstationId: string): Promise<string | null> 
   }
 }
 
-/** Read every queue row for an instance across both key shapes. */
-async function readQueueItems(instanceId: string, accountId: string): Promise<any[]> {
+/** Read every queue row for a workstation across all three key shapes. */
+async function readQueueItems(
+  instanceId: string,
+  workstationId: string,
+  accountId: string
+): Promise<any[]> {
   const results = await Promise.all(
-    queuePartitionKeys(instanceId, accountId).map((pk) =>
+    queuePartitionKeys(instanceId, workstationId, accountId).map((pk) =>
       queryAllItems(dynamodb, {
         TableName: QUEUE_TABLE,
         KeyConditionExpression: 'PK = :pk',
@@ -151,10 +168,11 @@ async function readQueueItems(instanceId: string, accountId: string): Promise<an
  */
 async function findQueueItem(
   instanceId: string,
+  workstationId: string,
   packageId: string,
   accountId: string
 ): Promise<any | null> {
-  const items = await readQueueItems(instanceId, accountId);
+  const items = await readQueueItems(instanceId, workstationId, accountId);
   return items.find((item: any) => item.packageId === packageId) || null;
 }
 
@@ -405,7 +423,7 @@ async function getPackageInstallationStatus(workstationId: string, accountId: st
     // large queue nor a pre-re-keying row goes missing. No SK filter — the
     // partition holds only package rows, and their sort keys come in more than
     // one historical shape.
-    const packages = await readQueueItems(instanceId, accountId);
+    const packages = await readQueueItems(instanceId, workstationId, accountId);
 
     // Calculate summary
     const summary = {
@@ -448,7 +466,7 @@ async function retryPackageInstallation(workstationId: string, packageId: string
         body: JSON.stringify({ error: 'Workstation not found' })
       };
     }
-    const existing = await findQueueItem(instanceId, packageId, accountId);
+    const existing = await findQueueItem(instanceId, workstationId, packageId, accountId);
     if (!existing) {
       return {
         statusCode: 404,
@@ -848,7 +866,7 @@ async function removeQueuedPackage(workstationId: string, packageId: string, acc
         body: JSON.stringify({ error: 'Workstation not found' })
       };
     }
-    const existing = await findQueueItem(instanceId, packageId, accountId);
+    const existing = await findQueueItem(instanceId, workstationId, packageId, accountId);
     if (!existing) {
       return {
         statusCode: 404,
